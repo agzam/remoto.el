@@ -419,7 +419,7 @@
       (remoto--search-repos "torvalds")
       (expect call-count :to-equal 1)))
 
-  (it "filters cached results when query extends a previous one"
+  (it "filters cached results when query narrows past a slash"
     (let ((remoto--search-cache (make-hash-table :test 'equal))
           (call-count 0))
       (spy-on 'remoto--api :and-call-fake
@@ -431,7 +431,7 @@
       ;; First call hits the API
       (let ((results (remoto--search-repos "agzam")))
         (expect (length results) :to-equal 3))
-      ;; Extended query filters cached results, no new API call
+      ;; Query with slash filters cached results, no new API call
       (let ((results (remoto--search-repos "agzam/spa")))
         (expect results :to-equal '("agzam/spacehammer"))
         (expect call-count :to-equal 1))
@@ -443,6 +443,19 @@
       (let ((results (remoto--search-repos "agzam/zzz")))
         (expect results :to-be nil)
         (expect call-count :to-equal 1))))
+
+  (it "does not filter from short prefix cache without slash"
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (call-count 0))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_endpoint)
+                (setq call-count (1+ call-count))
+                '((items . (((full_name . "agzam/spacehammer")))))))
+      ;; "agz" hits the API
+      (remoto--search-repos "agz")
+      ;; "agzam" should NOT filter from "agz" cache - different search
+      (remoto--search-repos "agzam")
+      (expect call-count :to-equal 2)))
 
   (it "returns nil on API errors"
     (spy-on 'remoto--api :and-call-fake

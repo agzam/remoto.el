@@ -789,23 +789,26 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
 (defun remoto--search-repos (query)
   "Search GitHub repositories matching QUERY.
 Returns a list of owner/repo strings.  Requires at least 3 characters.
-When QUERY extends a previously cached query, filters cached results
-client-side instead of making a new API call."
+When QUERY contains a slash and extends a cached query that covers the
+full owner part, filters cached results client-side.  Otherwise hits
+the API for fresh results."
   (if (< (length query) 3)
       nil
     (or (gethash query remoto--search-cache)
-        (let ((parent-results
-               (cl-loop for key being the hash-keys of remoto--search-cache
-                        using (hash-values results)
-                        when (and (string-prefix-p key query)
-                                  (< (length key) (length query))
-                                  results)
-                        return results)))
+        ;; Only filter from cache when narrowing within an owner's repos
+        (let* ((slash-pos (string-search "/" query))
+               (parent-results
+                (when slash-pos
+                  (cl-loop for key being the hash-keys of remoto--search-cache
+                           using (hash-values results)
+                           when (and (string-prefix-p key query)
+                                     (<= slash-pos (length key))
+                                     (< (length key) (length query))
+                                     results)
+                           return results))))
           (if parent-results
-              ;; Filter cached superset client-side
               (seq-filter (lambda (name) (string-prefix-p query name))
                           parent-results)
-            ;; No cached prefix - fetch from API
             (condition-case nil
                 (let* ((endpoint (format "search/repositories?q=%s&per_page=30"
                                          (url-hexify-string query)))
