@@ -193,7 +193,7 @@ Returns a hash table of path -> plist with keys :type :size :sha :mode."
          ;; Strip trailing slash
          (path (if (and (not (string-empty-p path))
                         (string-suffix-p "/" path))
-                   (substring path 0 -1)
+                   (substring path 0 (1- (length path)))
                  path)))
     (gethash path tree)))
 
@@ -207,7 +207,7 @@ Returns list of (NAME . PLIST) for each child."
                        (substring dir-path 1) dir-path))
          (dir-path (if (and (not (string-empty-p dir-path))
                             (string-suffix-p "/" dir-path))
-                       (substring dir-path 0 -1)
+                       (substring dir-path 0 (1- (length dir-path)))
                      dir-path))
          (prefix (if (string-empty-p dir-path) "" (concat dir-path "/")))
          (prefix-len (length prefix)))
@@ -584,7 +584,7 @@ Pass DIR-FLAG and SUFFIX through to `make-temp-file'."
   (if (and (string-suffix-p "/" directory)
            ;; Don't strip the / after the colon in /github:o/r@ref:/
            (not (string-suffix-p ":/" directory)))
-      (substring directory 0 -1)
+      (substring directory 0 (1- (length directory)))
     directory))
 
 (defun remoto--handle-file-name-case-insensitive-p (_filename)

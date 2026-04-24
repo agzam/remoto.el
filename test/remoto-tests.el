@@ -13,21 +13,21 @@
 ;;; Helpers
 
 (defvar remoto-test--mock-tree
-  '(("README.md" . (:type "blob" :size 500 :sha "aaa" :mode "100644"))
-    ("src" . (:type "tree" :size 0 :sha "bbb" :mode "040000"))
-    ("src/main.el" . (:type "blob" :size 1234 :sha "ccc" :mode "100644"))
-    ("src/utils.el" . (:type "blob" :size 567 :sha "ddd" :mode "100644"))
-    ("bin/run" . (:type "blob" :size 42 :sha "eee" :mode "100755"))
-    ("bin" . (:type "tree" :size 0 :sha "fff" :mode "040000"))
-    ("" . (:type "tree" :size 0 :sha "" :mode "040000"))
-    ("/" . (:type "tree" :size 0 :sha "" :mode "040000")))
+  '(("README.md" (:type "blob" :size 500 :sha "aaa" :mode "100644"))
+    ("src" (:type "tree" :size 0 :sha "bbb" :mode "040000"))
+    ("src/main.el" (:type "blob" :size 1234 :sha "ccc" :mode "100644"))
+    ("src/utils.el" (:type "blob" :size 567 :sha "ddd" :mode "100644"))
+    ("bin/run" (:type "blob" :size 42 :sha "eee" :mode "100755"))
+    ("bin" (:type "tree" :size 0 :sha "fff" :mode "040000"))
+    ("" (:type "tree" :size 0 :sha "" :mode "040000"))
+    ("/" (:type "tree" :size 0 :sha "" :mode "040000")))
   "Mock tree data for tests.")
 
 (defun remoto-test--install-mock-tree ()
   "Install mock tree into the cache."
   (let ((table (make-hash-table :test 'equal)))
     (dolist (entry remoto-test--mock-tree)
-      (puthash (car entry) (cdr entry) table))
+      (puthash (car entry) (cadr entry) table))
     (puthash "testowner/testrepo@main" table remoto--tree-cache)))
 
 (defmacro remoto-test-with-cache (&rest body)
@@ -134,25 +134,29 @@
 (describe "remoto--tree-entry"
   (it "finds a file entry"
     (remoto-test-with-cache
-      (let ((entry (remoto--tree-entry
-                    (remoto--parse-path "/github:testowner/testrepo@main:/README.md"))))
+      (let* ((entry (remoto--tree-entry
+                     (remoto--parse-path "/github:testowner/testrepo@main:/README.md")))
+             (entry-type (plist-get entry :type))
+             (entry-size (plist-get entry :size)))
         (expect entry :to-be-truthy)
-        (expect (plist-get entry :type) :to-equal "blob")
-        (expect (plist-get entry :size) :to-equal 500))))
+        (expect entry-type :to-equal "blob")
+        (expect entry-size :to-equal 500))))
 
   (it "finds a directory entry"
     (remoto-test-with-cache
-      (let ((entry (remoto--tree-entry
-                    (remoto--parse-path "/github:testowner/testrepo@main:/src"))))
+      (let* ((entry (remoto--tree-entry
+                     (remoto--parse-path "/github:testowner/testrepo@main:/src")))
+             (entry-type (plist-get entry :type)))
         (expect entry :to-be-truthy)
-        (expect (plist-get entry :type) :to-equal "tree"))))
+        (expect entry-type :to-equal "tree"))))
 
   (it "finds root entry"
     (remoto-test-with-cache
-      (let ((entry (remoto--tree-entry
-                    (remoto--parse-path "/github:testowner/testrepo@main:/"))))
+      (let* ((entry (remoto--tree-entry
+                     (remoto--parse-path "/github:testowner/testrepo@main:/")))
+             (entry-type (plist-get entry :type)))
         (expect entry :to-be-truthy)
-        (expect (plist-get entry :type) :to-equal "tree"))))
+        (expect entry-type :to-equal "tree"))))
 
   (it "returns nil for nonexistent paths"
     (remoto-test-with-cache
