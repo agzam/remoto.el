@@ -1,14 +1,18 @@
 ;;; remoto.el --- Browse GitHub repos without cloning -*- lexical-binding: t; -*-
-
+;;
 ;; Copyright (C) 2025 Ag Ibragimov
-
-;; Author: Ag Ibragimov
-;; URL: https://github.com/agzam/remoto.el
+;;
+;; Author: Ag Ibragimov <agzam.ibragimov@gmail.com>
+;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
+;; Created: April 24, 2026
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools vc
-
-;; This file is NOT part of GNU Emacs.
+;; Homepage: https://github.com/agzam/remoto.el
+;; Package-Requires: ((emacs "29.1"))
+;;
+;; SPDX-License-Identifier: GPL-3.0-or-later
+;;
+;; This file is not part of GNU Emacs.
 
 ;;; Commentary:
 

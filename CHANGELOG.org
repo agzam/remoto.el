@@ -1,0 +1,19 @@
+#+TITLE: remoto.el changelog
+#+AUTHOR: Ag Ibragimov
+
+Changes to the project, following Keep a Changelog conventions.
+
+* [0.1.0] - 2026-04-24
+
+** Added
+- Initial implementation of virtual filesystem for GitHub repos.
+- Path parser for canonical ~/github:owner/repo@ref:/path~ format.
+- User-facing URL parser accepting GitHub URLs, git remotes, owner/repo shorthand.
+- Tree cache using Git Trees API (single call per repo).
+- File content fetching via Contents/Blobs API with sha-based caching.
+- Dired integration with ~dired-subtree~ compatibility.
+- Read-only enforcement for all write operations.
+- ~remoto-browse~ command as the main entry point.
+- ~remoto-refresh~ command for cache invalidation.
+- ~remoto-copy-github-url~ for reverse URL mapping.
+- Transparent ~dired~ / ~find-file~ advice for GitHub URL rewriting.

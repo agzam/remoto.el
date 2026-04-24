@@ -1,0 +1,88 @@
+#+TITLE: remoto.el
+
+[[https://github.com/agzam/remoto.el/actions/workflows/run-tests.yml][https://github.com/agzam/remoto.el/actions/workflows/run-tests.yml/badge.svg]]
+
+#+begin_quote
+El Remoto - browse any GitHub repository in Emacs without cloning it.
+#+end_quote
+
+* What
+
+remoto.el registers a virtual filesystem via ~file-name-handler-alist~ that translates standard Emacs file operations into GitHub API calls via the ~gh~ CLI. The result: ~find-file~, ~dired~, tab-completion, ~dired-subtree~ - all standard Emacs file tooling works against a remote GitHub repo. Read-only.
+
+* Why
+
+Sometimes you just want to look at code. Check a function signature, read a README, browse a project structure. Cloning a repo for that is overkill - it takes disk space, creates another directory to manage, and breaks your flow.
+
+* Install
+
+Requires [[https://cli.github.com][gh CLI]] installed and authenticated (~gh auth login~).
+
+** use-package + straight
+
+#+begin_src emacs-lisp
+(use-package remoto
+  :straight (:host github :repo "agzam/remoto.el"))
+#+end_src
+
+** Doom Emacs
+
+#+begin_src emacs-lisp
+;; packages.el
+(package! remoto :recipe (:host github :repo "agzam/remoto.el"))
+#+end_src
+
+* Usage
+
+** remoto-browse
+
+The main entry point. Accepts any GitHub URL format:
+
+#+begin_src emacs-lisp
+M-x remoto-browse RET https://github.com/torvalds/linux RET
+M-x remoto-browse RET git@github.com:torvalds/linux.git RET
+M-x remoto-browse RET torvalds/linux RET
+#+end_src
+
+** C-x d / C-x C-f
+
+GitHub URLs are detected automatically in ~dired~ and ~find-file~:
+
+#+begin_src emacs-lisp
+C-x d /github.com/torvalds/linux RET
+C-x C-f https://github.com/torvalds/linux/blob/master/README RET
+#+end_src
+
+** Canonical paths
+
+The virtual filesystem uses paths of the form:
+
+#+begin_example
+/github:OWNER/REPO@REF:/PATH
+#+end_example
+
+~REF~ is optional - omitting it uses the repo's default branch.
+
+** Commands
+
+| Command                  | Description                                            |
+|--------------------------+--------------------------------------------------------|
+| ~remoto-browse~          | Prompt for a repo, open dired at root                  |
+| ~remoto-refresh~         | Clear tree cache for current repo, re-fetch            |
+| ~remoto-copy-github-url~ | Copy ~github.com~ URL for current file/line to kill ring |
+
+* How it works
+
+1. On first access to any file in a repo, the full directory tree is fetched via the Git Trees API (one HTTP call).
+2. Directory listings, ~file-exists-p~, completions - all served from the cached tree in memory.
+3. File contents are fetched on demand when you actually open a file.
+4. Content is cached by SHA, so re-opening the same file is instant.
+5. Authentication, SSO, private repos - all handled transparently by ~gh~.
+
+* Limitations
+
+- Read-only. No commits, no pushes, no file modifications.
+- No git operations (log, blame, diff).
+- Timestamps in dired are synthetic (the tree API has no timestamps).
+- Very large repos (100k+ files) use slower per-directory fetching.
+- Rate limit: 5,000 requests/hour (normal browsing stays well within this).
