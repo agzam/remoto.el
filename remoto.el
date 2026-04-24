@@ -786,6 +786,19 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
 (defvar remoto--search-cache (make-hash-table :test 'equal)
   "Cache: query string -> list of owner/repo results.")
 
+(defun remoto--search-query (input)
+  "Build a GitHub search query string from INPUT.
+When INPUT contains a slash, searches within that owner's repos.
+Otherwise treats INPUT as an owner name."
+  (let ((slash-pos (string-search "/" input)))
+    (if slash-pos
+        (let ((owner (substring input 0 slash-pos))
+              (repo-part (substring input (1+ slash-pos))))
+          (if (string-empty-p repo-part)
+              (format "user:%s" owner)
+            (format "%s in:name user:%s" repo-part owner)))
+      (format "user:%s" input))))
+
 (defun remoto--search-repos (query)
   "Search GitHub repositories matching QUERY.
 Returns a list of owner/repo strings.  Requires at least 3 characters.
@@ -811,7 +824,8 @@ the API for fresh results."
                           parent-results)
             (condition-case nil
                 (let* ((endpoint (format "search/repositories?q=%s&per_page=30"
-                                         (url-hexify-string query)))
+                                         (url-hexify-string
+                                          (remoto--search-query query))))
                        (data (remoto--api endpoint))
                        (items (alist-get 'items data))
                        (results (mapcar (lambda (item)

@@ -400,6 +400,11 @@
     (expect (remoto--search-repos "") :to-be nil)
     (expect (remoto--search-repos "ab") :to-be nil))
 
+  (it "builds search query with user qualifier"
+    (expect (remoto--search-query "torvalds") :to-equal "user:torvalds")
+    (expect (remoto--search-query "torvalds/") :to-equal "user:torvalds")
+    (expect (remoto--search-query "torvalds/lin") :to-equal "lin in:name user:torvalds"))
+
   (it "parses search API response into owner/repo list"
     (spy-on 'remoto--api :and-return-value
             '((items . (((full_name . "torvalds/linux"))
