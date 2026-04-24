@@ -470,10 +470,27 @@
       (expect (remoto--search-repos "torvalds") :to-be nil))))
 
 (describe "remoto--read-repo"
-  (it "uses completing-read when consult is not loaded"
+  (it "passes URLs straight through without consult"
     (spy-on 'featurep :and-call-fake
             (lambda (feature &rest _)
               (not (eq feature 'consult))))
+    (spy-on 'read-string :and-return-value "https://github.com/torvalds/linux")
+    (expect (remoto--read-repo) :to-equal "https://github.com/torvalds/linux"))
+
+  (it "passes owner/repo straight through without consult"
+    (spy-on 'featurep :and-call-fake
+            (lambda (feature &rest _)
+              (not (eq feature 'consult))))
+    (spy-on 'read-string :and-return-value "torvalds/linux")
+    (expect (remoto--read-repo) :to-equal "torvalds/linux"))
+
+  (it "searches and prompts for bare owner without consult"
+    (spy-on 'featurep :and-call-fake
+            (lambda (feature &rest _)
+              (not (eq feature 'consult))))
+    (spy-on 'read-string :and-return-value "torvalds")
+    (spy-on 'remoto--search-repos :and-return-value
+            '("torvalds/linux" "torvalds/subsurface"))
     (spy-on 'completing-read :and-return-value "torvalds/linux")
     (expect (remoto--read-repo) :to-equal "torvalds/linux")
     (expect 'completing-read :to-have-been-called))

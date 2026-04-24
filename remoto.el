@@ -840,8 +840,9 @@ the API for fresh results."
 
 (defun remoto--read-repo ()
   "Read a GitHub repo from the minibuffer with search completion.
-Uses `consult--read' with dynamic collection when consult is loaded,
-otherwise falls back to `completing-read'."
+Uses `consult--read' with async dynamic collection when consult is
+loaded.  Otherwise uses a two-step prompt: type a search query, then
+pick from results.  URLs and owner/repo shorthand bypass search."
   (if (and (featurep 'consult)
            (fboundp 'consult--read)
            (fboundp 'consult--dynamic-collection))
@@ -851,9 +852,19 @@ otherwise falls back to `completing-read'."
        :require-match nil
        :sort nil
        :history 'remoto--browse-history)
-    (completing-read "GitHub repo (URL or owner/repo): "
-                     (completion-table-dynamic #'remoto--search-repos)
-                     nil nil nil 'remoto--browse-history)))
+    (let ((input (read-string "GitHub repo (owner, owner/repo, or URL): "
+                              nil 'remoto--browse-history)))
+      ;; URLs and owner/repo go straight through
+      (if (or (string-match-p "https?://" input)
+              (string-match-p "git@" input)
+              (string-match-p "/" input))
+          input
+        ;; Bare name - search and let user pick
+        (let ((results (remoto--search-repos input)))
+          (if results
+              (completing-read "Select repo: " results nil t nil
+                               'remoto--browse-history)
+            (user-error "Remoto: no repos found for: %s" input)))))))
 
 ;;;###autoload
 (defun remoto-browse (input)
