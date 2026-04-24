@@ -1,4 +1,6 @@
-#+TITLE: remoto.el
+#+TITLE: El Remoto
+
+#+HTML: <p align="center"><img src="./test/el-remoto-logo.png" alt="El Remoto logo"/></p>
 
 [[https://github.com/agzam/remoto.el/actions/workflows/run-tests.yml][https://github.com/agzam/remoto.el/actions/workflows/run-tests.yml/badge.svg]]
 
