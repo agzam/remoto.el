@@ -152,7 +152,8 @@ Returns a hash table of path -> plist with keys :type :size :sha :mode."
          (truncated (alist-get 'truncated data))
          (table (make-hash-table :test 'equal :size (length entries))))
     (when (eq truncated t)
-      (message "remoto: tree truncated for %s/%s@%s, large repo support limited"
+      (puthash "\0truncated" t table)
+      (message "remoto: tree truncated for %s/%s@%s, fetching dirs on demand"
                owner repo ref))
     ;; Root entry
     (puthash "" remoto--dir-entry table)
@@ -186,6 +187,38 @@ Returns a hash table of path -> plist with keys :type :size :sha :mode."
           (puthash key tree remoto--tree-cache)
           tree))))
 
+(defun remoto--fetch-directory-contents (parsed dir-key tree)
+  "Fetch DIR-KEY via Contents API for PARSED repo, merge into TREE.
+On-demand fallback for repos whose recursive tree was truncated."
+  (let* ((resolved (remoto--resolve-ref parsed))
+         (endpoint (if (string-empty-p dir-key)
+                       (format "repos/%s/%s/contents?ref=%s"
+                               (remoto-path-owner resolved)
+                               (remoto-path-repo resolved)
+                               (remoto-path-ref resolved))
+                     (format "repos/%s/%s/contents/%s?ref=%s"
+                             (remoto-path-owner resolved)
+                             (remoto-path-repo resolved)
+                             (url-hexify-string dir-key)
+                             (remoto-path-ref resolved))))
+         (data (condition-case nil
+                   (remoto--api endpoint)
+                 (user-error nil))))
+    (puthash (concat "\0fetched:" dir-key) t tree)
+    ;; Contents API returns a list of alists for directories
+    (when (and (consp data) (consp (caar data)))
+      (dolist (entry data)
+        (let* ((path (alist-get 'path entry))
+               (api-type (alist-get 'type entry))
+               (type (if (equal api-type "dir") "tree" "blob"))
+               (plist (list :type type
+                            :size (or (alist-get 'size entry) 0)
+                            :sha (or (alist-get 'sha entry) "")
+                            :mode (if (equal type "tree") "040000" "100644"))))
+          ;; Keep existing entries from Trees API (they have richer mode info)
+          (unless (gethash path tree)
+            (puthash path plist tree)))))))
+
 (defun remoto--tree-lookup-key (path)
   "Normalize PATH for tree hash-table lookup.
 Strips leading/trailing slashes and collapses runs of slashes."
@@ -198,16 +231,30 @@ Strips leading/trailing slashes and collapses runs of slashes."
     p))
 
 (defun remoto--tree-entry (parsed)
-  "Look up the tree entry for PARSED path.  Return plist or nil."
+  "Look up the tree entry for PARSED path.  Return plist or nil.
+For truncated trees, fetches the parent directory on demand."
   (let* ((tree (remoto--ensure-tree parsed))
          (key (remoto--tree-lookup-key (remoto-path-path parsed))))
-    (gethash key tree)))
+    (or (gethash key tree)
+        (when (and (gethash "\0truncated" tree)
+                   (not (string-empty-p key)))
+          (let ((parent (if (string-search "/" key)
+                            (remoto--tree-lookup-key
+                             (file-name-directory (directory-file-name key)))
+                          "")))
+            (unless (gethash (concat "\0fetched:" parent) tree)
+              (remoto--fetch-directory-contents parsed parent tree))
+            (gethash key tree))))))
 
 (defun remoto--tree-children (parsed)
   "List direct children of directory at PARSED path.
-Returns list of (NAME . PLIST) for each child."
+Returns list of (NAME . PLIST) for each child.
+For truncated trees, fetches the directory on demand."
   (let* ((tree (remoto--ensure-tree parsed))
          (dir-path (remoto--tree-lookup-key (remoto-path-path parsed)))
+         (_ (when (and (gethash "\0truncated" tree)
+                       (not (gethash (concat "\0fetched:" dir-path) tree)))
+              (remoto--fetch-directory-contents parsed dir-path tree)))
          (prefix (if (string-empty-p dir-path) "" (concat dir-path "/")))
          (prefix-len (length prefix)))
     (sort
@@ -734,11 +781,42 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
       (kill-new url)
       (message "Copied: %s" url))))
 
+;;;; Repository search
+
+(defvar remoto--search-cache (make-hash-table :test 'equal)
+  "Cache: query string -> list of owner/repo results.")
+
+(defun remoto--search-repos (query)
+  "Search GitHub repositories matching QUERY.
+Returns a list of owner/repo strings.  Requires at least 3 characters."
+  (if (< (length query) 3)
+      nil
+    (or (gethash query remoto--search-cache)
+        (condition-case nil
+            (let* ((endpoint (format "search/repositories?q=%s&per_page=30"
+                                     (url-hexify-string query)))
+                   (data (remoto--api endpoint))
+                   (items (alist-get 'items data))
+                   (results (mapcar (lambda (item)
+                                      (alist-get 'full_name item))
+                                    items)))
+              (puthash query results remoto--search-cache)
+              results)
+          (user-error nil)))))
+
+(defvar remoto--browse-history nil
+  "Minibuffer history for `remoto-browse'.")
+
 ;;;###autoload
 (defun remoto-browse (input)
   "Browse a GitHub repository without cloning.
-INPUT can be any GitHub URL, git remote URL, or owner/repo shorthand."
-  (interactive "sGitHub repo (URL or owner/repo): ")
+INPUT can be any GitHub URL, git remote URL, or owner/repo shorthand.
+With interactive use, provides search completion - type 3+ characters
+to search GitHub repositories."
+  (interactive
+   (list (completing-read "GitHub repo (URL or owner/repo): "
+                          (completion-table-dynamic #'remoto--search-repos)
+                          nil nil nil 'remoto--browse-history)))
   (let* ((parsed (remoto--parse-input input))
          (resolved (remoto--resolve-ref parsed))
          (canonical (remoto--canonical-path resolved)))

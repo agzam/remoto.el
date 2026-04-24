@@ -186,6 +186,90 @@
         (expect (length children) :to-equal 2)
         (expect (mapcar #'car children) :to-equal '("main.el" "utils.el"))))))
 
+;;; Truncated tree fallback
+
+(describe "truncated tree on-demand fetch"
+  (it "fetches parent directory for missing file entry"
+    (let ((remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal))
+          (remoto--content-cache (make-hash-table :test 'equal)))
+      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
+      ;; Simulate a truncated tree with only root and src dir
+      (let ((table (make-hash-table :test 'equal)))
+        (puthash "" '(:type "tree" :size 0 :sha "" :mode "040000") table)
+        (puthash "/" '(:type "tree" :size 0 :sha "" :mode "040000") table)
+        (puthash "src" '(:type "tree" :size 0 :sha "bbb" :mode "040000") table)
+        (puthash "\0truncated" t table)
+        (puthash "testowner/testrepo@main" table remoto--tree-cache))
+      ;; Mock the API call for on-demand fetch
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (endpoint)
+                (cond
+                 ((string-match-p "contents/src" endpoint)
+                  '(((name . "main.el") (path . "src/main.el")
+                     (type . "file") (size . 1234) (sha . "ccc"))
+                    ((name . "utils.el") (path . "src/utils.el")
+                     (type . "file") (size . 567) (sha . "ddd"))))
+                 (t nil))))
+      ;; Looking up src/main.el should trigger on-demand fetch
+      (let* ((entry (remoto--tree-entry
+                     (remoto--parse-path "/github:testowner/testrepo@main:/src/main.el")))
+             (entry-type (plist-get entry :type)))
+        (expect entry :to-be-truthy)
+        (expect entry-type :to-equal "blob")
+        (expect (plist-get entry :sha) :to-equal "ccc"))))
+
+  (it "fetches directory children on demand"
+    (let ((remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal))
+          (remoto--content-cache (make-hash-table :test 'equal)))
+      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
+      (let ((table (make-hash-table :test 'equal)))
+        (puthash "" '(:type "tree" :size 0 :sha "" :mode "040000") table)
+        (puthash "/" '(:type "tree" :size 0 :sha "" :mode "040000") table)
+        (puthash "src" '(:type "tree" :size 0 :sha "bbb" :mode "040000") table)
+        (puthash "\0truncated" t table)
+        (puthash "testowner/testrepo@main" table remoto--tree-cache))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (endpoint)
+                (cond
+                 ((string-match-p "contents/src" endpoint)
+                  '(((name . "main.el") (path . "src/main.el")
+                     (type . "file") (size . 1234) (sha . "ccc"))
+                    ((name . "utils.el") (path . "src/utils.el")
+                     (type . "file") (size . 567) (sha . "ddd"))))
+                 (t nil))))
+      (let ((children (remoto--tree-children
+                       (remoto--parse-path "/github:testowner/testrepo@main:/src/"))))
+        (expect (length children) :to-equal 2)
+        (expect (mapcar #'car children) :to-equal '("main.el" "utils.el")))))
+
+  (it "does not re-fetch already fetched directories"
+    (let ((remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal))
+          (remoto--content-cache (make-hash-table :test 'equal))
+          (api-call-count 0))
+      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
+      (let ((table (make-hash-table :test 'equal)))
+        (puthash "" '(:type "tree" :size 0 :sha "" :mode "040000") table)
+        (puthash "/" '(:type "tree" :size 0 :sha "" :mode "040000") table)
+        (puthash "src" '(:type "tree" :size 0 :sha "bbb" :mode "040000") table)
+        (puthash "\0truncated" t table)
+        (puthash "testowner/testrepo@main" table remoto--tree-cache))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (endpoint)
+                (when (string-match-p "contents/src" endpoint)
+                  (setq api-call-count (1+ api-call-count))
+                  '(((name . "main.el") (path . "src/main.el")
+                     (type . "file") (size . 1234) (sha . "ccc"))))))
+      ;; First access triggers fetch
+      (remoto--tree-entry
+       (remoto--parse-path "/github:testowner/testrepo@main:/src/main.el"))
+      ;; Second access should not re-fetch
+      (remoto--tree-entry
+       (remoto--parse-path "/github:testowner/testrepo@main:/src/main.el"))
+      (expect api-call-count :to-equal 1))))
+
 ;;; File operations via handler
 
 (describe "file operations"
