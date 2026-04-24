@@ -793,10 +793,11 @@ Otherwise return INPUT unchanged."
   "Rewrite GitHub URLs to canonical remoto paths for find-file."
   (apply orig-fn (remoto--maybe-rewrite filename) args))
 
-;;;###autoload
-(progn
-  (advice-add 'dired :around #'remoto--dired-around-a)
-  (advice-add 'find-file :around #'remoto--find-file-around-a)
+(unless (advice-member-p #'remoto--dired-around-a 'dired)
+  (advice-add 'dired :around #'remoto--dired-around-a))
+(unless (advice-member-p #'remoto--find-file-around-a 'find-file)
+  (advice-add 'find-file :around #'remoto--find-file-around-a))
+(unless (advice-member-p #'remoto--find-file-around-a 'find-file-noselect)
   (advice-add 'find-file-noselect :around #'remoto--find-file-around-a))
 
 ;;;; Handler registration
@@ -805,8 +806,8 @@ Otherwise return INPUT unchanged."
   (rx bos "/github:")
   "Regexp matching remoto file paths.")
 
-;;;###autoload
-(progn
+(unless (equal (cdr (assoc remoto--handler-regexp file-name-handler-alist))
+               #'remoto-file-name-handler)
   (push (cons remoto--handler-regexp #'remoto-file-name-handler)
         file-name-handler-alist))
 

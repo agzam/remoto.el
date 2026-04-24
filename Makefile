@@ -1,4 +1,4 @@
-.PHONY: help test deps check-compile compile clean
+.PHONY: help test deps check-autoloads check-compile compile clean
 
 define DEPS_SCRIPT
 (progn
@@ -15,8 +15,9 @@ help:
 	@echo "  make deps          Install dependencies"
 	@echo "  make test          Run the tests"
 	@echo "  make compile       Byte-compile the package"
-	@echo "  make check-compile Check for clean byte-compilation"
-	@echo "  make clean         Remove compiled files"
+	@echo "  make check-autoloads Generate and load autoloads"
+	@echo "  make check-compile  Check for clean byte-compilation"
+	@echo "  make clean          Remove compiled files"
 
 deps:
 	@echo "Installing dependencies"
@@ -27,7 +28,15 @@ test:
 	--eval '(add-to-list '\''load-path "..")' \
 	--funcall buttercup-run-discover
 
-check-compile: deps
+check-autoloads:
+	@echo "Generating and loading autoloads..."
+	rm -f remoto-autoloads.el
+	emacs -Q --batch \
+	--eval "(setq generated-autoload-file (expand-file-name \"remoto-autoloads.el\" \"$(CURDIR)\"))" \
+	--eval "(update-directory-autoloads \"$(CURDIR)\")" \
+	--eval "(load generated-autoload-file nil 'nomessage)"
+
+check-compile: deps check-autoloads
 	@echo "Checking byte-compilation..."
 	emacs -Q --batch \
 	--eval "(require 'package)" \

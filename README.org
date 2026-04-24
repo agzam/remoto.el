@@ -20,16 +20,27 @@ Requires [[https://cli.github.com][gh CLI]] installed and authenticated (~gh aut
 
 ** use-package + straight
 
+You need to load the package so it can register its file handler and advice.
+
 #+begin_src emacs-lisp
 (use-package remoto
-  :straight (:host github :repo "agzam/remoto.el"))
+  :straight (:host github :repo "agzam/remoto.el")
+  :demand t)
 #+end_src
 
 ** Doom Emacs
 
+Install it in =~/.doom.d/packages.el=:
+
 #+begin_src emacs-lisp
-;; packages.el
 (package! remoto :recipe (:host github :repo "agzam/remoto.el"))
+#+end_src
+
+Then load it in =~/.doom.d/config.el=:
+
+#+begin_src emacs-lisp
+(use-package! remoto
+  :demand t)
 #+end_src
 
 * Usage
