@@ -100,13 +100,13 @@ Signals an error on failure."
         (let ((output (string-trim (buffer-string))))
           (cond
            ((string-match-p "HTTP 404" output)
-            (user-error "remoto: repository not found: %s" endpoint))
+            (user-error "Remoto: repository not found: %s" endpoint))
            ((string-match-p "HTTP 403" output)
-            (user-error "remoto: access denied (rate limit or permissions): %s" endpoint))
+            (user-error "Remoto: access denied (rate limit or permissions): %s" endpoint))
            ((string-match-p "authentication" output)
-            (user-error "remoto: gh not authenticated; run `gh auth login'"))
+            (user-error "Remoto: gh not authenticated; run `gh auth login'"))
            (t
-            (user-error "remoto: gh api error (exit %d): %s" exit-code output))))))))
+            (user-error "Remoto: gh api error (exit %d): %s" exit-code output))))))))
 
 (defun remoto--default-branch (owner repo)
   "Fetch the default branch for OWNER/REPO."
@@ -183,7 +183,7 @@ Returns a hash table of path -> plist with keys :type :size :sha :mode."
           tree))))
 
 (defun remoto--tree-entry (parsed)
-  "Look up the tree entry for PARSED path.  Returns plist or nil."
+  "Look up the tree entry for PARSED path.  Return plist or nil."
   (let* ((tree (remoto--ensure-tree parsed))
          (path (remoto-path-path parsed))
          ;; Normalize: strip leading slash for cache lookup
@@ -210,19 +210,21 @@ Returns list of (NAME . PLIST) for each child."
                        (substring dir-path 0 -1)
                      dir-path))
          (prefix (if (string-empty-p dir-path) "" (concat dir-path "/")))
-         (prefix-len (length prefix))
-         (result nil))
-    (maphash
-     (lambda (path plist)
-       (when (and (string-prefix-p prefix path)
-                  (not (equal path dir-path))
-                  ;; Direct child: no more slashes after prefix
-                  (not (string-search "/" (substring path prefix-len))))
-         (let ((name (substring path prefix-len)))
-           (unless (string-empty-p name)
-             (push (cons name plist) result)))))
-     tree)
-    (sort result (lambda (a b) (string< (car a) (car b))))))
+         (prefix-len (length prefix)))
+    (sort
+     (thread-last (hash-table-keys tree)
+       (seq-filter (lambda (path)
+                     (and (string-prefix-p prefix path)
+                          (not (equal path dir-path))
+                          ;; Direct child: no more slashes after prefix
+                          (not (string-search "/" (substring path prefix-len))))))
+       (mapcar (lambda (path)
+                 (cons (substring path prefix-len)
+                       (gethash path tree))))
+       (seq-remove (lambda (child)
+                     (string-empty-p (car child)))))
+     (lambda (a b)
+       (string< (car a) (car b))))))
 
 ;;;; Path normalization helpers
 
@@ -255,41 +257,40 @@ Returns list of (NAME . PLIST) for each child."
 
 (defun remoto-file-name-handler (operation &rest args)
   "Handle file OPERATION for remoto paths.
-Dispatches to remoto--handle-OPERATION or falls through to defaults."
-  (let ((handler (intern (format "remoto--handle-%s" operation))))
-    (if (fboundp handler)
-        (apply handler args)
-      ;; Fall through to default handler
-      (let ((inhibit-file-name-handlers
-             (cons #'remoto-file-name-handler
-                   (and (eq inhibit-file-name-operation operation)
-                        inhibit-file-name-handlers)))
-            (inhibit-file-name-operation operation))
-        (apply operation args)))))
+Dispatches to `remoto--handle-OPERATION' or falls through to defaults.
+Pass remaining ARGS to the resolved handler."
+  (if-let* ((handler (intern (format "remoto--handle-%s" operation)))
+            (handler (and (fboundp handler) handler)))
+      (apply handler args)
+    ;; Fall through to default handler
+    (let ((inhibit-file-name-handlers
+           (cons #'remoto-file-name-handler
+                 (and (eq inhibit-file-name-operation operation)
+                      inhibit-file-name-handlers)))
+          (inhibit-file-name-operation operation))
+      (apply operation args))))
 
 ;;;; Read operations
 
 (defun remoto--handle-file-exists-p (filename)
   "Return t if FILENAME exists in the remote repo."
-  (let ((parsed (remoto--parse-path filename)))
-    (and parsed (not (null (remoto--tree-entry parsed))))))
+  (when-let* ((parsed (remoto--parse-path filename)))
+    (not (null (remoto--tree-entry parsed)))))
 
 (defun remoto--handle-file-directory-p (filename)
   "Return t if FILENAME is a directory in the remote repo."
-  (let ((parsed (remoto--parse-path filename)))
-    (when parsed
-      (let ((entry (remoto--tree-entry parsed)))
-        (and entry (equal "tree" (plist-get entry :type)))))))
+  (when-let* ((parsed (remoto--parse-path filename))
+              (entry (remoto--tree-entry parsed)))
+    (equal "tree" (plist-get entry :type))))
 
 (defun remoto--handle-file-regular-p (filename)
   "Return t if FILENAME is a regular file in the remote repo."
-  (let ((parsed (remoto--parse-path filename)))
-    (when parsed
-      (let ((entry (remoto--tree-entry parsed)))
-        (and entry (equal "blob" (plist-get entry :type)))))))
+  (when-let* ((parsed (remoto--parse-path filename))
+              (entry (remoto--tree-entry parsed)))
+    (equal "blob" (plist-get entry :type))))
 
 (defun remoto--handle-file-readable-p (filename)
-  "Remote files are readable if they exist."
+  "Return non-nil if remote FILENAME is readable."
   (remoto--handle-file-exists-p filename))
 
 (defun remoto--handle-file-writable-p (_filename)
@@ -299,85 +300,86 @@ Dispatches to remoto--handle-OPERATION or falls through to defaults."
 (defun remoto--handle-file-attributes (filename &optional _id-format)
   "Return file attributes for FILENAME.
 Synthesized from tree cache - timestamps are epoch 0."
-  (let ((parsed (remoto--parse-path filename)))
-    (when parsed
-      (let ((entry (remoto--tree-entry parsed)))
-        (when entry
-          (let* ((is-dir (equal "tree" (plist-get entry :type)))
-                 (size (or (plist-get entry :size) 0))
-                 (mode-str (or (plist-get entry :mode) "100644"))
-                 (mode (string-to-number mode-str 8))
-                 ;; Use epoch 0 for all timestamps
-                 (time '(0 0 0 0)))
-            ;; Return vector matching `file-attributes' format:
-            ;; (type links uid gid atime mtime ctime size mode
-            ;;  gid-change inode device)
-            (list (if is-dir t nil)    ; type: t=dir, nil=file
-                  1                    ; links
-                  0                    ; uid
-                  0                    ; gid
-                  time                 ; atime
-                  time                 ; mtime
-                  time                 ; ctime
-                  size                 ; size
-                  (format "%05o" mode) ; mode string
-                  nil                  ; gid-change
-                  0                    ; inode
-                  0)))))))             ; device
+  (when-let* ((parsed (remoto--parse-path filename))
+              (entry (remoto--tree-entry parsed)))
+    (let* ((dir? (equal "tree" (plist-get entry :type)))
+           (size (or (plist-get entry :size) 0))
+           (mode-str (or (plist-get entry :mode) "100644"))
+           (mode (string-to-number mode-str 8))
+           ;; Use epoch 0 for all timestamps
+           (time '(0 0 0 0)))
+      ;; Return vector matching `file-attributes' format:
+      ;; (type links uid gid atime mtime ctime size mode
+      ;;  gid-change inode device)
+      (list (if dir? t nil)      ; type: t=dir, nil=file
+            1                    ; links
+            0                    ; uid
+            0                    ; gid
+            time                 ; atime
+            time                 ; mtime
+            time                 ; ctime
+            size                 ; size
+            (format "%05o" mode) ; mode string
+            nil                  ; gid-change
+            0                    ; inode
+            0))))               ; device
 
 (defun remoto--handle-directory-files (directory &optional full match nosort count)
   "List files in remote DIRECTORY.
 FULL, MATCH, NOSORT, COUNT as per `directory-files'."
-  (let ((parsed (remoto--parse-path directory)))
-    (when parsed
-      (let* ((children (remoto--tree-children parsed))
-             (names (mapcar #'car children))
-             (names (append '("." "..") names))
-             (names (if match
-                        (seq-filter (lambda (n) (string-match-p match n))
-                                    names)
-                      names))
-             (names (if nosort names (sort names #'string<)))
-             (names (if count (seq-take names count) names)))
-        (if full
-            (let ((prefix (remoto--file-name-prefix directory))
-                  (dir-path (remoto-path-path parsed)))
-              (mapcar (lambda (n)
-                        (concat prefix
-                                (remoto--normalize-path
-                                 (concat dir-path "/" n))))
-                      names))
-          names)))))
+  (when-let* ((parsed (remoto--parse-path directory)))
+    (let ((names (append '("." "..")
+                         (mapcar #'car (remoto--tree-children parsed)))))
+      (when match
+        (setq names (seq-filter (lambda (name)
+                                  (string-match-p match name))
+                                names)))
+      (unless nosort
+        (setq names (sort names #'string<)))
+      (when count
+        (setq names (seq-take names count)))
+      (if full
+          (let ((prefix (remoto--file-name-prefix directory))
+                (dir-path (remoto-path-path parsed)))
+            (mapcar (lambda (name)
+                      (concat prefix
+                              (remoto--normalize-path
+                               (concat dir-path "/" name))))
+                    names))
+        names))))
 
 (defun remoto--handle-directory-files-and-attributes
     (directory &optional full match nosort id-format)
-  "Like `directory-files-and-attributes' for remote DIRECTORY."
-  (let ((files (remoto--handle-directory-files directory full match nosort)))
-    (mapcar (lambda (f)
-              (cons f (remoto--handle-file-attributes
-                       (if full f
-                         (let ((prefix (remoto--file-name-prefix directory))
-                               (parsed (remoto--parse-path directory)))
-                           (concat prefix
-                                   (remoto--normalize-path
-                                    (concat (remoto-path-path parsed) "/" f)))))
-                       id-format)))
-            files)))
+  "Like `directory-files-and-attributes' for remote DIRECTORY.
+Pass FULL, MATCH, NOSORT, and ID-FORMAT through unchanged."
+  (let ((base-path
+         (if-let* ((parsed (remoto--parse-path directory))
+                   (prefix (remoto--file-name-prefix directory)))
+             (lambda (f)
+               (concat prefix
+                       (remoto--normalize-path
+                        (concat (remoto-path-path parsed) "/" f))))
+           #'identity)))
+    (thread-last
+      (remoto--handle-directory-files directory full match nosort)
+      (mapcar (lambda (f)
+                (cons f (remoto--handle-file-attributes
+                         (if full f (funcall base-path f))
+                         id-format)))))))
 
 (defun remoto--handle-file-name-all-completions (file directory)
   "Return completions for FILE in remote DIRECTORY."
-  (let ((parsed (remoto--parse-path directory)))
-    (when parsed
-      (let* ((children (remoto--tree-children parsed))
-             (names (mapcar (lambda (c)
-                              (if (equal "tree" (plist-get (cdr c) :type))
-                                  (concat (car c) "/")
-                                (car c)))
-                            children)))
-        (seq-filter (lambda (n) (string-prefix-p file n)) names)))))
+  (when-let* ((parsed (remoto--parse-path directory)))
+    (thread-last (remoto--tree-children parsed)
+      (mapcar (lambda (child)
+                (if (equal "tree" (plist-get (cdr child) :type))
+                    (concat (car child) "/")
+                  (car child))))
+      (seq-filter (lambda (name)
+                    (string-prefix-p file name))))))
 
 (defun remoto--handle-file-name-completion (file directory &optional predicate)
-  "Complete FILE in remote DIRECTORY."
+  "Complete FILE in remote DIRECTORY using optional PREDICATE."
   (let ((completions (remoto--handle-file-name-all-completions file directory)))
     (cond
      ((null completions) nil)
@@ -414,34 +416,33 @@ FULL, MATCH, NOSORT, COUNT as per `directory-files'."
   filename)
 
 (defun remoto--handle-file-remote-p (filename &optional identification _connected)
-  "Return remote identification for FILENAME."
-  (when (remoto--parse-path filename)
-    (let ((prefix (remoto--file-name-prefix filename)))
-      (pcase identification
-        ('method "github")
-        ('host (let ((parsed (remoto--parse-path filename)))
-                 (format "%s/%s" (remoto-path-owner parsed)
-                         (remoto-path-repo parsed))))
-        (_ prefix)))))
+  "Return remote identification for FILENAME.
+Use IDENTIFICATION to select which remote field to report."
+  (when-let* ((parsed (remoto--parse-path filename))
+              (prefix (remoto--file-name-prefix filename)))
+    (pcase identification
+      ('method "github")
+      ('host (format "%s/%s" (remoto-path-owner parsed)
+                     (remoto-path-repo parsed)))
+      (_ prefix))))
 
 (defun remoto--handle-file-name-directory (filename)
   "Return directory part of remote FILENAME."
-  (let ((parsed (remoto--parse-path filename)))
-    (when parsed
-      (let* ((prefix (remoto--file-name-prefix filename))
-             (path (remoto-path-path parsed))
-             (dir (if (string-suffix-p "/" path)
-                      path
-                    (file-name-directory path))))
-        (concat prefix (or dir "/"))))))
+  (when-let* ((parsed (remoto--parse-path filename))
+              (prefix (remoto--file-name-prefix filename)))
+    (let* ((path (remoto-path-path parsed))
+           (dir (if (string-suffix-p "/" path)
+                    path
+                  (file-name-directory path))))
+      (concat prefix (or dir "/")))))
 
 (defun remoto--handle-file-name-nondirectory (filename)
   "Return non-directory part of remote FILENAME."
-  (let ((parsed (remoto--parse-path filename)))
-    (if parsed
-        (let ((path (remoto-path-path parsed)))
-          (file-name-nondirectory (directory-file-name path)))
-      (file-name-nondirectory filename))))
+  (if-let* ((parsed (remoto--parse-path filename)))
+      (thread-last (remoto-path-path parsed)
+        (directory-file-name)
+        (file-name-nondirectory))
+    (file-name-nondirectory filename)))
 
 ;;;; File content fetching
 
@@ -471,7 +472,7 @@ Uses Contents API for files under 1MB, Blobs API otherwise."
           content))))
 
 (defun remoto--fetch-blob (owner repo sha)
-  "Fetch a git blob by SHA from OWNER/REPO.  Returns decoded content."
+  "Fetch a git blob by SHA from OWNER/REPO.  Return decoded content."
   (let* ((endpoint (format "repos/%s/%s/git/blobs/%s" owner repo sha))
          (data (remoto--api endpoint))
          (raw (alist-get 'content data)))
@@ -485,7 +486,7 @@ Uses Contents API for files under 1MB, Blobs API otherwise."
 VISIT, BEG, END, REPLACE as per `insert-file-contents'."
   (let ((parsed (remoto--parse-path filename)))
     (unless parsed
-      (error "remoto: cannot parse path: %s" filename))
+      (error "Remoto: cannot parse path: %s" filename))
     (let* ((resolved (remoto--resolve-ref parsed))
            (path (remoto-path-path resolved))
            (path (if (string-prefix-p "/" path) (substring path 1) path))
@@ -494,8 +495,7 @@ VISIT, BEG, END, REPLACE as per `insert-file-contents'."
                      (remoto-path-repo resolved)
                      path
                      (remoto-path-ref resolved))))
-      (when replace
-        (erase-buffer))
+      (when replace (erase-buffer))
       (let* ((text (if (and beg end)
                        (substring content (1- beg) (1- end))
                      content))
@@ -510,68 +510,65 @@ VISIT, BEG, END, REPLACE as per `insert-file-contents'."
 
 ;;;; Dired integration
 
-(defun remoto--mode-to-string (mode-str is-dir)
-  "Convert git MODE-STR to ls-style permission string."
+(defun remoto--mode-to-string (mode-str dir?)
+  "Convert git MODE-STR to an ls-style permission string for DIR?."
   (cond
-   (is-dir              "drwxr-xr-x")
+   (dir?                "drwxr-xr-x")
    ((equal mode-str "100755") "-rwxr-xr-x")
    ((equal mode-str "120000") "lrwxrwxrwx")
    (t                   "-rw-r--r--")))
 
 (defun remoto--format-dired-entry (name plist)
-  "Format a single dired line for NAME with PLIST attributes.
-No leading spaces - dired and dired-subtree add their own."
-  (let* ((is-dir (equal "tree" (plist-get plist :type)))
+  "Format a single Dired line for NAME with PLIST attributes.
+No leading spaces - Dired and dired-subtree add their own."
+  (let* ((dir? (equal "tree" (plist-get plist :type)))
          (size (or (plist-get plist :size) 0))
          (mode (or (plist-get plist :mode) "100644"))
-         (perms (remoto--mode-to-string mode is-dir)))
+         (perms (remoto--mode-to-string mode dir?)))
     (format "%s  1 github github %8d Jan  1  2000 %s\n"
             perms size name)))
 
 (defun remoto--handle-insert-directory
     (filename _switches &optional _wildcard full-directory-p)
-  "Insert dired-format listing for remote FILENAME."
-  (let ((parsed (remoto--parse-path filename)))
-    (when parsed
-      (if (or full-directory-p
-              (equal "tree"
-                     (plist-get (remoto--tree-entry parsed) :type)))
-          ;; Directory listing
-          (let ((children (remoto--tree-children parsed)))
-            (insert "total 0\n")
-            (insert (remoto--format-dired-entry
-                     "." (list :type "tree" :size 0 :mode "040000")))
-            (insert (remoto--format-dired-entry
-                     ".." (list :type "tree" :size 0 :mode "040000")))
-            (dolist (child children)
-              (insert (remoto--format-dired-entry (car child) (cdr child)))))
-        ;; Single file
-        (let ((entry (remoto--tree-entry parsed))
-              (name (file-name-nondirectory
-                     (directory-file-name (remoto-path-path parsed)))))
-          (when entry
-            (insert (remoto--format-dired-entry name entry))))))))
+  "Insert a Dired-format listing for remote FILENAME.
+Use FULL-DIRECTORY-P to force directory-style output."
+  (when-let* ((parsed (remoto--parse-path filename))
+              (entry (remoto--tree-entry parsed)))
+    (cond
+     ((or full-directory-p
+          (equal "tree" (plist-get entry :type)))
+      (insert "total 0\n")
+      (insert (remoto--format-dired-entry
+               "." (list :type "tree" :size 0 :mode "040000")))
+      (insert (remoto--format-dired-entry
+               ".." (list :type "tree" :size 0 :mode "040000")))
+      (dolist (child (remoto--tree-children parsed))
+        (insert (remoto--format-dired-entry (car child) (cdr child)))))
+     (t
+      (let ((name (file-name-nondirectory
+                   (directory-file-name (remoto-path-path parsed)))))
+        (insert (remoto--format-dired-entry name entry)))))))
 
 (defun remoto--handle-file-local-copy (filename)
   "Download remote FILENAME to a temp file, return temp path."
-  (let ((parsed (remoto--parse-path filename)))
-    (when parsed
-      (let* ((resolved (remoto--resolve-ref parsed))
-             (path (remoto-path-path resolved))
-             (path (if (string-prefix-p "/" path) (substring path 1) path))
-             (ext (file-name-extension path t))
-             (temp (make-temp-file "remoto-" nil ext))
-             (content (remoto--fetch-file-content
-                       (remoto-path-owner resolved)
-                       (remoto-path-repo resolved)
-                       path
-                       (remoto-path-ref resolved))))
-        (with-temp-file temp
-          (insert content))
-        temp))))
+  (when-let* ((parsed (remoto--parse-path filename))
+              (resolved (remoto--resolve-ref parsed))
+              (path (remoto-path-path resolved))
+              (path (if (string-prefix-p "/" path) (substring path 1) path))
+              (ext (file-name-extension path t))
+              (temp (make-temp-file "remoto-" nil ext))
+              (content (remoto--fetch-file-content
+                        (remoto-path-owner resolved)
+                        (remoto-path-repo resolved)
+                        path
+                        (remoto-path-ref resolved))))
+    (with-temp-file temp
+      (insert content))
+    temp))
 
 (defun remoto--handle-make-nearby-temp-file (prefix &optional dir-flag suffix)
-  "Create temp file in system temp dir, ignoring remote path."
+  "Create a temp file using PREFIX in the system temp dir.
+Pass DIR-FLAG and SUFFIX through to `make-temp-file'."
   (make-temp-file prefix dir-flag suffix))
 
 ;;;; Additional operations needed by dired and other Emacs internals
@@ -599,9 +596,9 @@ No leading spaces - dired and dired-subtree add their own."
   nil)
 
 (defun remoto--handle-make-directory (dir &optional _parents)
-  "No-op for existing dirs, error otherwise."
+  "Ignore existing DIR and signal an error otherwise."
   (unless (remoto--handle-file-directory-p dir)
-    (user-error "remoto: repository is read-only")))
+    (user-error "Remoto: repository is read-only")))
 
 (defun remoto--handle-abbreviate-file-name (filename)
   "Return FILENAME as-is - no abbreviation for remote paths."
@@ -615,7 +612,7 @@ No leading spaces - dired and dired-subtree add their own."
 
 (defun remoto--read-only (&rest _args)
   "Signal that remote repos are read-only."
-  (user-error "remoto: repository is read-only"))
+  (user-error "Remoto: repository is read-only"))
 
 (defalias 'remoto--handle-write-region #'remoto--read-only)
 (defalias 'remoto--handle-delete-file #'remoto--read-only)
@@ -627,73 +624,79 @@ No leading spaces - dired and dired-subtree add their own."
 
 ;;;; User input parsing
 
+(defun remoto--parse-github-url (input)
+  "Parse GitHub web INPUT into a `remoto-path' struct."
+  (cond
+   ((string-match
+     (rx bos "https://github.com/"
+         (group (+ (not "/")))
+         "/"
+         (group (+ (not (any "/#"))))
+         (? "/" (or "tree" "blob") "/"
+            (group (+ (not "/")))
+            (? "/" (group (+ (not "#")))))
+         (* nonl)
+         eos)
+     input)
+    (remoto-path-create
+     :owner (match-string 1 input)
+     :repo (match-string 2 input)
+     :ref (match-string 3 input)
+     :path (concat "/" (or (match-string 4 input) ""))))
+   ((string-match
+     (rx bos "https://github.com/"
+         (group (+ (not "/")))
+         "/"
+         (group (+ (not (any "/#. "))))
+         (* (any "/."))
+         eos)
+     input)
+    (remoto-path-create
+     :owner (match-string 1 input)
+     :repo (match-string 2 input)
+     :ref nil
+     :path "/"))))
+
+(defun remoto--parse-git-remote (input)
+  "Parse git remote INPUT into a `remoto-path' struct."
+  (when (string-match
+         (rx bos "git@github.com:"
+             (group (+ (not "/")))
+             "/"
+             (group (+ (not (any "./ "))))
+             (? ".git")
+             eos)
+         input)
+    (remoto-path-create
+     :owner (match-string 1 input)
+     :repo (match-string 2 input)
+     :ref nil
+     :path "/")))
+
+(defun remoto--parse-repo-shorthand (input)
+  "Parse owner/repo INPUT into a `remoto-path' struct."
+  (when (string-match
+         (rx bos
+             (group (+ (not (any "/@"))))
+             "/"
+             (group (+ (not (any "/@"))))
+             (? "@" (group (+ nonl)))
+             eos)
+         input)
+    (remoto-path-create
+     :owner (match-string 1 input)
+     :repo (match-string 2 input)
+     :ref (match-string 3 input)
+     :path "/")))
+
 (defun remoto--parse-input (input)
   "Normalize user INPUT into a `remoto-path' struct.
-Accepts: GitHub URLs, git remote URLs, or owner/repo shorthand."
+Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
   (let ((input (string-trim input)))
-    (cond
-     ;; https://github.com/owner/repo/tree/ref/path
-     ;; https://github.com/owner/repo/blob/ref/path
-     ((string-match
-       (rx bos "https://github.com/"
-           (group (+ (not "/")))        ; owner
-           "/"
-           (group (+ (not (any "/#"))))  ; repo
-           (? "/" (or "tree" "blob") "/"
-              (group (+ (not "/")))     ; ref
-              (? "/" (group (+ (not "#"))))) ; path (strip fragment)
-           (* nonl)                     ; ignore #fragment
-           eos)
-       input)
-      (remoto-path-create
-       :owner (match-string 1 input)
-       :repo  (match-string 2 input)
-       :ref   (match-string 3 input)
-       :path  (let ((p (match-string 4 input)))
-                (concat "/" (or p "")))))
-     ;; https://github.com/owner/repo (no tree/blob)
-     ((string-match
-       (rx bos "https://github.com/"
-           (group (+ (not "/")))        ; owner
-           "/"
-           (group (+ (not (any "/#. "))))  ; repo
-           (* (any "/."))               ; optional trailing .git or /
-           eos)
-       input)
-      (remoto-path-create
-       :owner (match-string 1 input)
-       :repo  (match-string 2 input)
-       :ref   nil
-       :path  "/"))
-     ;; git@github.com:owner/repo.git
-     ((string-match
-       (rx bos "git@github.com:"
-           (group (+ (not "/")))        ; owner
-           "/"
-           (group (+ (not (any "./ "))))  ; repo
-           (? ".git")
-           eos)
-       input)
-      (remoto-path-create
-       :owner (match-string 1 input)
-       :repo  (match-string 2 input)
-       :ref   nil
-       :path  "/"))
-     ;; owner/repo@ref
-     ((string-match
-       (rx bos
-           (group (+ (not (any "/@"))))  ; owner
-           "/"
-           (group (+ (not (any "/@"))))  ; repo
-           (? "@" (group (+ nonl)))     ; ref
-           eos)
-       input)
-      (remoto-path-create
-       :owner (match-string 1 input)
-       :repo  (match-string 2 input)
-       :ref   (match-string 3 input)
-       :path  "/"))
-     (t (user-error "remoto: cannot parse input: %s" input)))))
+    (or (remoto--parse-github-url input)
+        (remoto--parse-git-remote input)
+        (remoto--parse-repo-shorthand input)
+        (user-error "Remoto: cannot parse input: %s" input))))
 
 ;;;###autoload
 (defun remoto-refresh ()
@@ -705,10 +708,10 @@ Accepts: GitHub URLs, git remote URLs, or owner/repo shorthand."
         (let* ((resolved (remoto--resolve-ref parsed))
                (key (remoto--repo-key resolved)))
           (remhash key remoto--tree-cache)
-          (message "remoto: cache cleared for %s" key)
+          (message "Remoto: cache cleared for %s" key)
           (when (derived-mode-p 'dired-mode)
             (revert-buffer)))
-      (user-error "remoto: not in a remoto buffer"))))
+      (user-error "Remoto: not in a remoto buffer"))))
 
 ;;;###autoload
 (defun remoto-copy-github-url ()
@@ -717,7 +720,7 @@ Accepts: GitHub URLs, git remote URLs, or owner/repo shorthand."
   (let* ((file (or buffer-file-name dired-directory default-directory))
          (parsed (remoto--parse-path file)))
     (unless parsed
-      (user-error "remoto: not in a remoto buffer"))
+      (user-error "Remoto: not in a remoto buffer"))
     (let* ((resolved (remoto--resolve-ref parsed))
            (owner (remoto-path-owner resolved))
            (repo (remoto-path-repo resolved))
@@ -753,44 +756,52 @@ INPUT can be any GitHub URL, git remote URL, or owner/repo shorthand."
 ;;;; GitHub input detection
 
 (defun remoto--github-input-p (input)
-  "Return non-nil if INPUT looks like a GitHub URL or shorthand."
+  "Return non-nil if INPUT can look like a GitHub URL or shorthand."
   (and (stringp input)
-       (or (string-match-p "\\`https://github\\.com/" input)
-           (string-match-p "\\`git@github\\.com:" input)
-           (string-match-p "\\`github\\.com/" input)
-           (string-match-p "\\`/github\\.com/" input))))
+       (not (null
+             (string-match-p
+              (rx bos
+                  (or "https://github.com/"
+                      "git@github.com:"
+                      (or "github.com/" "/github.com/")))
+              input)))))
 
 (defun remoto--maybe-rewrite (input)
   "If INPUT is a GitHub URL/shorthand, return canonical remoto path.
 Otherwise return INPUT unchanged."
-  (if (remoto--github-input-p input)
-      (let* ((clean (replace-regexp-in-string "\\`/?" "" input))
-             (clean (if (string-match-p "\\`github\\.com/" clean)
-                        (concat "https://" clean)
-                      clean))
-             (parsed (condition-case nil
-                         (remoto--parse-input clean)
-                       (error nil))))
-        (if parsed
-            (let* ((resolved (remoto--resolve-ref parsed)))
-              (remoto--canonical-path resolved))
-          input))
-    input))
+  (cond
+   ((not (remoto--github-input-p input)) input)
+   (t
+    (let* ((clean (replace-regexp-in-string "\\`/?" "" input))
+           (clean (cond
+                   ((string-match-p "\\`github\\.com/" clean)
+                    (concat "https://" clean))
+                   (t clean)))
+           (parsed (condition-case nil
+                       (remoto--parse-input clean)
+                     (error nil))))
+      (cond
+       (parsed
+        (let ((resolved (remoto--resolve-ref parsed)))
+          (remoto--canonical-path resolved)))
+       (t input))))))
 
 (defun remoto--dired-around-a (orig-fn dir-or-list &rest args)
-  "Rewrite GitHub URLs to canonical remoto paths for dired."
-  (let ((dir (if (consp dir-or-list) (car dir-or-list) dir-or-list)))
-    (if (remoto--github-input-p dir)
-        (let ((canonical (remoto--maybe-rewrite dir)))
-          (apply orig-fn
-                 (if (consp dir-or-list)
-                     (cons canonical (cdr dir-or-list))
-                   canonical)
-                 args))
-      (apply orig-fn dir-or-list args))))
+  "Rewrite GitHub URLs to canonical remoto paths for Dired.
+Call ORIG-FN with DIR-OR-LIST and ARGS after any rewrite."
+  (if-let* ((dir (if (consp dir-or-list) (car dir-or-list) dir-or-list))
+            (_ (remoto--github-input-p dir)))
+      (let ((canonical (remoto--maybe-rewrite dir)))
+        (apply orig-fn
+               (if (consp dir-or-list)
+                   (cons canonical (cdr dir-or-list))
+                 canonical)
+               args))
+    (apply orig-fn dir-or-list args)))
 
 (defun remoto--find-file-around-a (orig-fn filename &rest args)
-  "Rewrite GitHub URLs to canonical remoto paths for find-file."
+  "Rewrite GitHub URLs to canonical remoto paths for `find-file'.
+Call ORIG-FN with FILENAME and ARGS after any rewrite."
   (apply orig-fn (remoto--maybe-rewrite filename) args))
 
 (unless (advice-member-p #'remoto--dired-around-a 'dired)

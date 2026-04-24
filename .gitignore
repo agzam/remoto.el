@@ -1,0 +1,6 @@
+*.elc
+*-autoloads.el
+.elpa/
+*~
+#*#
+.#*
