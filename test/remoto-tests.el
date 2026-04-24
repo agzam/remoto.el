@@ -419,6 +419,31 @@
       (remoto--search-repos "torvalds")
       (expect call-count :to-equal 1)))
 
+  (it "filters cached results when query extends a previous one"
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (call-count 0))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_endpoint)
+                (setq call-count (1+ call-count))
+                '((items . (((full_name . "agzam/spacehammer"))
+                            ((full_name . "agzam/dotfiles"))
+                            ((full_name . "agzam/remoto.el")))))))
+      ;; First call hits the API
+      (let ((results (remoto--search-repos "agzam")))
+        (expect (length results) :to-equal 3))
+      ;; Extended query filters cached results, no new API call
+      (let ((results (remoto--search-repos "agzam/spa")))
+        (expect results :to-equal '("agzam/spacehammer"))
+        (expect call-count :to-equal 1))
+      ;; Further narrowing still uses cache
+      (let ((results (remoto--search-repos "agzam/spaceh")))
+        (expect results :to-equal '("agzam/spacehammer"))
+        (expect call-count :to-equal 1))
+      ;; No match returns empty list, still no API call
+      (let ((results (remoto--search-repos "agzam/zzz")))
+        (expect results :to-be nil)
+        (expect call-count :to-equal 1))))
+
   (it "returns nil on API errors"
     (spy-on 'remoto--api :and-call-fake
             (lambda (_endpoint)

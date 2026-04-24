@@ -788,21 +788,35 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
 
 (defun remoto--search-repos (query)
   "Search GitHub repositories matching QUERY.
-Returns a list of owner/repo strings.  Requires at least 3 characters."
+Returns a list of owner/repo strings.  Requires at least 3 characters.
+When QUERY extends a previously cached query, filters cached results
+client-side instead of making a new API call."
   (if (< (length query) 3)
       nil
     (or (gethash query remoto--search-cache)
-        (condition-case nil
-            (let* ((endpoint (format "search/repositories?q=%s&per_page=30"
-                                     (url-hexify-string query)))
-                   (data (remoto--api endpoint))
-                   (items (alist-get 'items data))
-                   (results (mapcar (lambda (item)
-                                      (alist-get 'full_name item))
-                                    items)))
-              (puthash query results remoto--search-cache)
-              results)
-          (user-error nil)))))
+        (let ((parent-results
+               (cl-loop for key being the hash-keys of remoto--search-cache
+                        using (hash-values results)
+                        when (and (string-prefix-p key query)
+                                  (< (length key) (length query))
+                                  results)
+                        return results)))
+          (if parent-results
+              ;; Filter cached superset client-side
+              (seq-filter (lambda (name) (string-prefix-p query name))
+                          parent-results)
+            ;; No cached prefix - fetch from API
+            (condition-case nil
+                (let* ((endpoint (format "search/repositories?q=%s&per_page=30"
+                                         (url-hexify-string query)))
+                       (data (remoto--api endpoint))
+                       (items (alist-get 'items data))
+                       (results (mapcar (lambda (item)
+                                          (alist-get 'full_name item))
+                                        items)))
+                  (puthash query results remoto--search-cache)
+                  results)
+              (user-error nil)))))))
 
 (defvar remoto--browse-history nil
   "Minibuffer history for `remoto-browse'.")
