@@ -393,6 +393,59 @@
   (it "handles root"
     (expect (remoto--normalize-path "/") :to-equal "/")))
 
+;;; Repository search
+
+(describe "remoto--search-repos"
+  (it "returns nil for short queries"
+    (expect (remoto--search-repos "") :to-be nil)
+    (expect (remoto--search-repos "ab") :to-be nil))
+
+  (it "parses search API response into owner/repo list"
+    (spy-on 'remoto--api :and-return-value
+            '((items . (((full_name . "torvalds/linux"))
+                        ((full_name . "torvalds/subsurface"))))))
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      (expect (remoto--search-repos "torvalds")
+              :to-equal '("torvalds/linux" "torvalds/subsurface"))))
+
+  (it "caches results for repeated queries"
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (call-count 0))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_endpoint)
+                (setq call-count (1+ call-count))
+                '((items . (((full_name . "torvalds/linux")))))))
+      (remoto--search-repos "torvalds")
+      (remoto--search-repos "torvalds")
+      (expect call-count :to-equal 1)))
+
+  (it "returns nil on API errors"
+    (spy-on 'remoto--api :and-call-fake
+            (lambda (_endpoint)
+              (user-error "network error")))
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      (expect (remoto--search-repos "torvalds") :to-be nil))))
+
+(describe "remoto--read-repo"
+  (it "uses completing-read when consult is not loaded"
+    (spy-on 'featurep :and-call-fake
+            (lambda (feature &rest _)
+              (not (eq feature 'consult))))
+    (spy-on 'completing-read :and-return-value "torvalds/linux")
+    (expect (remoto--read-repo) :to-equal "torvalds/linux")
+    (expect 'completing-read :to-have-been-called))
+
+  (it "uses consult--read when consult is loaded"
+    (spy-on 'featurep :and-call-fake
+            (lambda (feature &rest _)
+              (or (eq feature 'consult) t)))
+    ;; Simulate consult functions being available
+    (cl-letf (((symbol-function 'consult--read)
+               (lambda (_collection &rest _args) "magit/magit"))
+              ((symbol-function 'consult--dynamic-collection)
+               (lambda (fun) fun)))
+      (expect (remoto--read-repo) :to-equal "magit/magit"))))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:

@@ -807,16 +807,30 @@ Returns a list of owner/repo strings.  Requires at least 3 characters."
 (defvar remoto--browse-history nil
   "Minibuffer history for `remoto-browse'.")
 
+(defun remoto--read-repo ()
+  "Read a GitHub repo from the minibuffer with search completion.
+Uses `consult--read' with dynamic collection when consult is loaded,
+otherwise falls back to `completing-read'."
+  (if (and (featurep 'consult)
+           (fboundp 'consult--read)
+           (fboundp 'consult--dynamic-collection))
+      (consult--read
+       (consult--dynamic-collection #'remoto--search-repos)
+       :prompt "Search GitHub repos: "
+       :require-match nil
+       :sort nil
+       :history 'remoto--browse-history)
+    (completing-read "GitHub repo (URL or owner/repo): "
+                     (completion-table-dynamic #'remoto--search-repos)
+                     nil nil nil 'remoto--browse-history)))
+
 ;;;###autoload
 (defun remoto-browse (input)
   "Browse a GitHub repository without cloning.
 INPUT can be any GitHub URL, git remote URL, or owner/repo shorthand.
 With interactive use, provides search completion - type 3+ characters
 to search GitHub repositories."
-  (interactive
-   (list (completing-read "GitHub repo (URL or owner/repo): "
-                          (completion-table-dynamic #'remoto--search-repos)
-                          nil nil nil 'remoto--browse-history)))
+  (interactive (list (remoto--read-repo)))
   (let* ((parsed (remoto--parse-input input))
          (resolved (remoto--resolve-ref parsed))
          (canonical (remoto--canonical-path resolved)))
