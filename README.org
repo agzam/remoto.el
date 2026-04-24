@@ -10,6 +10,8 @@ El Remoto - browse any GitHub repository in Emacs without cloning it.
 
 * What
 
+[[./test/demo.gif]]
+
 remoto.el registers a virtual filesystem via ~file-name-handler-alist~ that translates standard Emacs file operations into GitHub API calls via the ~gh~ CLI. The result: ~find-file~, ~dired~, tab-completion, ~dired-subtree~ - all standard Emacs file tooling works against a remote GitHub repo. Read-only.
 
 * Why
