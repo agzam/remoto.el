@@ -16,9 +16,13 @@ remoto.el registers a virtual filesystem via ~file-name-handler-alist~ that tran
 
 Sometimes you just want to look at code. Check a function signature, read a README, browse a project structure. Cloning a repo for that is overkill - it takes disk space, creates another directory to manage, and breaks your flow.
 
-* Install
+* Where
 
-Requires [[https://cli.github.com][gh CLI]] installed and authenticated (~gh auth login~).
+For now it works only with GitHub repos. Future plans include support for other forges - GitLab, Codeberg, etc.
+
+* How
+
+Requires [[https://cli.github.com][gh CLI]] installed and authenticated (~gh auth login~) - for private repos.
 
 ** use-package + straight
 
@@ -30,24 +34,10 @@ You need to load the package so it can register its file handler and advice.
   :demand t)
 #+end_src
 
-** Doom Emacs
 
-Install it in =~/.doom.d/packages.el=:
+** Usage
 
-#+begin_src emacs-lisp
-(package! remoto :recipe (:host github :repo "agzam/remoto.el"))
-#+end_src
-
-Then load it in =~/.doom.d/config.el=:
-
-#+begin_src emacs-lisp
-(use-package! remoto
-  :demand t)
-#+end_src
-
-* Usage
-
-** remoto-browse
+*** remoto-browse
 
 The main entry point. Accepts any GitHub URL format:
 
@@ -57,7 +47,7 @@ M-x remoto-browse RET git@github.com:torvalds/linux.git RET
 M-x remoto-browse RET torvalds/linux RET
 #+end_src
 
-** C-x d / C-x C-f
+*** C-x d / C-x C-f
 
 GitHub URLs are detected automatically in ~dired~ and ~find-file~:
 
@@ -66,7 +56,7 @@ C-x d /github.com/torvalds/linux RET
 C-x C-f https://github.com/torvalds/linux/blob/master/README RET
 #+end_src
 
-** Canonical paths
+*** Canonical paths
 
 The virtual filesystem uses paths of the form:
 
@@ -76,7 +66,7 @@ The virtual filesystem uses paths of the form:
 
 ~REF~ is optional - omitting it uses the repo's default branch.
 
-** Commands
+*** Commands
 
 | Command                  | Description                                            |
 |--------------------------+--------------------------------------------------------|
@@ -84,7 +74,7 @@ The virtual filesystem uses paths of the form:
 | ~remoto-refresh~         | Clear tree cache for current repo, re-fetch            |
 | ~remoto-copy-github-url~ | Copy ~github.com~ URL for current file/line to kill ring |
 
-* How it works
+** How it works
 
 1. On first access to any file in a repo, the full directory tree is fetched via the Git Trees API (one HTTP call).
 2. Directory listings, ~file-exists-p~, completions - all served from the cached tree in memory.
@@ -92,7 +82,7 @@ The virtual filesystem uses paths of the form:
 4. Content is cached by SHA, so re-opening the same file is instant.
 5. Authentication, SSO, private repos - all handled transparently by ~gh~.
 
-* Limitations
+** Limitations
 
 - Read-only. No commits, no pushes, no file modifications.
 - No git operations (log, blame, diff).
