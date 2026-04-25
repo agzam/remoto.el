@@ -97,11 +97,16 @@
 
   (it "includes root entry"
     (let ((entry (gethash "" remoto-itest--tree)))
-      ;; Diagnostic: show the actual entry structure on CI failure
-      (expect (format "entry=%S type-of=%S" entry (type-of entry))
-              :to-match "diagnostic")
       (expect entry :to-be-truthy)
-      (expect (plist-get entry :type) :to-equal "tree")))
+      ;; Diagnostic: test plist-get variants to isolate the Emacs 29 issue
+      (expect (format "plist-get=%S memq=%S eq-test=%S car=%S cadr=%S len=%S"
+                      (plist-get entry :type)
+                      (cadr (memq :type entry))
+                      (eq :type (car entry))
+                      (car entry)
+                      (cadr entry)
+                      (length entry))
+              :to-equal "diagnostic")))
 
   (it "includes known files at expected paths"
     ;; top-level files
