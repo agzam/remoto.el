@@ -8,7 +8,7 @@
 ;; Version: 0.1.0
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
-;; Package-Requires: ((emacs "29.1"))
+;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
 ;;
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;
@@ -19,7 +19,7 @@
 ;; remoto.el lets you browse any GitHub repository in Emacs as if it were
 ;; cloned locally - without cloning it.  It registers a virtual filesystem
 ;; via `file-name-handler-alist' that translates Emacs file operations into
-;; GitHub API calls via the `gh' CLI.
+;; GitHub API calls via the `ghub' library.
 ;;
 ;; Usage:
 ;;   M-x remoto-browse RET https://github.com/torvalds/linux RET
@@ -30,6 +30,7 @@
 
 (require 'json)
 (require 'cl-lib)
+(require 'ghub)
 
 ;;;; Path parsing
 
@@ -79,36 +80,76 @@ Format: owner/repo@ref."
           (remoto-path-repo parsed)
           (or (remoto-path-ref parsed) "HEAD")))
 
-;;;; gh CLI wrapper
+;;;; GitHub API
 
-(defun remoto--gh-executable ()
-  "Return path to the gh CLI, or nil."
-  (executable-find "gh"))
+(defgroup remoto nil
+  "Browse GitHub repos without cloning."
+  :group 'tools
+  :prefix "remoto-")
+
+(defcustom remoto-github-auth nil
+  "Auth token source for GitHub API requests via ghub.
+nil means use the default ghub token (USERNAME^ghub in auth-source).
+A symbol like `forge' uses that package's token instead.
+A string is used as a literal token.
+See ghub documentation for auth-source setup."
+  :type '(choice (const :tag "Default ghub token" nil)
+                 (symbol :tag "Package token name")
+                 (string :tag "Literal token"))
+  :group 'remoto)
+
+(defun remoto--json-reader (_status)
+  "Parse JSON response with list-type arrays for remoto compatibility."
+  (goto-char (point-min))
+  (when (re-search-forward "^\r?\n" nil t)
+    (let ((body (buffer-substring-no-properties (point) (point-max))))
+      (unless (string-empty-p body)
+        (json-parse-string
+         (decode-coding-string body 'utf-8)
+         :object-type 'alist
+         :array-type 'list
+         :null-object nil
+         :false-object nil)))))
 
 (defun remoto--api (endpoint)
-  "Call GitHub API ENDPOINT via gh CLI, return parsed JSON.
-Signals an error on failure."
-  (let ((gh (remoto--gh-executable)))
-    (unless gh
-      (user-error "remoto: `gh' CLI not found; install from https://cli.github.com"))
-    (with-temp-buffer
-      (let ((exit-code
-             (call-process gh nil t nil
-                           "api" endpoint)))
-        (if (zerop exit-code)
-            (progn
-              (goto-char (point-min))
-              (json-parse-buffer :object-type 'alist :array-type 'list))
-          (let ((output (string-trim (buffer-string))))
-            (cond
-             ((string-match-p "HTTP 404" output)
-              (user-error "Remoto: repository not found: %s" endpoint))
-             ((string-match-p "HTTP 403" output)
+  "Call GitHub REST API ENDPOINT via ghub, return parsed JSON.
+ENDPOINT should not have a leading slash - one is prepended
+automatically.  When `remoto-github-auth' is nil (default) and no
+token is found in auth-source, retries unauthenticated - public
+repos work without any setup.  Signals `user-error' on HTTP
+failures."
+  (let ((resource (concat "/" endpoint)))
+    (condition-case err
+        (ghub-get resource nil
+                  :auth remoto-github-auth
+                  :reader #'remoto--json-reader)
+      (ghub-404
+       (user-error "Remoto: not found: %s" endpoint))
+      (ghub-403
+       (user-error "Remoto: access denied (rate limit or permissions): %s" endpoint))
+      (ghub-401
+       (user-error "Remoto: authentication failed; configure ghub token in auth-source"))
+      (ghub-http-error
+       (user-error "Remoto: API error: %s" (error-message-string err)))
+      (error
+       ;; When auth-source lookup fails (no token configured), retry
+       ;; without authentication.  Public repos work fine this way,
+       ;; just at a lower rate limit (60/hr vs 5000/hr).
+       (if (and (not (eq remoto-github-auth 'none))
+                (string-match-p "auth" (error-message-string err)))
+           (condition-case err2
+               (ghub-get resource nil
+                         :auth 'none
+                         :reader #'remoto--json-reader)
+             (ghub-404
+              (user-error "Remoto: not found: %s" endpoint))
+             (ghub-403
               (user-error "Remoto: access denied (rate limit or permissions): %s" endpoint))
-             ((string-match-p "authentication" output)
-              (user-error "Remoto: gh not authenticated; run `gh auth login'"))
-             (t
-              (user-error "Remoto: gh api error (exit %d): %s" exit-code output)))))))))
+             (ghub-http-error
+              (user-error "Remoto: API error: %s" (error-message-string err2)))
+             (error
+              (user-error "Remoto: request failed: %s" (error-message-string err2))))
+         (user-error "Remoto: request failed: %s" (error-message-string err)))))))
 
 (defun remoto--default-branch (owner repo)
   "Fetch the default branch for OWNER/REPO."
@@ -784,12 +825,34 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
 ;;;; Repository search
 
 (defvar remoto--search-cache (make-hash-table :test 'equal)
-  "Cache: query string -> list of owner/repo results.")
+  "Cache: query string -> (TIMESTAMP . RESULTS).
+Entries expire after `remoto-search-cache-ttl' seconds.")
+
+(defcustom remoto-search-cache-ttl 300
+  "Seconds before search cache entries expire.
+Set to 0 to disable caching."
+  :type 'integer
+  :group 'remoto)
+
+(defun remoto--search-cache-get (key)
+  "Return cached results for KEY if not expired, else nil."
+  (when-let* ((entry (gethash key remoto--search-cache))
+              (timestamp (car entry))
+              (results (cdr entry)))
+    (if (or (zerop remoto-search-cache-ttl)
+            (< remoto-search-cache-ttl (- (float-time) timestamp)))
+        (progn (remhash key remoto--search-cache) nil)
+      results)))
+
+(defun remoto--search-cache-put (key results)
+  "Store RESULTS for KEY with current timestamp."
+  (puthash key (cons (float-time) results) remoto--search-cache)
+  results)
 
 (defun remoto--search-query (input)
   "Build a GitHub search query string from INPUT.
 When INPUT contains a slash, searches within that owner's repos.
-Otherwise treats INPUT as an owner name."
+Otherwise searches by repository name."
   (let ((slash-pos (string-search "/" input)))
     (if slash-pos
         (let ((owner (substring input 0 slash-pos))
@@ -797,43 +860,51 @@ Otherwise treats INPUT as an owner name."
           (if (string-empty-p repo-part)
               (format "user:%s" owner)
             (format "%s in:name user:%s" repo-part owner)))
-      (format "user:%s" input))))
+      (format "%s in:name" input))))
 
-(defun remoto--search-repos (query)
+(defun remoto--search-repos (query &optional callback)
   "Search GitHub repositories matching QUERY.
 Returns a list of owner/repo strings.  Requires at least 3 characters.
 When QUERY contains a slash and extends a cached query that covers the
 full owner part, filters cached results client-side.  Otherwise hits
-the API for fresh results."
-  (if (< (length query) 3)
-      nil
-    (or (gethash query remoto--search-cache)
-        ;; Only filter from cache when narrowing within an owner's repos
-        (let* ((slash-pos (string-search "/" query))
-               (parent-results
-                (when slash-pos
-                  (cl-loop for key being the hash-keys of remoto--search-cache
-                           using (hash-values results)
-                           when (and (string-prefix-p key query)
-                                     (<= slash-pos (length key))
-                                     (< (length key) (length query))
-                                     results)
-                           return results))))
-          (if parent-results
-              (seq-filter (lambda (name) (string-prefix-p query name))
-                          parent-results)
-            (condition-case nil
-                (let* ((endpoint (format "search/repositories?q=%s&per_page=30"
-                                         (url-hexify-string
-                                          (remoto--search-query query))))
-                       (data (remoto--api endpoint))
-                       (items (alist-get 'items data))
-                       (results (mapcar (lambda (item)
-                                          (alist-get 'full_name item))
-                                        items)))
-                  (puthash query results remoto--search-cache)
-                  results)
-              (user-error nil)))))))
+the API for fresh results.
+
+When CALLBACK is non-nil, passes results to it instead of returning
+them directly.  This supports consult's async dynamic collection
+protocol."
+  (let ((results
+         (if (< (length query) 3)
+             nil
+           (or (remoto--search-cache-get query)
+               ;; Only filter from cache when narrowing within an owner's repos
+               (let* ((slash-pos (string-search "/" query))
+                      (parent-results
+                       (when slash-pos
+                         (cl-loop for key being the hash-keys of remoto--search-cache
+                                  using (hash-values entry)
+                                  for results = (remoto--search-cache-get key)
+                                  when (and results
+                                            (string-prefix-p key query)
+                                            (<= slash-pos (length key))
+                                            (< (length key) (length query)))
+                                  return results))))
+                 (if parent-results
+                     (seq-filter (lambda (name) (string-prefix-p query name))
+                                 parent-results)
+                   (condition-case nil
+                       (let* ((endpoint (format "search/repositories?q=%s&per_page=30"
+                                                (url-hexify-string
+                                                 (remoto--search-query query))))
+                              (data (remoto--api endpoint))
+                              (items (alist-get 'items data))
+                              (results (mapcar (lambda (item)
+                                                 (alist-get 'full_name item))
+                                               items)))
+                         (remoto--search-cache-put query results))
+                     (user-error nil))))))))
+    (if callback
+        (funcall callback results)
+      results)))
 
 (defvar remoto--browse-history nil
   "Minibuffer history for `remoto-browse'.")

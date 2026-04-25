@@ -400,8 +400,8 @@
     (expect (remoto--search-repos "") :to-be nil)
     (expect (remoto--search-repos "ab") :to-be nil))
 
-  (it "builds search query with user qualifier"
-    (expect (remoto--search-query "torvalds") :to-equal "user:torvalds")
+  (it "builds search query from input"
+    (expect (remoto--search-query "torvalds") :to-equal "torvalds in:name")
     (expect (remoto--search-query "torvalds/") :to-equal "user:torvalds")
     (expect (remoto--search-query "torvalds/lin") :to-equal "lin in:name user:torvalds"))
 
@@ -467,7 +467,33 @@
             (lambda (_endpoint)
               (user-error "network error")))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
-      (expect (remoto--search-repos "torvalds") :to-be nil))))
+      (expect (remoto--search-repos "torvalds") :to-be nil)))
+
+  (it "expires cache entries after TTL"
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (remoto-search-cache-ttl 1)
+          (call-count 0))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_endpoint)
+                (setq call-count (1+ call-count))
+                '((items . (((full_name . "torvalds/linux")))))))
+      (remoto--search-repos "torvalds")
+      (expect call-count :to-equal 1)
+      ;; Manually expire the entry by backdating the timestamp
+      (let ((entry (gethash "torvalds" remoto--search-cache)))
+        (setcar entry (- (float-time) 10)))
+      ;; Next call should re-fetch
+      (remoto--search-repos "torvalds")
+      (expect call-count :to-equal 2)))
+
+  (it "delivers results via callback when provided"
+    (spy-on 'remoto--api :and-return-value
+            '((items . (((full_name . "torvalds/linux"))))))
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (captured nil))
+      (remoto--search-repos "torvalds"
+                            (lambda (results) (setq captured results)))
+      (expect captured :to-equal '("torvalds/linux")))))
 
 (describe "remoto--read-repo"
   (it "passes URLs straight through without consult"

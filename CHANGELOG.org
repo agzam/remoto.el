@@ -3,6 +3,21 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [Unreleased]
+
+** Changed
+- Replaced ~gh~ CLI dependency with the ~ghub~ Emacs library for all GitHub API access. No external binary needed - authentication is handled through ~auth-source~.
+- Added ~remoto-github-auth~ defcustom for controlling which ghub token to use.
+- Public repos now work without any token configuration (falls back to unauthenticated access at 60 req/hr).
+- Search cache entries now expire after 5 minutes (~remoto-search-cache-ttl~), preventing stale results from persisting across an entire session.
+- Bare search queries (no ~owner/~ prefix) now search by repository name instead of GitHub username, so typing "remoto.el" finds repos named "remoto.el".
+
+** Fixed
+- ~remoto--search-repos~ now accepts an optional callback argument for compatibility with consult's async dynamic collection protocol.
+
+** Removed
+- ~gh~ CLI is no longer required. Removes implicit telemetry that ~gh~ collects unless users explicitly opt out.
+
 * [0.1.0] - 2026-04-24
 
 ** Added

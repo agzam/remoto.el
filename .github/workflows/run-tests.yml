@@ -18,8 +18,11 @@ jobs:
       - name: Install dependencies
         run: make deps
 
-      - name: Run tests
+      - name: Run unit tests
         run: make test
+
+      - name: Run integration tests
+        run: make test-integration
 
       - name: Check byte-compilation
         run: make check-compile

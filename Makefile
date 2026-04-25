@@ -1,4 +1,4 @@
-.PHONY: help test deps check-autoloads check-compile compile clean
+.PHONY: help test test-integration test-all deps check-autoloads check-compile compile clean
 
 define DEPS_SCRIPT
 (progn
@@ -6,18 +6,21 @@ define DEPS_SCRIPT
 (add-to-list 'package-archives '("melpa" . "http://melpa.org/packages/"))
 (package-initialize)
 (package-refresh-contents)
+(package-install 'ghub)
 (package-install 'buttercup))
 endef
 export DEPS_SCRIPT
 
 help:
 	@echo "Available commands:"
-	@echo "  make deps          Install dependencies"
-	@echo "  make test          Run the tests"
-	@echo "  make compile       Byte-compile the package"
-	@echo "  make check-autoloads Generate and load autoloads"
-	@echo "  make check-compile  Check for clean byte-compilation"
-	@echo "  make clean          Remove compiled files"
+	@echo "  make deps              Install dependencies"
+	@echo "  make test              Run unit tests"
+	@echo "  make test-integration  Run integration tests (needs network)"
+	@echo "  make test-all          Run all tests"
+	@echo "  make compile           Byte-compile the package"
+	@echo "  make check-autoloads   Generate and load autoloads"
+	@echo "  make check-compile     Check for clean byte-compilation"
+	@echo "  make clean             Remove compiled files"
 
 deps:
 	@echo "Installing dependencies"
@@ -25,8 +28,15 @@ deps:
 
 test:
 	emacs --batch --funcall package-initialize --directory . \
-	--eval '(add-to-list '\''load-path "..")' \
-	--funcall buttercup-run-discover
+	-l test/remoto-tests.el \
+	--funcall buttercup-run
+
+test-integration:
+	emacs --batch --funcall package-initialize --directory . \
+	-l test/remoto-integration-tests.el \
+	--funcall buttercup-run
+
+test-all: test test-integration
 
 check-autoloads:
 	@echo "Generating and loading autoloads..."
