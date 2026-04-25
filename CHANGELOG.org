@@ -3,7 +3,7 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
-* [Unreleased]
+* [1.0.0] - 2026-04-25
 
 ** Changed
 - Replaced ~gh~ CLI dependency with the ~ghub~ Emacs library for all GitHub API access. No external binary needed - authentication is handled through ~auth-source~.
@@ -14,6 +14,8 @@ Changes to the project, following Keep a Changelog conventions.
 
 ** Fixed
 - ~remoto--search-repos~ now accepts an optional callback argument for compatibility with consult's async dynamic collection protocol.
+- Git remote URLs with dotted repo names (e.g., ~git@github.com:agzam/remoto.el.git~) now parse correctly.
+- Search cache now correctly caches empty results instead of re-hitting the API on every query.
 
 ** Removed
 - ~gh~ CLI is no longer required. Removes implicit telemetry that ~gh~ collects unless users explicitly opt out.

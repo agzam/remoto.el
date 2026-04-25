@@ -99,6 +99,14 @@
       (expect (remoto-path-owner p) :to-equal "torvalds")
       (expect (remoto-path-repo p) :to-equal "linux")))
 
+  (it "parses git remote with dotted repo name"
+    (let ((p (remoto--parse-input "git@github.com:agzam/remoto.el.git")))
+      (expect (remoto-path-owner p) :to-equal "agzam")
+      (expect (remoto-path-repo p) :to-equal "remoto.el"))
+    (let ((p (remoto--parse-input "git@github.com:agzam/remoto.el")))
+      (expect (remoto-path-owner p) :to-equal "agzam")
+      (expect (remoto-path-repo p) :to-equal "remoto.el")))
+
   (it "parses owner/repo shorthand"
     (let ((p (remoto--parse-input "torvalds/linux")))
       (expect (remoto-path-owner p) :to-equal "torvalds")
@@ -485,6 +493,17 @@
       ;; Next call should re-fetch
       (remoto--search-repos "torvalds")
       (expect call-count :to-equal 2)))
+
+  (it "caches empty results without re-hitting API"
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (call-count 0))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_endpoint)
+                (setq call-count (1+ call-count))
+                '((items))))
+      (remoto--search-repos "zzzznotfound")
+      (remoto--search-repos "zzzznotfound")
+      (expect call-count :to-equal 1)))
 
   (it "delivers results via callback when provided"
     (spy-on 'remoto--api :and-return-value

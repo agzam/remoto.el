@@ -74,42 +74,49 @@
 ;;; Tree fetching
 
 (describe "integration: tree fetching"
+  (before-all
+    (setq remoto-itest--tree-cache (make-hash-table :test 'equal))
+    (setq remoto-itest--tree-branch-cache (make-hash-table :test 'equal))
+    (let ((remoto--tree-cache remoto-itest--tree-cache)
+          (remoto--default-branch-cache remoto-itest--tree-branch-cache)
+          (remoto--content-cache (make-hash-table :test 'equal)))
+      (setq remoto-itest--tree
+            (remoto--fetch-tree
+             remoto-itest-owner remoto-itest-repo remoto-itest-ref))))
+
+  (after-all
+    (makunbound 'remoto-itest--tree)
+    (makunbound 'remoto-itest--tree-cache)
+    (makunbound 'remoto-itest--tree-branch-cache))
+
   (it "fetches the full tree without truncation"
-    (remoto-itest-with-clean-cache
-      (let ((tree (remoto--fetch-tree
-                   remoto-itest-owner remoto-itest-repo remoto-itest-ref)))
-        ;; emacs-29.1 has ~5200 entries
-        (expect (hash-table-count tree) :to-be-greater-than 5000)
-        ;; not truncated
-        (expect (gethash "\0truncated" tree) :to-be nil))))
+    ;; emacs-29.1 has ~5200 entries
+    (expect (hash-table-count remoto-itest--tree) :to-be-greater-than 5000)
+    ;; not truncated
+    (expect (gethash "\0truncated" remoto-itest--tree) :to-be nil))
 
   (it "includes root entry"
-    (remoto-itest-with-clean-cache
-      (let ((tree (remoto--fetch-tree
-                   remoto-itest-owner remoto-itest-repo remoto-itest-ref)))
-        (expect (gethash "" tree) :to-be-truthy)
-        (expect (plist-get (gethash "" tree) :type) :to-equal "tree"))))
+    (let ((entry (gethash "" remoto-itest--tree)))
+      ;; Diagnostic: show the actual entry structure on CI failure
+      (expect (format "entry=%S type-of=%S" entry (type-of entry))
+              :to-match "diagnostic")
+      (expect entry :to-be-truthy)
+      (expect (plist-get entry :type) :to-equal "tree")))
 
   (it "includes known files at expected paths"
-    (remoto-itest-with-clean-cache
-      (let ((tree (remoto--fetch-tree
-                   remoto-itest-owner remoto-itest-repo remoto-itest-ref)))
-        ;; top-level files
-        (expect (gethash "README" tree) :to-be-truthy)
-        (expect (plist-get (gethash "README" tree) :type) :to-equal "blob")
-        ;; nested file
-        (expect (gethash "lisp/emacs-lisp/cl-lib.el" tree) :to-be-truthy)
-        (expect (plist-get (gethash "lisp/emacs-lisp/cl-lib.el" tree) :type)
-                :to-equal "blob"))))
+    ;; top-level files
+    (expect (gethash "README" remoto-itest--tree) :to-be-truthy)
+    (expect (plist-get (gethash "README" remoto-itest--tree) :type) :to-equal "blob")
+    ;; nested file
+    (expect (gethash "lisp/emacs-lisp/cl-lib.el" remoto-itest--tree) :to-be-truthy)
+    (expect (plist-get (gethash "lisp/emacs-lisp/cl-lib.el" remoto-itest--tree) :type)
+            :to-equal "blob"))
 
   (it "synthesizes intermediate directories"
-    (remoto-itest-with-clean-cache
-      (let ((tree (remoto--fetch-tree
-                   remoto-itest-owner remoto-itest-repo remoto-itest-ref)))
-        (expect (gethash "lisp" tree) :to-be-truthy)
-        (expect (plist-get (gethash "lisp" tree) :type) :to-equal "tree")
-        (expect (gethash "lisp/emacs-lisp" tree) :to-be-truthy)
-        (expect (plist-get (gethash "lisp/emacs-lisp" tree) :type) :to-equal "tree")))))
+    (expect (gethash "lisp" remoto-itest--tree) :to-be-truthy)
+    (expect (plist-get (gethash "lisp" remoto-itest--tree) :type) :to-equal "tree")
+    (expect (gethash "lisp/emacs-lisp" remoto-itest--tree) :to-be-truthy)
+    (expect (plist-get (gethash "lisp/emacs-lisp" remoto-itest--tree) :type) :to-equal "tree")))
 
 ;;; Tree entry lookup via parsed paths
 
