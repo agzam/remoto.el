@@ -88,6 +88,16 @@ The virtual filesystem uses paths of the form:
 4. Content is cached by SHA, so re-opening the same file is instant.
 5. Authentication, SSO, private repos - all handled transparently by ~gh~.
 
+** FAQ
+*** Why this isn't a [[https://www.gnu.org/software/emacs/manual/html_node/tramp/][TRAMP]] backend?
+- TRAMP fundamentally is a shell-over-transport abstraction. Every TRAMP backend assumes a remote shell on the other end, remoto.el has no remote shell.
+- TRAMP's backend API is large. You'd need to implement or stub dozens of operations, many of which assume concepts that don't map to a REST API (process execution, file ownership, symlink resolution, timestamps).
+- TRAMP's connection management (open/close/reuse) is built around persistent sessions. The GitHub API is stateless HTTP - there's no connection to manage.
+- TRAMP's caching layer is path-based and per-connection. remoto's tree cache (one API call fetches the entire repo tree, then everything is served from memory) is a fundamentally different - and much more efficient - model for a read-only tree-structured API.
+- =file-name-handler-alist= IS the same mechanism TRAMP uses. Registering there directly gives you the same integration (dired, find-file, completions) without the framework overhead.
+  
+For a read-only tree browser backed by a REST API, a direct file-name-handler is the simpler, more natural fit
+
 ** Limitations
 
 - Read-only. No commits, no pushes, no file modifications.

@@ -881,7 +881,6 @@ protocol."
                       (parent-results
                        (when slash-pos
                          (cl-loop for key being the hash-keys of remoto--search-cache
-                                  using (hash-values entry)
                                   for results = (remoto--search-cache-get key)
                                   when (and results
                                             (string-prefix-p key query)
