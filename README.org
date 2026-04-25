@@ -24,7 +24,11 @@ For now it works only with GitHub repos. Future plans include support for other 
 
 * How
 
+** Prerequisites
 Requires [[https://cli.github.com][gh CLI]] installed and authenticated (~gh auth login~) - for private repos.
+
+*** Important note! 
+Delegating dealing with GitHub to =gh= was an easy decision - that simplified a bunch of things out of the box. However, the [[https://www.reddit.com/r/emacs/comments/1sutzz6/new_package_browse_github_repos_without_cloning/][announcement discussion thread]] revealed the dark side of the tool. Turns out =gh= has the built-in telemetry that users have to explicitly opt out from. I decided to re-build the package without this dependency. It then would be using =ghub= lib that comes bundled in Magit Forge. If your GitHub token is set to work with it, you won't have to do anything else. If [[https://docs.magit.vc/forge/Setup-for-Githubcom.html][you have not set up the token, you'd have to do that]], otherwise the package would stop working properly (even when =gh= still works). Once #3 gets merged =gh CLI= dependency would be completely removed.
 
 ** use-package + straight
 
