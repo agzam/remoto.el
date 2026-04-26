@@ -362,7 +362,18 @@
     (remoto-test-with-cache
       (let ((default-directory "/github:testowner/testrepo@main:/"))
         (expect (expand-file-name "/tmp/foo")
-                :to-equal "/tmp/foo")))))
+                :to-equal "/tmp/foo"))))
+
+  (it "insert-file-contents does not move point"
+    (remoto-test-with-cache
+      (spy-on 'remoto--fetch-file-content
+              :and-return-value "line one\nline two\nline three\n")
+      (with-temp-buffer
+        (let ((pt (point)))
+          (remoto--handle-insert-file-contents
+           "/github:testowner/testrepo@main:/README.md")
+          (expect (point) :to-equal pt)
+          (expect (buffer-string) :to-equal "line one\nline two\nline three\n"))))))
 
 ;;; Dired listing format
 
@@ -435,6 +446,21 @@
           (remoto-copy-github-url)
           (expect (car kill-ring)
                   :to-equal "https://github.com/testowner/testrepo/blob/main/src/main.el#L3")))))
+
+  (it "copies file URL with line range when region is active"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (insert "line1\nline2\nline3\nline4\nline5\n")
+        (setq-local buffer-file-name "/github:testowner/testrepo@main:/src/main.el")
+        (goto-char (point-min))
+        (forward-line 1)
+        (set-mark (point))
+        (forward-line 2)
+        (activate-mark)
+        (remoto-copy-github-url)
+        (deactivate-mark)
+        (expect (car kill-ring)
+                :to-equal "https://github.com/testowner/testrepo/blob/main/src/main.el#L2-L4"))))
 
   (it "copies directory URL from dired with point on a directory"
     (remoto-test-with-cache

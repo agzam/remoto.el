@@ -96,7 +96,7 @@ For a read-only tree browser backed by a REST API, a direct file-name-handler is
 
 Git's own protocols let you talk to a remote repo without cloning it, so why not use that, right?
 
-- Tree listing. There's no raw HTTP URL that gives you a directory listing. raw.githubblabla.com can't do directory indexes. You'd have to shell out to `git ls-tree ... etc.` over the ssh, which means essentially implementing a partial git client.
+- Tree listing. There's no raw HTTP URL that gives you a directory listing. raw.githubblabla.com can't do directory indexes. You'd have to shell out to =git ls-tree ... etc.= over the ssh, which means essentially implementing a partial git client.
 
 - Branch listing and repo search - no git protocol equivalent for those - need the API
 
@@ -111,3 +111,12 @@ We can only imagine a world where git's transport layer gives you a browsable fi
 - Timestamps in dired are synthetic (the tree API has no timestamps).
 - Very large repos (100k+ files) use slower per-directory fetching.
 - Rate limit: 5,000 requests/hour (normal browsing stays well within this).
+
+* Changelog
+
+See [[file:changelog.org][changelog.org]] for a detailed list of changes and version history.
+
+* License
+Copyright © 2026 Ag Ibragimov
+
+GPL-3.0-or-later. See [[file:LICENSE][LICENSE]].

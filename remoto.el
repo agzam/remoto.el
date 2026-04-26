@@ -588,7 +588,9 @@ VISIT, BEG, END, REPLACE as per `insert-file-contents'."
                        (substring content (1- beg) (1- end))
                      content))
              (len (length text)))
-        (insert text)
+        (let ((pt (point)))
+          (insert text)
+          (goto-char pt))
         (when visit
           (setq buffer-file-name filename)
           (setq buffer-read-only t)
@@ -825,7 +827,11 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
                      "tree" "blob"))
            (line-suffix (when (and (equal type "blob")
                                    (not (derived-mode-p 'dired-mode)))
-                          (format "#L%d" (line-number-at-pos))))
+                          (if (use-region-p)
+                              (format "#L%d-L%d"
+                                      (line-number-at-pos (region-beginning))
+                                      (line-number-at-pos (region-end)))
+                            (format "#L%d" (line-number-at-pos)))))
            (url (format "https://github.com/%s/%s/%s/%s/%s%s"
                         owner repo type ref path
                         (or line-suffix ""))))
