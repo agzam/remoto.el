@@ -852,16 +852,13 @@ Set to 0 to disable caching."
 Returns two values via list: (HIT-P RESULTS).  HIT-P is non-nil
 when KEY was found and not expired.  RESULTS may be nil for
 queries that returned zero results."
-  (let ((entry (gethash key remoto--search-cache)))
-    (if (null entry)
-        '(nil nil)
-      (let ((timestamp (car entry))
-            (results (cdr entry)))
-        (if (and (not (zerop remoto-search-cache-ttl))
-                 (< remoto-search-cache-ttl (- (float-time) timestamp)))
-            (progn (remhash key remoto--search-cache)
-                   '(nil nil))
-          (list t results))))))
+  (if-let* ((entry (gethash key remoto--search-cache))
+            (timestamp (car entry))
+            (fresh-p (or (zerop remoto-search-cache-ttl)
+                         (< (- (float-time) timestamp) remoto-search-cache-ttl))))
+      (list t (cdr entry))
+    (when entry (remhash key remoto--search-cache))
+    '(nil nil)))
 
 (defun remoto--search-cache-put (key results)
   "Store RESULTS for KEY with current timestamp."
@@ -872,14 +869,13 @@ queries that returned zero results."
   "Build a GitHub search query string from INPUT.
 When INPUT contains a slash, searches within that owner's repos.
 Otherwise searches by repository name."
-  (let ((slash-pos (string-search "/" input)))
-    (if slash-pos
-        (let ((owner (substring input 0 slash-pos))
-              (repo-part (substring input (1+ slash-pos))))
-          (if (string-empty-p repo-part)
-              (format "user:%s" owner)
-            (format "%s in:name user:%s" repo-part owner)))
-      (format "%s in:name" input))))
+  (if-let* ((slash-pos (string-search "/" input))
+            (owner (substring input 0 slash-pos))
+            (repo-part (substring input (1+ slash-pos))))
+      (if (string-empty-p repo-part)
+          (format "user:%s" owner)
+        (format "%s in:name user:%s" repo-part owner))
+    (format "%s in:name" input)))
 
 (defun remoto--fetch-branches (owner repo)
   "Fetch branch names for OWNER/REPO, cached per `remoto-search-cache-ttl'."
@@ -898,6 +894,58 @@ Otherwise searches by repository name."
             branches)
         (user-error nil)))))
 
+(defun remoto--complete-branches (query at-pos)
+  "Complete branch names for QUERY with @ at AT-POS.
+Returns owner/repo@branch candidates matching the prefix after @."
+  (let* ((repo-part (substring query 0 at-pos))
+         (branch-prefix (substring query (1+ at-pos))))
+    (when (string-match
+           (rx bos (group (+ (not "/"))) "/" (group (+ nonl)) eos)
+           repo-part)
+      (when-let* ((branches (remoto--fetch-branches
+                             (match-string 1 repo-part)
+                             (match-string 2 repo-part))))
+        (thread-last branches
+          (seq-filter (lambda (b)
+                        (or (string-empty-p branch-prefix)
+                            (string-prefix-p branch-prefix b))))
+          (mapcar (lambda (b) (format "%s@%s" repo-part b))))))))
+
+(defun remoto--search-repos-fetch (query)
+  "Fetch or retrieve cached repo search results for QUERY.
+Returns a list of owner/repo strings, or nil."
+  (when (<= 3 (length query))
+    (if-let* ((cached (remoto--search-cache-get query))
+              ((car cached)))
+        (cadr cached)
+      (if-let* ((parent (remoto--search-repos-from-parent query)))
+          (cdr parent)
+        (condition-case nil
+            (let* ((endpoint (format "search/repositories?q=%s&per_page=30"
+                                     (url-hexify-string
+                                      (remoto--search-query query))))
+                   (items (alist-get 'items (remoto--api endpoint)))
+                   (results (mapcar (lambda (item) (alist-get 'full_name item))
+                                    items)))
+              (remoto--search-cache-put query results))
+          (user-error nil))))))
+
+(defun remoto--search-repos-from-parent (query)
+  "Try narrowing a cached parent query to answer QUERY.
+Returns (HIT-P . FILTERED-RESULTS) when a parent cache entry
+exists, nil otherwise."
+  (when-let* ((slash-pos (string-search "/" query))
+              (parent-results
+               (cl-loop for key being the hash-keys of remoto--search-cache
+                        for entry = (remoto--search-cache-get key)
+                        when (and (car entry)
+                                  (string-prefix-p key query)
+                                  (<= slash-pos (length key))
+                                  (< (length key) (length query)))
+                        return (cadr entry))))
+    (cons t (seq-filter (lambda (name) (string-prefix-p query name))
+                        parent-results))))
+
 (defun remoto--search-repos (query &optional callback)
   "Search GitHub repositories matching QUERY.
 Returns a list of owner/repo strings.  Requires at least 3 characters.
@@ -906,54 +954,10 @@ When QUERY contains `@', completes branch names for the specified repo.
 When CALLBACK is non-nil, passes results to it instead of returning
 them directly.  This supports consult's async dynamic collection
 protocol."
-  (let ((results
-         (let ((at-pos (string-search "@" query)))
-           (if at-pos
-               ;; Branch completion: owner/repo@prefix -> owner/repo@branch
-               (let* ((repo-part (substring query 0 at-pos))
-                      (branch-prefix (substring query (1+ at-pos))))
-                 (when (string-match
-                        (rx bos (group (+ (not "/"))) "/" (group (+ nonl)) eos)
-                        repo-part)
-                   (let* ((owner (match-string 1 repo-part))
-                          (repo (match-string 2 repo-part))
-                          (branches (remoto--fetch-branches owner repo)))
-                     (when branches
-                       (thread-last branches
-                         (seq-filter (lambda (b)
-                                       (or (string-empty-p branch-prefix)
-                                           (string-prefix-p branch-prefix b))))
-                         (mapcar (lambda (b)
-                                   (format "%s/%s@%s" owner repo b))))))))
-             ;; Normal repo search
-             (when (<= 3 (length query))
-               (let ((cached (remoto--search-cache-get query)))
-                 (if (car cached)
-                     (cadr cached)
-                   (let* ((slash-pos (string-search "/" query))
-                          (parent-results
-                           (when slash-pos
-                             (cl-loop for key being the hash-keys of remoto--search-cache
-                                      for entry = (remoto--search-cache-get key)
-                                      when (and (car entry)
-                                                (string-prefix-p key query)
-                                                (<= slash-pos (length key))
-                                                (< (length key) (length query)))
-                                      return (cadr entry)))))
-                     (if parent-results
-                         (seq-filter (lambda (name) (string-prefix-p query name))
-                                     parent-results)
-                       (condition-case nil
-                           (let* ((endpoint (format "search/repositories?q=%s&per_page=30"
-                                                    (url-hexify-string
-                                                     (remoto--search-query query))))
-                                  (data (remoto--api endpoint))
-                                  (items (alist-get 'items data))
-                                  (results (mapcar (lambda (item)
-                                                     (alist-get 'full_name item))
-                                                   items)))
-                             (remoto--search-cache-put query results))
-                         (user-error nil)))))))))))
+  (let* ((at-pos (string-search "@" query))
+         (results (if at-pos
+                      (remoto--complete-branches query at-pos)
+                    (remoto--search-repos-fetch query))))
     (if callback
         (funcall callback results)
       results)))
