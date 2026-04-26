@@ -297,21 +297,18 @@ For truncated trees, fetches the directory on demand."
               (remoto--fetch-directory-contents parsed dir-path tree)))
          (prefix (if (string-empty-p dir-path) "" (concat dir-path "/")))
          (prefix-len (length prefix)))
-    (sort
-     (thread-last (hash-table-keys tree)
-       (seq-filter (lambda (path)
-                     (and (not (string-prefix-p "\0" path))
-                          (string-prefix-p prefix path)
-                          (not (equal path dir-path))
-                          ;; Direct child: no more slashes after prefix
-                          (not (string-search "/" (substring path prefix-len))))))
-       (mapcar (lambda (path)
-                 (cons (substring path prefix-len)
-                       (gethash path tree))))
-       (seq-remove (lambda (child)
-                     (string-empty-p (car child)))))
-     (lambda (a b)
-       (string< (car a) (car b))))))
+    (thread-last (hash-table-keys tree)
+      (seq-filter (lambda (path)
+                    (and (not (string-prefix-p "\0" path))
+                         (string-prefix-p prefix path)
+                         (not (equal path dir-path))
+                         ;; Direct child: no more slashes after prefix
+                         (not (string-search "/" (substring path prefix-len))))))
+      (mapcar (lambda (path)
+                (cons (substring path prefix-len)
+                      (gethash path tree))))
+      (seq-remove (lambda (child) (string-empty-p (car child))))
+      (seq-sort (lambda (a b) (string< (car a) (car b)))))))
 
 ;;;; Path normalization helpers
 
