@@ -97,6 +97,20 @@ See ghub documentation for auth-source setup."
                  (string :tag "Literal token"))
   :group 'remoto)
 
+(defcustom remoto-auth-timeout 2
+  "Seconds to wait for auth-source token lookup before giving up.
+When ghub's token lookup (which may trigger GPG decryption of
+authinfo) exceeds this limit, remoto falls back to unauthenticated
+access and caches the failure for the rest of the session.  Use
+`remoto-reset-auth' to retry after adding a token."
+  :type 'number
+  :group 'remoto)
+
+(defvar remoto--auth-failed nil
+  "Non-nil when authenticated GitHub access has failed or timed out.
+Causes `remoto--api' to skip token lookup and use unauthenticated
+requests.  Reset with `remoto-reset-auth'.")
+
 (defun remoto--json-reader (_status)
   "Parse JSON response with list-type arrays for remoto compatibility.
 Handles both header-present and header-stripped response buffers."
@@ -136,16 +150,30 @@ automatically.  When `remoto-github-auth' is nil (default) and no
 token is found in auth-source, retries unauthenticated - public
 repos work without any setup.  Signals `user-error' on HTTP
 failures."
-  (let ((resource (concat "/" endpoint)))
-    (condition-case err
-        (remoto--ghub-get resource remoto-github-auth endpoint)
-      (error
-       ;; Any pre-request failure (no token, no username in git
-       ;; config, auth-source miss) - retry unauthenticated.
-       ;; HTTP errors are already handled by remoto--ghub-get.
-       (if (not (eq remoto-github-auth 'none))
-           (remoto--ghub-get resource 'none endpoint)
-         (signal (car err) (cdr err)))))))
+  (let* ((resource (concat "/" endpoint))
+         (auth (if remoto--auth-failed 'none remoto-github-auth)))
+    (if (eq auth 'none)
+        (remoto--ghub-get resource 'none endpoint)
+      (condition-case err
+          (let ((result (with-timeout (remoto-auth-timeout 'remoto--timed-out)
+                          (remoto--ghub-get resource auth endpoint))))
+            (when (eq result 'remoto--timed-out)
+              (setq remoto--auth-failed t)
+              (message "Remoto: auth lookup timed out; using unauthenticated access (see `remoto-reset-auth')")
+              (setq result (remoto--ghub-get resource 'none endpoint)))
+            result)
+        (error
+         (setq remoto--auth-failed t)
+         (message "Remoto: auth unavailable (%s); using unauthenticated access"
+                  (error-message-string err))
+         (remoto--ghub-get resource 'none endpoint))))))
+
+(defun remoto-reset-auth ()
+  "Clear the auth failure cache, retrying token lookup on next API call.
+Use after adding a GitHub token to auth-source."
+  (interactive)
+  (setq remoto--auth-failed nil)
+  (message "Remoto: auth cache cleared; will retry token lookup on next request"))
 
 (defun remoto--default-branch (owner repo)
   "Fetch the default branch for OWNER/REPO."

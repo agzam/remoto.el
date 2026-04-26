@@ -713,6 +713,60 @@
     (spy-on 'completing-read :and-return-value "agzam/remoto.el@dont-use-gh")
     (expect (remoto--read-repo) :to-equal "agzam/remoto.el@dont-use-gh")))
 
+;;; Auth fallback
+
+(describe "remoto--api auth fallback"
+  (it "falls back to unauthenticated when auth times out"
+    (let ((remoto--auth-failed nil)
+          (remoto-github-auth nil)
+          (remoto-auth-timeout 0.3))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (if (eq (plist-get args :auth) 'none)
+                    '((name . "test-repo"))
+                  (sleep-for 5))))
+      (expect (remoto--api "repos/owner/repo") :to-equal '((name . "test-repo")))
+      (expect remoto--auth-failed :to-be-truthy)))
+
+  (it "falls back to unauthenticated on auth error"
+    (let ((remoto--auth-failed nil)
+          (remoto-github-auth nil)
+          (remoto-auth-timeout 5))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (if (eq (plist-get args :auth) 'none)
+                    '((name . "test-repo"))
+                  (error "Package ghub requires a Github API token"))))
+      (expect (remoto--api "repos/owner/repo") :to-equal '((name . "test-repo")))
+      (expect remoto--auth-failed :to-be-truthy)))
+
+  (it "skips auth when failure is cached"
+    (let ((remoto--auth-failed t)
+          (remoto-github-auth nil)
+          (remoto-auth-timeout 5)
+          (auth-used nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (push (plist-get args :auth) auth-used)
+                '((name . "test-repo"))))
+      (remoto--api "repos/owner/repo")
+      (expect auth-used :to-equal '(none))))
+
+  (it "clears cache with remoto-reset-auth"
+    (let ((remoto--auth-failed t))
+      (remoto-reset-auth)
+      (expect remoto--auth-failed :to-be nil)))
+
+  (it "does not cache failure when auth succeeds"
+    (let ((remoto--auth-failed nil)
+          (remoto-github-auth nil)
+          (remoto-auth-timeout 5))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest _args)
+                '((name . "test-repo"))))
+      (remoto--api "repos/owner/repo")
+      (expect remoto--auth-failed :to-be nil))))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:
