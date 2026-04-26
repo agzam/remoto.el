@@ -131,9 +131,10 @@ Handles both header-present and header-stripped response buffers."
   "Call ghub-get on RESOURCE with AUTH, translating errors.
 ENDPOINT is used in error messages for context."
   (condition-case err
-      (ghub-get resource nil
-                :auth auth
-                :reader #'remoto--json-reader)
+      (let ((inhibit-message (not ghub-debug)))
+        (ghub-get resource nil
+                  :auth auth
+                  :reader #'remoto--json-reader))
     (ghub-404
      (user-error "Remoto: not found: %s" endpoint))
     (ghub-403

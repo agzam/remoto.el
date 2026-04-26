@@ -770,6 +770,27 @@
       (remoto--api "repos/owner/repo")
       (expect remoto--auth-failed :to-be nil))))
 
+(describe "remoto--ghub-get message suppression"
+  (it "suppresses messages when ghub-debug is nil"
+    (let ((ghub-debug nil)
+          (captured-inhibit nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest _args)
+                (setq captured-inhibit inhibit-message)
+                '((result . t))))
+      (remoto--ghub-get "/repos/owner/repo" 'none "repos/owner/repo")
+      (expect captured-inhibit :to-be t)))
+
+  (it "allows messages when ghub-debug is t"
+    (let ((ghub-debug t)
+          (captured-inhibit nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest _args)
+                (setq captured-inhibit inhibit-message)
+                '((result . t))))
+      (remoto--ghub-get "/repos/owner/repo" 'none "repos/owner/repo")
+      (expect captured-inhibit :to-be nil))))
+
 ;;; Partial path parsing
 
 (describe "remoto--parse-partial-github-path"
