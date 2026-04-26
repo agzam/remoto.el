@@ -12,7 +12,7 @@ El Remoto - browse any GitHub repository in Emacs without cloning it.
 
 [[./test/demo.gif]]
 
-remoto.el registers a virtual filesystem via ~file-name-handler-alist~ that translates standard Emacs file operations into GitHub API calls via the ~gh~ CLI. The result: ~find-file~, ~dired~, tab-completion, ~dired-subtree~ - all standard Emacs file tooling works against a remote GitHub repo. Read-only.
+remoto.el registers a virtual filesystem via ~file-name-handler-alist~ that translates standard Emacs file operations into GitHub API calls via the ~ghub~ library. The result: ~find-file~, ~dired~, tab-completion, ~dired-subtree~ - all standard Emacs file tooling works against a remote GitHub repo. Read-only.
 
 * Why
 
@@ -55,6 +55,20 @@ GitHub URLs are detected automatically in ~dired~ and ~find-file~:
 C-x d /github.com/torvalds/linux RET
 C-x C-f https://github.com/torvalds/linux/blob/master/README RET
 #+end_src
+
+*** find-file completion
+
+The ~/github:~ prefix enables multi-level completion directly in ~find-file~ (~C-x C-f~). Type ~/github:~ and then narrow through users, repos, branches, and files:
+
+#+begin_example
+/github:tor         -> users/orgs matching "tor" (torvalds/, torgeirhelge/, ...)
+/github:torvalds/   -> repos (linux, subsurface, ...)
+/github:torvalds/lin -> filters repos starting with "lin"
+/github:torvalds/linux@        -> branches (master, ...)
+/github:torvalds/linux@master: -> file-level completion within the repo
+#+end_example
+
+Hitting RET on ~/github:owner/repo~ (without ~@branch~) opens the repo with its default branch. User search requires at least 2 characters.
 
 *** Canonical paths
 

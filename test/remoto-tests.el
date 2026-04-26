@@ -36,7 +36,10 @@
   `(let ((remoto--tree-cache (make-hash-table :test 'equal))
          (remoto--default-branch-cache (make-hash-table :test 'equal))
          (remoto--content-cache (make-hash-table :test 'equal))
-         (remoto--branches-cache (make-hash-table :test 'equal)))
+         (remoto--branches-cache (make-hash-table :test 'equal))
+         (remoto--search-cache (make-hash-table :test 'equal))
+         (remoto--users-cache (make-hash-table :test 'equal))
+         (remoto--user-repos-cache (make-hash-table :test 'equal)))
      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
      (remoto-test--install-mock-tree)
      ,@body))
@@ -766,6 +769,281 @@
                 '((name . "test-repo"))))
       (remoto--api "repos/owner/repo")
       (expect remoto--auth-failed :to-be nil))))
+
+(describe "remoto--ghub-get message suppression"
+  (it "suppresses messages when ghub-debug is nil"
+    (let ((ghub-debug nil)
+          (captured-inhibit nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest _args)
+                (setq captured-inhibit inhibit-message)
+                '((result . t))))
+      (remoto--ghub-get "/repos/owner/repo" 'none "repos/owner/repo")
+      (expect captured-inhibit :to-be t)))
+
+  (it "allows messages when ghub-debug is t"
+    (let ((ghub-debug t)
+          (captured-inhibit nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest _args)
+                (setq captured-inhibit inhibit-message)
+                '((result . t))))
+      (remoto--ghub-get "/repos/owner/repo" 'none "repos/owner/repo")
+      (expect captured-inhibit :to-be nil))))
+
+;;; Partial path parsing
+
+(describe "remoto--parse-partial-github-path"
+  (it "parses /github: as root level"
+    (let ((result (remoto--parse-partial-github-path "/github:")))
+      (expect (plist-get result :level) :to-equal 'root)
+      (expect (plist-get result :owner) :to-be nil)))
+
+  (it "parses /github:owner/ as owner level"
+    (let ((result (remoto--parse-partial-github-path "/github:foobar/")))
+      (expect (plist-get result :level) :to-equal 'owner)
+      (expect (plist-get result :owner) :to-equal "foobar")))
+
+  (it "returns nil for bare /github:owner (no trailing slash)"
+    (expect (remoto--parse-partial-github-path "/github:foobar") :to-be nil))
+
+  (it "returns nil for full canonical paths"
+    (expect (remoto--parse-partial-github-path "/github:a/b@main:/src") :to-be nil))
+
+  (it "returns nil for /github:owner/repo"
+    (expect (remoto--parse-partial-github-path "/github:a/b") :to-be nil)))
+
+(describe "remoto--parse-partial-canonical"
+  (it "parses /github:owner/repo without ref"
+    (let ((p (remoto--parse-partial-canonical "/github:torvalds/linux")))
+      (expect (remoto-path-owner p) :to-equal "torvalds")
+      (expect (remoto-path-repo p) :to-equal "linux")
+      (expect (remoto-path-ref p) :to-be nil)
+      (expect (remoto-path-path p) :to-equal "/")))
+
+  (it "parses /github:owner/repo@ref"
+    (let ((p (remoto--parse-partial-canonical "/github:torvalds/linux@v6.5")))
+      (expect (remoto-path-owner p) :to-equal "torvalds")
+      (expect (remoto-path-repo p) :to-equal "linux")
+      (expect (remoto-path-ref p) :to-equal "v6.5")))
+
+  (it "parses with trailing slash"
+    (let ((p (remoto--parse-partial-canonical "/github:torvalds/linux/")))
+      (expect (remoto-path-owner p) :to-equal "torvalds")
+      (expect (remoto-path-repo p) :to-equal "linux")))
+
+  (it "returns nil for full canonical path"
+    (expect (remoto--parse-partial-canonical "/github:a/b@main:/src") :to-be nil))
+
+  (it "returns nil for /github: alone"
+    (expect (remoto--parse-partial-canonical "/github:") :to-be nil)))
+
+;;; Partial path file operations
+
+(describe "partial path file operations"
+  (it "file-directory-p returns t for /github:"
+    (expect (remoto--handle-file-directory-p "/github:") :to-be t))
+
+  (it "file-directory-p returns t for /github:owner/"
+    (expect (remoto--handle-file-directory-p "/github:foobar/") :to-be t))
+
+  (it "file-exists-p returns t for /github:"
+    (expect (remoto--handle-file-exists-p "/github:") :to-be t))
+
+  (it "file-exists-p returns t for /github:owner/"
+    (expect (remoto--handle-file-exists-p "/github:foobar/") :to-be t))
+
+  (it "file-remote-p returns /github: for partial paths"
+    (expect (remoto--handle-file-remote-p "/github:foobar/") :to-equal "/github:"))
+
+  (it "file-remote-p returns method for partial paths"
+    (expect (remoto--handle-file-remote-p "/github:foobar/" 'method) :to-equal "github"))
+
+  (it "file-name-directory returns /github: for /github:foo"
+    (expect (remoto--handle-file-name-directory "/github:foo") :to-equal "/github:"))
+
+  (it "file-name-directory returns /github:owner/ for /github:owner/repo"
+    (expect (remoto--handle-file-name-directory "/github:foobar/zapzop")
+            :to-equal "/github:foobar/"))
+
+  (it "file-name-directory returns /github:owner/ for /github:owner/repo@ref"
+    (expect (remoto--handle-file-name-directory "/github:foobar/zapzop@main")
+            :to-equal "/github:foobar/"))
+
+  (it "file-name-nondirectory returns empty for /github:"
+    (expect (remoto--handle-file-name-nondirectory "/github:") :to-equal ""))
+
+  (it "file-name-nondirectory returns owner for /github:owner"
+    (expect (remoto--handle-file-name-nondirectory "/github:foobar") :to-equal "foobar"))
+
+  (it "file-name-nondirectory returns empty for /github:owner/"
+    (expect (remoto--handle-file-name-nondirectory "/github:foobar/") :to-equal ""))
+
+  (it "file-name-nondirectory returns repo for /github:owner/repo"
+    (expect (remoto--handle-file-name-nondirectory "/github:foobar/zapzop")
+            :to-equal "zapzop"))
+
+  (it "file-name-nondirectory returns repo@ref for /github:owner/repo@ref"
+    (expect (remoto--handle-file-name-nondirectory "/github:foobar/zapzop@main")
+            :to-equal "zapzop@main")))
+
+;;; User search
+
+(describe "remoto--search-users"
+  (it "returns nil for short queries"
+    (expect (remoto--search-users "") :to-be nil)
+    (expect (remoto--search-users "a") :to-be nil))
+
+  (it "fetches users from search API"
+    (spy-on 'remoto--api :and-return-value
+            '((items . (((login . "torvalds"))
+                        ((login . "torgeirhelge"))))))
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (remoto--users-cache (make-hash-table :test 'equal)))
+      (expect (remoto--search-users "tor")
+              :to-equal '("torvalds" "torgeirhelge"))))
+
+  (it "caches results and avoids repeat API calls"
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (remoto--users-cache (make-hash-table :test 'equal))
+          (call-count 0))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_endpoint)
+                (setq call-count (1+ call-count))
+                '((items . (((login . "torvalds")))))))
+      (remoto--search-users "tor")
+      (remoto--search-users "tor")
+      (expect call-count :to-equal 1)))
+
+  (it "narrows cached results for longer prefixes"
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (remoto--users-cache (make-hash-table :test 'equal))
+          (call-count 0))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_endpoint)
+                (setq call-count (1+ call-count))
+                '((items . (((login . "torvalds"))
+                            ((login . "torgeirhelge")))))))
+      (remoto--search-users "tor")
+      (let ((result (remoto--search-users "torv")))
+        (expect result :to-equal '("torvalds"))
+        (expect call-count :to-equal 1))))
+
+  (it "returns nil on API errors"
+    (spy-on 'remoto--api :and-call-fake
+            (lambda (_) (user-error "network")))
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (remoto--users-cache (make-hash-table :test 'equal)))
+      (expect (remoto--search-users "tor") :to-be nil))))
+
+;;; User repos
+
+(describe "remoto--fetch-user-repos"
+  (it "fetches repo names from API"
+    (spy-on 'remoto--api :and-return-value
+            '(((name . "linux") (full_name . "torvalds/linux"))
+              ((name . "subsurface") (full_name . "torvalds/subsurface"))))
+    (let ((remoto--user-repos-cache (make-hash-table :test 'equal)))
+      (expect (remoto--fetch-user-repos "torvalds")
+              :to-equal '("linux" "subsurface"))))
+
+  (it "caches results"
+    (let ((remoto--user-repos-cache (make-hash-table :test 'equal))
+          (call-count 0))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_endpoint)
+                (setq call-count (1+ call-count))
+                '(((name . "linux")))))
+      (remoto--fetch-user-repos "torvalds")
+      (remoto--fetch-user-repos "torvalds")
+      (expect call-count :to-equal 1)))
+
+  (it "returns nil on API errors"
+    (spy-on 'remoto--api :and-call-fake
+            (lambda (_) (user-error "not found")))
+    (let ((remoto--user-repos-cache (make-hash-table :test 'equal)))
+      (expect (remoto--fetch-user-repos "nouser") :to-be nil))))
+
+;;; Pre-repo completions
+
+(describe "pre-repo file-name-all-completions"
+  (it "returns user completions at /github: root"
+    (spy-on 'remoto--search-users :and-return-value '("torvalds" "torgeirhelge"))
+    (let ((completions (remoto--handle-file-name-all-completions "tor" "/github:")))
+      (expect completions :to-equal '("torvalds/" "torgeirhelge/"))))
+
+  (it "filters user results by prefix"
+    (spy-on 'remoto--search-users :and-return-value '("torvalds" "torgeirhelge"))
+    (let ((completions (remoto--handle-file-name-all-completions "torv" "/github:")))
+      (expect completions :to-equal '("torvalds/"))))
+
+  (it "returns nil for empty user query"
+    (let ((completions (remoto--handle-file-name-all-completions "" "/github:")))
+      (expect completions :to-be nil)))
+
+  (it "returns repo completions at /github:owner/"
+    (spy-on 'remoto--fetch-user-repos :and-return-value '("linux" "subsurface"))
+    (let ((completions (remoto--handle-file-name-all-completions "" "/github:torvalds/")))
+      (expect completions :to-equal '("linux" "subsurface"))))
+
+  (it "filters repos by prefix"
+    (spy-on 'remoto--fetch-user-repos :and-return-value '("linux" "subsurface"))
+    (let ((completions (remoto--handle-file-name-all-completions "lin" "/github:torvalds/")))
+      (expect completions :to-equal '("linux"))))
+
+  (it "returns branch completions when @ present"
+    (spy-on 'remoto--fetch-branches :and-return-value '("main" "develop"))
+    (let ((completions (remoto--handle-file-name-all-completions
+                        "linux@" "/github:torvalds/")))
+      (expect completions :to-equal '("linux@main:" "linux@develop:"))))
+
+  (it "filters branches by prefix after @"
+    (spy-on 'remoto--fetch-branches :and-return-value '("main" "develop"))
+    (let ((completions (remoto--handle-file-name-all-completions
+                        "linux@dev" "/github:torvalds/")))
+      (expect completions :to-equal '("linux@develop:"))))
+
+  (it "falls through to tree-based completion for full canonical paths"
+    (remoto-test-with-cache
+      (let ((completions (remoto--handle-file-name-all-completions
+                          "s" "/github:testowner/testrepo@main:/")))
+        (expect (member "src/" completions) :to-be-truthy)))))
+
+(describe "pre-repo file-name-completion"
+  (it "returns common prefix for multiple matches"
+    (spy-on 'remoto--search-users :and-return-value '("torvalds" "torgeirhelge"))
+    (expect (remoto--handle-file-name-completion "tor" "/github:")
+            :to-equal "tor"))
+
+  (it "returns single match directly"
+    (spy-on 'remoto--search-users :and-return-value '("torvalds"))
+    (expect (remoto--handle-file-name-completion "tor" "/github:")
+            :to-equal "torvalds/"))
+
+  (it "returns nil for no matches"
+    (spy-on 'remoto--search-users :and-return-value nil)
+    (expect (remoto--handle-file-name-completion "zzz" "/github:")
+            :to-be nil)))
+
+;;; maybe-rewrite for partial canonical paths
+
+(describe "remoto--maybe-rewrite with partial canonical paths"
+  (it "rewrites /github:owner/repo to canonical path"
+    (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (puthash "torvalds/linux" "master" remoto--default-branch-cache)
+      (expect (remoto--maybe-rewrite "/github:torvalds/linux")
+              :to-equal "/github:torvalds/linux@master:/")))
+
+  (it "rewrites /github:owner/repo@ref to canonical path"
+    (expect (remoto--maybe-rewrite "/github:torvalds/linux@v6.5")
+            :to-equal "/github:torvalds/linux@v6.5:/"))
+
+  (it "leaves full canonical paths unchanged"
+    (expect (remoto--maybe-rewrite "/github:torvalds/linux@master:/src")
+            :to-equal "/github:torvalds/linux@master:/src"))
+
+  (it "leaves non-github paths unchanged"
+    (expect (remoto--maybe-rewrite "/home/user/file") :to-equal "/home/user/file")))
 
 (provide 'remoto-tests)
 
