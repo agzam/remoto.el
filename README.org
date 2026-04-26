@@ -23,13 +23,6 @@ Sometimes you just want to look at code. Check a function signature, read a READ
 For now it works only with GitHub repos. Future plans include support for other forges - GitLab, Codeberg, etc.
 
 * How
-
-** Prerequisites
-Requires [[https://cli.github.com][gh CLI]] installed and authenticated (~gh auth login~) - for private repos.
-
-*** Important note! 
-Delegating dealing with GitHub to =gh= was an easy decision - that simplified a bunch of things out of the box. However, the [[https://www.reddit.com/r/emacs/comments/1sutzz6/new_package_browse_github_repos_without_cloning/][announcement discussion thread]] revealed the dark side of the tool. Turns out =gh= has the built-in telemetry that users have to explicitly opt out from. I decided to re-build the package without this dependency. It then would be using =ghub= lib that comes bundled in Magit Forge. If your GitHub token is set to work with it, you won't have to do anything else. If [[https://docs.magit.vc/forge/Setup-for-Githubcom.html][you have not set up the token, you'd have to do that]], otherwise the package would stop working properly (even when =gh= still works). Once #3 gets merged =gh CLI= dependency would be completely removed.
-
 ** use-package + straight
 
 You need to load the package so it can register its file handler and advice.
@@ -87,6 +80,16 @@ The virtual filesystem uses paths of the form:
 3. File contents are fetched on demand when you actually open a file.
 4. Content is cached by SHA, so re-opening the same file is instant.
 5. Authentication, SSO, private repos - all handled transparently by ~gh~.
+
+** FAQ
+*** Why this isn't a [[https://www.gnu.org/software/emacs/manual/html_node/tramp/][TRAMP]] backend?
+- TRAMP fundamentally is a shell-over-transport abstraction. Every TRAMP backend assumes a remote shell on the other end, remoto.el has no remote shell.
+- TRAMP's backend API is large. You'd need to implement or stub dozens of operations, many of which assume concepts that don't map to a REST API (process execution, file ownership, symlink resolution, timestamps).
+- TRAMP's connection management (open/close/reuse) is built around persistent sessions. The GitHub API is stateless HTTP - there's no connection to manage.
+- TRAMP's caching layer is path-based and per-connection. remoto's tree cache (one API call fetches the entire repo tree, then everything is served from memory) is a fundamentally different - and much more efficient - model for a read-only tree-structured API.
+- =file-name-handler-alist= IS the same mechanism TRAMP uses. Registering there directly gives you the same integration (dired, find-file, completions) without the framework overhead.
+  
+For a read-only tree browser backed by a REST API, a direct file-name-handler is the simpler, more natural fit
 
 ** Limitations
 

@@ -4,7 +4,7 @@ Browse any GitHub repository in Emacs as if it were cloned locally - without clo
 
 ## Overview
 
-remoto.el registers a virtual filesystem via `file-name-handler-alist` that intercepts Emacs file operations on paths with a `/github:` prefix and translates them into GitHub API calls via the `gh` CLI. The result: `find-file`, dired, completion, xref - all standard Emacs file tooling works against a remote GitHub repo. Read-only.
+remoto.el registers a virtual filesystem via `file-name-handler-alist` that intercepts Emacs file operations on paths with a `/github:` prefix and translates them into GitHub REST API calls via the `ghub` library. The result: `find-file`, dired, completion, xref - all standard Emacs file tooling works against a remote GitHub repo. Read-only.
 
 ## Path Syntax
 
@@ -74,11 +74,11 @@ C-x C-f https://github.com/torvalds/linux/blob/master/README RET
    files          |            contents
      |            v              |
      v       tree cache          v
-  tree cache  (hash table)    gh api (fetch file)
+  tree cache  (hash table)    ghub-get (fetch file)
   (hash table)
      ^
      |
-  gh api repos/OWNER/REPO/git/trees/SHA?recursive=1
+  ghub-get /repos/OWNER/REPO/git/trees/SHA?recursive=1
   (single call, cached per repo@ref)
 ```
 
@@ -86,38 +86,58 @@ C-x C-f https://github.com/torvalds/linux/blob/master/README RET
 
 1. Path parser - extract owner, repo, ref, path from a remoto path string.
 
-2. `gh` API wrapper - call `gh api ENDPOINT`, parse JSON response. All network I/O goes through this single function.
+2. `ghub` API wrapper - call `ghub-get` on the REST endpoint, parse JSON response. All network I/O goes through this single function (`remoto--api`).
 
 3. Tree cache - on first access to any path in a repo@ref, fetch the full tree via the Git Trees API. Store as a hash table keyed by path, values being plists with keys `:type`, `:size`, `:sha`, `:mode`. Cache is keyed by `owner/repo@ref`.
 
 4. File-name handler - the central dispatch function registered in `file-name-handler-alist`. Receives (OPERATION . ARGS), constructs a handler name via `(intern-soft (format "remoto--handle-%s" operation))` and calls it if bound, otherwise falls through to default Emacs handling.
 
-## gh CLI Delegation
+## ghub Transport
 
-All GitHub API access goes through `gh` CLI:
+All forge API access goes through the `ghub` Emacs library:
 
 ```elisp
 (defun remoto--api (endpoint)
-  "Call GitHub API via gh CLI. Returns parsed JSON."
+  "Call GitHub REST API ENDPOINT via ghub. Returns parsed JSON."
   ...)
 ```
 
-Internally: `gh api ENDPOINT`. The `gh` executable is looked up lazily via `executable-find` on each call, so installing `gh` after loading remoto works without reloading.
+Internally: `(ghub-get (concat "/" endpoint) nil :auth remoto-github-auth :reader #'remoto--json-reader)`. Errors are caught via `condition-case` on ghub's typed conditions (`ghub-404`, `ghub-403`, `ghub-401`, etc.) and re-signaled as `user-error` with contextual messages.
 
-Why `gh` and not `url-retrieve`:
-- Handles all auth: personal tokens, OAuth, SSO/SAML, GitHub Enterprise
-- Private repos behind SSO work with zero extra configuration
-- Token refresh, credential storage - all handled
-- One less thing to implement and maintain
+Why `ghub`:
+- Pure Emacs Lisp - no external binary dependency
+- Handles auth via standard `auth-source` (authinfo, GPG-encrypted, OS keychain, etc.)
+- Supports GitHub, GitLab, Gitea/Forgejo, Gogs, Bitbucket - same API, different `:forge` / `:host`
+- Users of Magit/Forge already have tokens configured - zero setup
+- No telemetry (the `gh` CLI collects usage analytics unless opted out)
+- Synchronous by default, async available via `:callback` if needed later
 
-Process calls use `call-process` (synchronous). No sentinels, no async complexity. Browsing is inherently interactive and sequential - the user waits for the dired buffer or file to appear.
+A custom `:reader` function (`remoto--json-reader`) is used instead of ghub's default to ensure JSON arrays are parsed as lists (ghub defaults to vectors), matching what the rest of the codebase expects.
+
+### Authentication
+
+Public repos work without any token - `remoto--api` automatically falls back to unauthenticated requests (60 req/hr) when no auth-source entry is found.
+
+For private repos (or higher rate limits at 5000 req/hr), tokens are resolved via `auth-source`. The `remoto-github-auth` defcustom controls which token is used:
+
+- `nil` (default) - tries the standard `ghub` token (`USERNAME^ghub` in auth-source), falls back to unauthenticated
+- `'none` - always unauthenticated
+- A symbol like `'forge` - uses that package's token
+- A string - literal token value
+
+Auth-source entry format:
+```
+machine api.github.com login USERNAME^ghub password ghp_TOKEN
+```
+
+Requests are synchronous (`ghub-get` without `:callback`). No sentinels, no async complexity. Browsing is inherently interactive and sequential - the user waits for the dired buffer or file to appear.
 
 ## Tree Cache
 
 On first access to any path in a `owner/repo@ref`:
 
 ```
-gh api repos/OWNER/REPO/git/trees/REF?recursive=1
+ghub-get /repos/OWNER/REPO/git/trees/REF?recursive=1
 ```
 
 Returns every file and directory in the repo (path, type, size, sha, mode). Stored in:
@@ -140,7 +160,7 @@ Cache invalidation: manual only. A command `remoto-refresh` clears the cache for
 The Trees API truncates at 100,000 entries / 7 MB response. When `truncated` is true in the response, fall back to per-directory fetching via the Contents API:
 
 ```
-gh api repos/OWNER/REPO/contents/PATH?ref=REF
+ghub-get /repos/OWNER/REPO/contents/PATH?ref=REF
 ```
 
 This returns one directory level at a time. The tree cache stores what it has and fetches missing subdirectories on demand.
@@ -192,13 +212,13 @@ Operations not listed above fall through to default Emacs handling via the stand
 For files under 1 MB, the Contents API returns base64-encoded content:
 
 ```
-gh api repos/OWNER/REPO/contents/PATH?ref=REF
+ghub-get /repos/OWNER/REPO/contents/PATH?ref=REF
 ```
 
 For larger files, fall back to the Blobs API:
 
 ```
-gh api repos/OWNER/REPO/git/blobs/SHA
+ghub-get /repos/OWNER/REPO/git/blobs/SHA
 ```
 
 The blob response contains base64-encoded content regardless of file size.
@@ -224,17 +244,19 @@ TRAMP's `tramp-file-name-regexp` matches `/method:...` patterns, which would int
 
 ## Error Handling
 
-- `gh` not found: signal error with install instructions on first API call.
-- `gh` not authenticated: detect from stderr output, suggest `gh auth login`.
-- 404 (repo not found / private without access): clear error message naming the endpoint.
-- 403 (rate limited / permissions): report access denied with the endpoint.
-- Network errors: report the `gh` stderr output with exit code.
+ghub signals typed conditions for HTTP errors. `remoto--api` catches these and re-signals as `user-error`:
+
+- `ghub-404` - not found (repo missing, private without access)
+- `ghub-403` - forbidden (rate limit, permissions)
+- `ghub-401` - authentication failed (missing or invalid token in auth-source)
+- `ghub-http-error` - catch-all for other HTTP errors
+- `ghub-error` - catch-all for transport/connection failures
 - Truncated tree: log a message, fall back to per-directory fetching.
 
 ## Interactive Commands
 
-- `remoto-browse` - prompt for a repo (with search completion via `gh api search/repositories` when `consult` is available, or `completion-table-dynamic` otherwise), open dired at root or find-file for blob paths.
-- `remoto-refresh` - invalidate tree cache for current repo, re-fetch. Reverts dired buffer if in one.
+- `remoto-browse` - prompt for a repo (with search completion via GitHub's search API when `consult` is available, or two-step prompt otherwise), open dired at root or find-file for blob paths. Search results are cached for `remoto-search-cache-ttl` seconds (default 300). `remoto--search-repos` accepts an optional callback for consult's async dynamic collection protocol. When the query contains `@` (e.g. `owner/repo@`), switches to branch name completion - fetches branches via the GitHub Branches API and offers `owner/repo@branch` candidates, with prefix filtering. Branch results are cached in `remoto--branches-cache` with the same TTL as search results.
+- `remoto-refresh` - invalidate tree and branch caches for current repo, re-fetch. Reverts dired buffer if in one.
 - `remoto-copy-github-url` - for the current file/line, produce the corresponding `github.com` URL and copy to kill ring. Includes `#L<n>` suffix for files.
 
 ## Unloading
@@ -253,10 +275,60 @@ TRAMP's `tramp-file-name-regexp` matches `/method:...` patterns, which would int
 - Rate limit: 5,000 requests/hour. Normal browsing stays well within this.
 - Submodules appear as entries in the tree but are not traversable.
 
+## Multi-forge Direction
+
+Switching from `gh` CLI to `ghub` opens up support for other forges. ghub already handles auth and transport for GitHub, GitLab, Gitea/Forgejo, Gogs, and Bitbucket via its `:forge` and `:host` keyword arguments.
+
+### Forge API compatibility
+
+Gitea (and by extension Codeberg, Forgejo) cloned GitHub's REST API almost exactly:
+
+| Operation | GitHub | Gitea/Codeberg |
+|---|---|---|
+| Repo info | `GET /repos/:owner/:repo` | `GET /repos/:owner/:repo` |
+| Tree | `GET /repos/:owner/:repo/git/trees/:sha?recursive=1` | `GET /repos/:owner/:repo/git/trees/:sha?recursive=1` |
+| Contents | `GET /repos/:owner/:repo/contents/:path?ref=REF` | `GET /repos/:owner/:repo/contents/:path?ref=REF` |
+| Blob | `GET /repos/:owner/:repo/git/blobs/:sha` | `GET /repos/:owner/:repo/git/blobs/:sha` |
+| Search | `GET /search/repositories?q=QUERY` | `GET /repos/search?q=QUERY` |
+
+Response shapes are nearly identical. Gitea/Codeberg support could be added with minimal per-forge logic - mostly just different `:host` / `:forge` kwargs to ghub and a different search endpoint.
+
+GitLab's API is structurally different:
+
+| Operation | GitLab |
+|---|---|
+| Repo info | `GET /projects/:id` (uses URL-encoded `owner/repo` as `:id`) |
+| Tree | `GET /projects/:id/repository/tree?path=PATH&ref=REF&recursive=true` |
+| File | `GET /projects/:id/repository/files/:path?ref=REF` (base64 in `.content`) |
+| Blob | `GET /projects/:id/repository/blobs/:sha` |
+| Search | `GET /projects?search=QUERY` |
+
+GitLab requires a forge-specific API adapter but the overall structure (fetch tree, cache it, fetch files on demand) maps 1:1.
+
+### Path syntax for multi-forge
+
+The path prefix determines the forge:
+
+```
+/github:owner/repo@ref:/path      (existing)
+/gitlab:owner/repo@ref:/path      (future)
+/codeberg:owner/repo@ref:/path    (future)
+```
+
+Each prefix would have its own entry in `file-name-handler-alist`, dispatching to the same handler with forge context derived from the prefix. The handler, tree cache, and content cache are forge-agnostic - only the API adapter layer differs.
+
+### Implementation approach
+
+1. Extract a forge-agnostic protocol (API adapter) with methods: `fetch-repo-info`, `fetch-tree`, `fetch-contents`, `fetch-blob`, `search-repos`.
+2. Implement the GitHub adapter (current code, essentially unchanged).
+3. Add a Gitea adapter (near-copy of GitHub, different `:forge`/`:host` in ghub calls, different search endpoint).
+4. Add a GitLab adapter (different endpoint construction and response parsing).
+5. Register multiple handler-alist entries, one per forge prefix.
+
 ## Dependencies
 
 - Emacs 29.1+
-- `gh` CLI (authenticated via `gh auth login`)
+- `ghub` 4.0+ (token configured in auth-source; see ghub docs)
 - Optional: `consult` for async search completion in `remoto-browse`
 
 ## File Structure

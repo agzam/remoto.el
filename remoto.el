@@ -8,7 +8,7 @@
 ;; Version: 0.1.0
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
-;; Package-Requires: ((emacs "29.1"))
+;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
 ;;
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;
@@ -19,7 +19,7 @@
 ;; remoto.el lets you browse any GitHub repository in Emacs as if it were
 ;; cloned locally - without cloning it.  It registers a virtual filesystem
 ;; via `file-name-handler-alist' that translates Emacs file operations into
-;; GitHub API calls via the `gh' CLI.
+;; GitHub API calls via the `ghub' library.
 ;;
 ;; Usage:
 ;;   M-x remoto-browse RET https://github.com/torvalds/linux RET
@@ -28,8 +28,8 @@
 
 ;;; Code:
 
-(require 'json)
 (require 'cl-lib)
+(require 'ghub)
 
 ;;;; Path parsing
 
@@ -79,36 +79,73 @@ Format: owner/repo@ref."
           (remoto-path-repo parsed)
           (or (remoto-path-ref parsed) "HEAD")))
 
-;;;; gh CLI wrapper
+;;;; GitHub API
 
-(defun remoto--gh-executable ()
-  "Return path to the gh CLI, or nil."
-  (executable-find "gh"))
+(defgroup remoto nil
+  "Browse GitHub repos without cloning."
+  :group 'tools
+  :prefix "remoto-")
+
+(defcustom remoto-github-auth nil
+  "Auth token source for GitHub API requests via ghub.
+nil means use the default ghub token (USERNAME^ghub in auth-source).
+A symbol like `forge' uses that package's token instead.
+A string is used as a literal token.
+See ghub documentation for auth-source setup."
+  :type '(choice (const :tag "Default ghub token" nil)
+                 (symbol :tag "Package token name")
+                 (string :tag "Literal token"))
+  :group 'remoto)
+
+(defun remoto--json-reader (_status)
+  "Parse JSON response with list-type arrays for remoto compatibility.
+Handles both header-present and header-stripped response buffers."
+  (goto-char (point-min))
+  ;; Skip HTTP headers if present; if no blank line found, the
+  ;; buffer is already just the body (varies by Emacs/url.el version).
+  (re-search-forward "^\r?\n" nil t)
+  (let ((body (buffer-substring-no-properties (point) (point-max))))
+    (unless (string-empty-p body)
+      (json-parse-string
+       (decode-coding-string body 'utf-8)
+       :object-type 'alist
+       :array-type 'list
+       :null-object nil
+       :false-object nil))))
+
+(defun remoto--ghub-get (resource auth endpoint)
+  "Call ghub-get on RESOURCE with AUTH, translating errors.
+ENDPOINT is used in error messages for context."
+  (condition-case err
+      (ghub-get resource nil
+                :auth auth
+                :reader #'remoto--json-reader)
+    (ghub-404
+     (user-error "Remoto: not found: %s" endpoint))
+    (ghub-403
+     (user-error "Remoto: access denied (rate limit or permissions): %s" endpoint))
+    (ghub-401
+     (user-error "Remoto: authentication failed; configure ghub token in auth-source"))
+    (ghub-http-error
+     (user-error "Remoto: API error: %s" (error-message-string err)))))
 
 (defun remoto--api (endpoint)
-  "Call GitHub API ENDPOINT via gh CLI, return parsed JSON.
-Signals an error on failure."
-  (let ((gh (remoto--gh-executable)))
-    (unless gh
-      (user-error "remoto: `gh' CLI not found; install from https://cli.github.com"))
-    (with-temp-buffer
-      (let ((exit-code
-             (call-process gh nil t nil
-                           "api" endpoint)))
-        (if (zerop exit-code)
-            (progn
-              (goto-char (point-min))
-              (json-parse-buffer :object-type 'alist :array-type 'list))
-          (let ((output (string-trim (buffer-string))))
-            (cond
-             ((string-match-p "HTTP 404" output)
-              (user-error "Remoto: repository not found: %s" endpoint))
-             ((string-match-p "HTTP 403" output)
-              (user-error "Remoto: access denied (rate limit or permissions): %s" endpoint))
-             ((string-match-p "authentication" output)
-              (user-error "Remoto: gh not authenticated; run `gh auth login'"))
-             (t
-              (user-error "Remoto: gh api error (exit %d): %s" exit-code output)))))))))
+  "Call GitHub REST API ENDPOINT via ghub, return parsed JSON.
+ENDPOINT should not have a leading slash - one is prepended
+automatically.  When `remoto-github-auth' is nil (default) and no
+token is found in auth-source, retries unauthenticated - public
+repos work without any setup.  Signals `user-error' on HTTP
+failures."
+  (let ((resource (concat "/" endpoint)))
+    (condition-case err
+        (remoto--ghub-get resource remoto-github-auth endpoint)
+      (error
+       ;; Any pre-request failure (no token, no username in git
+       ;; config, auth-source miss) - retry unauthenticated.
+       ;; HTTP errors are already handled by remoto--ghub-get.
+       (if (not (eq remoto-github-auth 'none))
+           (remoto--ghub-get resource 'none endpoint)
+         (signal (car err) (cdr err)))))))
 
 (defun remoto--default-branch (owner repo)
   "Fetch the default branch for OWNER/REPO."
@@ -116,8 +153,8 @@ Signals an error on failure."
     (alist-get 'default_branch data)))
 
 (defconst remoto--dir-entry
-  '(:type "tree" :size 0 :sha "" :mode "040000")
-  "Plist for synthesized directory entries (root, intermediates, `.', `..').")
+  '((type . "tree") (size . 0) (sha . "") (mode . "040000"))
+  "Alist for synthesized directory entries (root, intermediates, `.', `..').")
 
 ;;;; Tree cache
 
@@ -126,6 +163,9 @@ Signals an error on failure."
 
 (defvar remoto--default-branch-cache (make-hash-table :test 'equal)
   "Cache: \"owner/repo\" -> default branch name.")
+
+(defvar remoto--branches-cache (make-hash-table :test 'equal)
+  "Cache: \"owner/repo\" -> (TIMESTAMP . BRANCH-NAMES).")
 
 (defun remoto--resolve-ref (parsed)
   "Ensure PARSED `remoto-path' has a concrete ref, resolving if needed.
@@ -145,7 +185,7 @@ Returns a new `remoto-path' with ref filled in."
 
 (defun remoto--fetch-tree (owner repo ref)
   "Fetch full tree for OWNER/REPO at REF from GitHub API.
-Returns a hash table of path -> plist with keys :type :size :sha :mode."
+Returns a hash table of path -> alist with keys type, size, sha, mode."
   (let* ((endpoint (format "repos/%s/%s/git/trees/%s?recursive=1" owner repo ref))
          (data (remoto--api endpoint))
          (entries (alist-get 'tree data))
@@ -153,7 +193,7 @@ Returns a hash table of path -> plist with keys :type :size :sha :mode."
          (table (make-hash-table :test 'equal :size (length entries))))
     (when (eq truncated t)
       (puthash "\0truncated" t table)
-      (message "remoto: tree truncated for %s/%s@%s, fetching dirs on demand"
+      (message "Remoto: tree truncated for %s/%s@%s, fetching dirs on demand"
                owner repo ref))
     ;; Root entry
     (puthash "" remoto--dir-entry table)
@@ -161,10 +201,10 @@ Returns a hash table of path -> plist with keys :type :size :sha :mode."
     ;; All entries from API
     (dolist (entry entries)
       (let ((path (alist-get 'path entry))
-            (plist (list :type (alist-get 'type entry)
-                         :size (or (alist-get 'size entry) 0)
-                         :sha  (alist-get 'sha entry)
-                         :mode (alist-get 'mode entry))))
+            (plist (list (cons 'type (alist-get 'type entry))
+                         (cons 'size (or (alist-get 'size entry) 0))
+                         (cons 'sha  (alist-get 'sha entry))
+                         (cons 'mode (alist-get 'mode entry)))))
         (puthash path plist table)
         ;; Synthesize intermediate directories
         (let ((parts (split-string path "/" t)))
@@ -211,10 +251,10 @@ On-demand fallback for repos whose recursive tree was truncated."
         (let* ((path (alist-get 'path entry))
                (api-type (alist-get 'type entry))
                (type (if (equal api-type "dir") "tree" "blob"))
-               (plist (list :type type
-                            :size (or (alist-get 'size entry) 0)
-                            :sha (or (alist-get 'sha entry) "")
-                            :mode (if (equal type "tree") "040000" "100644"))))
+               (plist (list (cons 'type type)
+                            (cons 'size (or (alist-get 'size entry) 0))
+                            (cons 'sha (or (alist-get 'sha entry) ""))
+                            (cons 'mode (if (equal type "tree") "040000" "100644")))))
           ;; Keep existing entries from Trees API (they have richer mode info)
           (unless (gethash path tree)
             (puthash path plist tree)))))))
@@ -327,13 +367,13 @@ Pass remaining ARGS to the resolved handler."
   "Return t if FILENAME is a directory in the remote repo."
   (when-let* ((parsed (remoto--parse-path filename))
               (entry (remoto--tree-entry parsed)))
-    (equal "tree" (plist-get entry :type))))
+    (equal "tree" (alist-get 'type entry))))
 
 (defun remoto--handle-file-regular-p (filename)
   "Return t if FILENAME is a regular file in the remote repo."
   (when-let* ((parsed (remoto--parse-path filename))
               (entry (remoto--tree-entry parsed)))
-    (equal "blob" (plist-get entry :type))))
+    (equal "blob" (alist-get 'type entry))))
 
 (defun remoto--handle-file-readable-p (filename)
   "Return non-nil if remote FILENAME is readable."
@@ -348,9 +388,9 @@ Pass remaining ARGS to the resolved handler."
 Synthesized from tree cache - timestamps are epoch 0."
   (when-let* ((parsed (remoto--parse-path filename))
               (entry (remoto--tree-entry parsed)))
-    (let* ((dir? (equal "tree" (plist-get entry :type)))
-           (size (or (plist-get entry :size) 0))
-           (mode-str (or (plist-get entry :mode) "100644"))
+    (let* ((dir? (equal "tree" (alist-get 'type entry)))
+           (size (or (alist-get 'size entry) 0))
+           (mode-str (or (alist-get 'mode entry) "100644"))
            (mode (string-to-number mode-str 8))
            ;; Use epoch 0 for all timestamps
            (time '(0 0 0 0)))
@@ -416,7 +456,7 @@ Pass FULL, MATCH, NOSORT, and ID-FORMAT through unchanged."
   (when-let* ((parsed (remoto--parse-path directory)))
     (thread-last (remoto--tree-children parsed)
       (mapcar (lambda (child)
-                (if (equal "tree" (plist-get (cdr child) :type))
+                (if (equal "tree" (alist-get 'type (cdr child)))
                     (concat (car child) "/")
                   (car child))))
       (seq-filter (lambda (name)
@@ -490,6 +530,10 @@ Use IDENTIFICATION to select which remote field to report."
 
 ;;;; File content fetching
 
+(defun remoto--relative-path (path)
+  "Strip leading slash from PATH for API calls."
+  (if (string-prefix-p "/" path) (substring path 1) path))
+
 (defvar remoto--content-cache (make-hash-table :test 'equal)
   "Cache: sha -> decoded file content string.")
 
@@ -532,8 +576,7 @@ VISIT, BEG, END, REPLACE as per `insert-file-contents'."
     (unless parsed
       (error "Remoto: cannot parse path: %s" filename))
     (let* ((resolved (remoto--resolve-ref parsed))
-           (path (remoto-path-path resolved))
-           (path (if (string-prefix-p "/" path) (substring path 1) path))
+           (path (remoto--relative-path (remoto-path-path resolved)))
            (content (remoto--fetch-file-content
                      (remoto-path-owner resolved)
                      (remoto-path-repo resolved)
@@ -565,9 +608,9 @@ VISIT, BEG, END, REPLACE as per `insert-file-contents'."
 (defun remoto--format-dired-entry (name plist)
   "Format a single Dired line for NAME with PLIST attributes.
 No leading spaces - Dired and dired-subtree add their own."
-  (let* ((dir? (equal "tree" (plist-get plist :type)))
-         (size (or (plist-get plist :size) 0))
-         (mode (or (plist-get plist :mode) "100644"))
+  (let* ((dir? (equal "tree" (alist-get 'type plist)))
+         (size (or (alist-get 'size plist) 0))
+         (mode (or (alist-get 'mode plist) "100644"))
          (perms (remoto--mode-to-string mode dir?)))
     (format "%s  1 github github %8d Jan  1  2000 %s\n"
             perms size name)))
@@ -580,7 +623,7 @@ Use FULL-DIRECTORY-P to force directory-style output."
               (entry (remoto--tree-entry parsed)))
     (cond
      ((or full-directory-p
-          (equal "tree" (plist-get entry :type)))
+          (equal "tree" (alist-get 'type entry)))
       (insert "total 0\n")
       (insert (remoto--format-dired-entry "." remoto--dir-entry))
       (insert (remoto--format-dired-entry ".." remoto--dir-entry))
@@ -595,8 +638,7 @@ Use FULL-DIRECTORY-P to force directory-style output."
   "Download remote FILENAME to a temp file, return temp path."
   (when-let* ((parsed (remoto--parse-path filename))
               (resolved (remoto--resolve-ref parsed))
-              (path (remoto-path-path resolved))
-              (path (if (string-prefix-p "/" path) (substring path 1) path))
+              (path (remoto--relative-path (remoto-path-path resolved)))
               (content (remoto--fetch-file-content
                         (remoto-path-owner resolved)
                         (remoto-path-repo resolved)
@@ -705,15 +747,17 @@ Pass DIR-FLAG and SUFFIX through to `make-temp-file'."
          (rx bos "git@github.com:"
              (group (+ (not "/")))
              "/"
-             (group (+ (not (any "./ "))))
-             (? ".git")
+             (group (+ (not (any "/ "))))
              eos)
          input)
-    (remoto-path-create
-     :owner (match-string 1 input)
-     :repo (match-string 2 input)
-     :ref nil
-     :path "/")))
+    (let ((repo (match-string 2 input)))
+      (remoto-path-create
+       :owner (match-string 1 input)
+       :repo (if (string-suffix-p ".git" repo)
+                 (substring repo 0 -4)
+               repo)
+       :ref nil
+       :path "/"))))
 
 (defun remoto--parse-repo-shorthand (input)
   "Parse owner/repo INPUT into a `remoto-path' struct."
@@ -750,6 +794,9 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
         (let* ((resolved (remoto--resolve-ref parsed))
                (key (remoto--repo-key resolved)))
           (remhash key remoto--tree-cache)
+          (remhash (format "%s/%s" (remoto-path-owner resolved)
+                           (remoto-path-repo resolved))
+                   remoto--branches-cache)
           (message "Remoto: cache cleared for %s" key)
           (when (derived-mode-p 'dired-mode)
             (revert-buffer)))
@@ -767,10 +814,9 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
            (owner (remoto-path-owner resolved))
            (repo (remoto-path-repo resolved))
            (ref (remoto-path-ref resolved))
-           (path (remoto-path-path resolved))
-           (path (if (string-prefix-p "/" path) (substring path 1) path))
+           (path (remoto--relative-path (remoto-path-path resolved)))
            (entry (remoto--tree-entry resolved))
-           (type (if (and entry (equal "tree" (plist-get entry :type)))
+           (type (if (and entry (equal "tree" (alist-get 'type entry)))
                      "tree" "blob"))
            (line-suffix (when (and (equal type "blob")
                                    (not (derived-mode-p 'dired-mode)))
@@ -784,12 +830,40 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
 ;;;; Repository search
 
 (defvar remoto--search-cache (make-hash-table :test 'equal)
-  "Cache: query string -> list of owner/repo results.")
+  "Cache: query string -> (TIMESTAMP . RESULTS).
+Entries expire after `remoto-search-cache-ttl' seconds.")
+
+(defcustom remoto-search-cache-ttl 300
+  "Seconds before search cache entries expire.
+Set to 0 to disable caching."
+  :type 'integer
+  :group 'remoto)
+
+(defun remoto--search-cache-get (key)
+  "Return cached results for KEY if not expired.
+Returns two values via list: (HIT-P RESULTS).  HIT-P is non-nil
+when KEY was found and not expired.  RESULTS may be nil for
+queries that returned zero results."
+  (let ((entry (gethash key remoto--search-cache)))
+    (if (null entry)
+        '(nil nil)
+      (let ((timestamp (car entry))
+            (results (cdr entry)))
+        (if (and (not (zerop remoto-search-cache-ttl))
+                 (< remoto-search-cache-ttl (- (float-time) timestamp)))
+            (progn (remhash key remoto--search-cache)
+                   '(nil nil))
+          (list t results))))))
+
+(defun remoto--search-cache-put (key results)
+  "Store RESULTS for KEY with current timestamp."
+  (puthash key (cons (float-time) results) remoto--search-cache)
+  results)
 
 (defun remoto--search-query (input)
   "Build a GitHub search query string from INPUT.
 When INPUT contains a slash, searches within that owner's repos.
-Otherwise treats INPUT as an owner name."
+Otherwise searches by repository name."
   (let ((slash-pos (string-search "/" input)))
     (if slash-pos
         (let ((owner (substring input 0 slash-pos))
@@ -797,43 +871,84 @@ Otherwise treats INPUT as an owner name."
           (if (string-empty-p repo-part)
               (format "user:%s" owner)
             (format "%s in:name user:%s" repo-part owner)))
-      (format "user:%s" input))))
+      (format "%s in:name" input))))
 
-(defun remoto--search-repos (query)
+(defun remoto--fetch-branches (owner repo)
+  "Fetch branch names for OWNER/REPO, cached per `remoto-search-cache-ttl'."
+  (let* ((key (format "%s/%s" owner repo))
+         (entry (gethash key remoto--branches-cache))
+         (now (float-time)))
+    (if (and entry
+             (or (zerop remoto-search-cache-ttl)
+                 (< (- now (car entry)) remoto-search-cache-ttl)))
+        (cdr entry)
+      (condition-case nil
+          (let* ((endpoint (format "repos/%s/%s/branches?per_page=100" owner repo))
+                 (data (remoto--api endpoint))
+                 (branches (mapcar (lambda (item) (alist-get 'name item)) data)))
+            (puthash key (cons now branches) remoto--branches-cache)
+            branches)
+        (user-error nil)))))
+
+(defun remoto--search-repos (query &optional callback)
   "Search GitHub repositories matching QUERY.
 Returns a list of owner/repo strings.  Requires at least 3 characters.
-When QUERY contains a slash and extends a cached query that covers the
-full owner part, filters cached results client-side.  Otherwise hits
-the API for fresh results."
-  (if (< (length query) 3)
-      nil
-    (or (gethash query remoto--search-cache)
-        ;; Only filter from cache when narrowing within an owner's repos
-        (let* ((slash-pos (string-search "/" query))
-               (parent-results
-                (when slash-pos
-                  (cl-loop for key being the hash-keys of remoto--search-cache
-                           using (hash-values results)
-                           when (and (string-prefix-p key query)
-                                     (<= slash-pos (length key))
-                                     (< (length key) (length query))
-                                     results)
-                           return results))))
-          (if parent-results
-              (seq-filter (lambda (name) (string-prefix-p query name))
-                          parent-results)
-            (condition-case nil
-                (let* ((endpoint (format "search/repositories?q=%s&per_page=30"
-                                         (url-hexify-string
-                                          (remoto--search-query query))))
-                       (data (remoto--api endpoint))
-                       (items (alist-get 'items data))
-                       (results (mapcar (lambda (item)
-                                          (alist-get 'full_name item))
-                                        items)))
-                  (puthash query results remoto--search-cache)
-                  results)
-              (user-error nil)))))))
+When QUERY contains `@', completes branch names for the specified repo.
+
+When CALLBACK is non-nil, passes results to it instead of returning
+them directly.  This supports consult's async dynamic collection
+protocol."
+  (let ((results
+         (let ((at-pos (string-search "@" query)))
+           (if at-pos
+               ;; Branch completion: owner/repo@prefix -> owner/repo@branch
+               (let* ((repo-part (substring query 0 at-pos))
+                      (branch-prefix (substring query (1+ at-pos))))
+                 (when (string-match
+                        (rx bos (group (+ (not "/"))) "/" (group (+ nonl)) eos)
+                        repo-part)
+                   (let* ((owner (match-string 1 repo-part))
+                          (repo (match-string 2 repo-part))
+                          (branches (remoto--fetch-branches owner repo)))
+                     (when branches
+                       (thread-last branches
+                         (seq-filter (lambda (b)
+                                       (or (string-empty-p branch-prefix)
+                                           (string-prefix-p branch-prefix b))))
+                         (mapcar (lambda (b)
+                                   (format "%s/%s@%s" owner repo b))))))))
+             ;; Normal repo search
+             (when (<= 3 (length query))
+               (let ((cached (remoto--search-cache-get query)))
+                 (if (car cached)
+                     (cadr cached)
+                   (let* ((slash-pos (string-search "/" query))
+                          (parent-results
+                           (when slash-pos
+                             (cl-loop for key being the hash-keys of remoto--search-cache
+                                      for entry = (remoto--search-cache-get key)
+                                      when (and (car entry)
+                                                (string-prefix-p key query)
+                                                (<= slash-pos (length key))
+                                                (< (length key) (length query)))
+                                      return (cadr entry)))))
+                     (if parent-results
+                         (seq-filter (lambda (name) (string-prefix-p query name))
+                                     parent-results)
+                       (condition-case nil
+                           (let* ((endpoint (format "search/repositories?q=%s&per_page=30"
+                                                    (url-hexify-string
+                                                     (remoto--search-query query))))
+                                  (data (remoto--api endpoint))
+                                  (items (alist-get 'items data))
+                                  (results (mapcar (lambda (item)
+                                                     (alist-get 'full_name item))
+                                                   items)))
+                             (remoto--search-cache-put query results))
+                         (user-error nil)))))))))))
+    (if callback
+        (funcall callback results)
+      results)))
 
 (defvar remoto--browse-history nil
   "Minibuffer history for `remoto-browse'.")
@@ -846,12 +961,15 @@ pick from results.  URLs and owner/repo shorthand bypass search."
   (if (and (featurep 'consult)
            (fboundp 'consult--read)
            (fboundp 'consult--dynamic-collection))
-      (consult--read
-       (consult--dynamic-collection #'remoto--search-repos)
-       :prompt "Search GitHub repos: "
-       :require-match nil
-       :sort nil
-       :history 'remoto--browse-history)
+      (let ((result (consult--read
+                     (consult--dynamic-collection #'remoto--search-repos)
+                     :prompt "Search GitHub repos: "
+                     :require-match nil
+                     :sort nil
+                     :initial "#"
+                     :history 'remoto--browse-history)))
+        ;; Strip consult's async split separator leaked into raw input
+        (string-trim-left result "#+"))
     (let ((input (read-string "GitHub repo (owner, owner/repo, or URL): "
                               nil 'remoto--browse-history)))
       ;; URLs and owner/repo go straight through
@@ -877,7 +995,7 @@ to search GitHub repositories."
          (resolved (remoto--resolve-ref parsed))
          (canonical (remoto--canonical-path resolved)))
     (if (equal "tree"
-               (plist-get (remoto--tree-entry resolved) :type))
+               (alist-get 'type (remoto--tree-entry resolved)))
         (dired canonical)
       (find-file canonical))))
 

@@ -13,14 +13,14 @@
 ;;; Helpers
 
 (defvar remoto-test--mock-tree
-  '(("README.md" (:type "blob" :size 500 :sha "aaa" :mode "100644"))
-    ("src" (:type "tree" :size 0 :sha "bbb" :mode "040000"))
-    ("src/main.el" (:type "blob" :size 1234 :sha "ccc" :mode "100644"))
-    ("src/utils.el" (:type "blob" :size 567 :sha "ddd" :mode "100644"))
-    ("bin/run" (:type "blob" :size 42 :sha "eee" :mode "100755"))
-    ("bin" (:type "tree" :size 0 :sha "fff" :mode "040000"))
-    ("" (:type "tree" :size 0 :sha "" :mode "040000"))
-    ("/" (:type "tree" :size 0 :sha "" :mode "040000")))
+  '(("README.md" ((type . "blob") (size . 500) (sha . "aaa") (mode . "100644")))
+    ("src" ((type . "tree") (size . 0) (sha . "bbb") (mode . "040000")))
+    ("src/main.el" ((type . "blob") (size . 1234) (sha . "ccc") (mode . "100644")))
+    ("src/utils.el" ((type . "blob") (size . 567) (sha . "ddd") (mode . "100644")))
+    ("bin/run" ((type . "blob") (size . 42) (sha . "eee") (mode . "100755")))
+    ("bin" ((type . "tree") (size . 0) (sha . "fff") (mode . "040000")))
+    ("" ((type . "tree") (size . 0) (sha . "") (mode . "040000")))
+    ("/" ((type . "tree") (size . 0) (sha . "") (mode . "040000"))))
   "Mock tree data for tests.")
 
 (defun remoto-test--install-mock-tree ()
@@ -35,7 +35,8 @@
   (declare (indent 0))
   `(let ((remoto--tree-cache (make-hash-table :test 'equal))
          (remoto--default-branch-cache (make-hash-table :test 'equal))
-         (remoto--content-cache (make-hash-table :test 'equal)))
+         (remoto--content-cache (make-hash-table :test 'equal))
+         (remoto--branches-cache (make-hash-table :test 'equal)))
      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
      (remoto-test--install-mock-tree)
      ,@body))
@@ -99,6 +100,14 @@
       (expect (remoto-path-owner p) :to-equal "torvalds")
       (expect (remoto-path-repo p) :to-equal "linux")))
 
+  (it "parses git remote with dotted repo name"
+    (let ((p (remoto--parse-input "git@github.com:agzam/remoto.el.git")))
+      (expect (remoto-path-owner p) :to-equal "agzam")
+      (expect (remoto-path-repo p) :to-equal "remoto.el"))
+    (let ((p (remoto--parse-input "git@github.com:agzam/remoto.el")))
+      (expect (remoto-path-owner p) :to-equal "agzam")
+      (expect (remoto-path-repo p) :to-equal "remoto.el")))
+
   (it "parses owner/repo shorthand"
     (let ((p (remoto--parse-input "torvalds/linux")))
       (expect (remoto-path-owner p) :to-equal "torvalds")
@@ -136,8 +145,8 @@
     (remoto-test-with-cache
       (let* ((entry (remoto--tree-entry
                      (remoto--parse-path "/github:testowner/testrepo@main:/README.md")))
-             (entry-type (plist-get entry :type))
-             (entry-size (plist-get entry :size)))
+             (entry-type (alist-get 'type entry))
+             (entry-size (alist-get 'size entry)))
         (expect entry :to-be-truthy)
         (expect entry-type :to-equal "blob")
         (expect entry-size :to-equal 500))))
@@ -146,7 +155,7 @@
     (remoto-test-with-cache
       (let* ((entry (remoto--tree-entry
                      (remoto--parse-path "/github:testowner/testrepo@main:/src")))
-             (entry-type (plist-get entry :type)))
+             (entry-type (alist-get 'type entry)))
         (expect entry :to-be-truthy)
         (expect entry-type :to-equal "tree"))))
 
@@ -154,7 +163,7 @@
     (remoto-test-with-cache
       (let* ((entry (remoto--tree-entry
                      (remoto--parse-path "/github:testowner/testrepo@main:/")))
-             (entry-type (plist-get entry :type)))
+             (entry-type (alist-get 'type entry)))
         (expect entry :to-be-truthy)
         (expect entry-type :to-equal "tree"))))
 
@@ -169,7 +178,7 @@
       (let ((entry (remoto--tree-entry
                     (remoto--parse-path "/github:testowner/testrepo@main:/src//main.el"))))
         (expect entry :to-be-truthy)
-        (expect (plist-get entry :sha) :to-equal "ccc")))))
+        (expect (alist-get 'sha entry) :to-equal "ccc")))))
 
 (describe "remoto--tree-children"
   (it "lists root children"
@@ -196,9 +205,9 @@
       (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
       ;; Simulate a truncated tree with only root and src dir
       (let ((table (make-hash-table :test 'equal)))
-        (puthash "" '(:type "tree" :size 0 :sha "" :mode "040000") table)
-        (puthash "/" '(:type "tree" :size 0 :sha "" :mode "040000") table)
-        (puthash "src" '(:type "tree" :size 0 :sha "bbb" :mode "040000") table)
+        (puthash "" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
+        (puthash "/" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
+        (puthash "src" '((type . "tree") (size . 0) (sha . "bbb") (mode . "040000")) table)
         (puthash "\0truncated" t table)
         (puthash "testowner/testrepo@main" table remoto--tree-cache))
       ;; Mock the API call for on-demand fetch
@@ -214,10 +223,10 @@
       ;; Looking up src/main.el should trigger on-demand fetch
       (let* ((entry (remoto--tree-entry
                      (remoto--parse-path "/github:testowner/testrepo@main:/src/main.el")))
-             (entry-type (plist-get entry :type)))
+             (entry-type (alist-get 'type entry)))
         (expect entry :to-be-truthy)
         (expect entry-type :to-equal "blob")
-        (expect (plist-get entry :sha) :to-equal "ccc"))))
+        (expect (alist-get 'sha entry) :to-equal "ccc"))))
 
   (it "fetches directory children on demand"
     (let ((remoto--tree-cache (make-hash-table :test 'equal))
@@ -225,9 +234,9 @@
           (remoto--content-cache (make-hash-table :test 'equal)))
       (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
       (let ((table (make-hash-table :test 'equal)))
-        (puthash "" '(:type "tree" :size 0 :sha "" :mode "040000") table)
-        (puthash "/" '(:type "tree" :size 0 :sha "" :mode "040000") table)
-        (puthash "src" '(:type "tree" :size 0 :sha "bbb" :mode "040000") table)
+        (puthash "" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
+        (puthash "/" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
+        (puthash "src" '((type . "tree") (size . 0) (sha . "bbb") (mode . "040000")) table)
         (puthash "\0truncated" t table)
         (puthash "testowner/testrepo@main" table remoto--tree-cache))
       (spy-on 'remoto--api :and-call-fake
@@ -251,9 +260,9 @@
           (api-call-count 0))
       (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
       (let ((table (make-hash-table :test 'equal)))
-        (puthash "" '(:type "tree" :size 0 :sha "" :mode "040000") table)
-        (puthash "/" '(:type "tree" :size 0 :sha "" :mode "040000") table)
-        (puthash "src" '(:type "tree" :size 0 :sha "bbb" :mode "040000") table)
+        (puthash "" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
+        (puthash "/" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
+        (puthash "src" '((type . "tree") (size . 0) (sha . "bbb") (mode . "040000")) table)
         (puthash "\0truncated" t table)
         (puthash "testowner/testrepo@main" table remoto--tree-cache))
       (spy-on 'remoto--api :and-call-fake
@@ -341,19 +350,19 @@
 (describe "remoto--format-dired-entry"
   (it "formats a file entry"
     (let ((line (remoto--format-dired-entry
-                 "file.el" '(:type "blob" :size 1234 :mode "100644"))))
+                 "file.el" '((type . "blob") (size . 1234) (mode . "100644")))))
       (expect line :to-match "^-rw-r--r--")
       (expect line :to-match "1234")
       (expect line :to-match "file\\.el")))
 
   (it "formats a directory entry"
     (let ((line (remoto--format-dired-entry
-                 "src" '(:type "tree" :size 0 :mode "040000"))))
+                 "src" '((type . "tree") (size . 0) (mode . "040000")))))
       (expect line :to-match "^drwxr-xr-x")))
 
   (it "formats an executable entry"
     (let ((line (remoto--format-dired-entry
-                 "run" '(:type "blob" :size 42 :mode "100755"))))
+                 "run" '((type . "blob") (size . 42) (mode . "100755")))))
       (expect line :to-match "^-rwxr-xr-x"))))
 
 ;;; Read-only enforcement
@@ -395,13 +404,41 @@
 
 ;;; Repository search
 
+(describe "remoto--fetch-branches"
+  (it "fetches branch names from API"
+    (spy-on 'remoto--api :and-return-value
+            '(((name . "main") (commit . ((sha . "abc"))))
+              ((name . "develop") (commit . ((sha . "def"))))
+              ((name . "feature/x") (commit . ((sha . "ghi"))))))
+    (let ((remoto--branches-cache (make-hash-table :test 'equal)))
+      (expect (remoto--fetch-branches "torvalds" "linux")
+              :to-equal '("main" "develop" "feature/x"))))
+
+  (it "caches results"
+    (let ((remoto--branches-cache (make-hash-table :test 'equal))
+          (call-count 0))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_endpoint)
+                (setq call-count (1+ call-count))
+                '(((name . "main")))))
+      (remoto--fetch-branches "torvalds" "linux")
+      (remoto--fetch-branches "torvalds" "linux")
+      (expect call-count :to-equal 1)))
+
+  (it "returns nil on API errors"
+    (spy-on 'remoto--api :and-call-fake
+            (lambda (_endpoint)
+              (user-error "not found")))
+    (let ((remoto--branches-cache (make-hash-table :test 'equal)))
+      (expect (remoto--fetch-branches "no" "repo") :to-be nil))))
+
 (describe "remoto--search-repos"
   (it "returns nil for short queries"
     (expect (remoto--search-repos "") :to-be nil)
     (expect (remoto--search-repos "ab") :to-be nil))
 
-  (it "builds search query with user qualifier"
-    (expect (remoto--search-query "torvalds") :to-equal "user:torvalds")
+  (it "builds search query from input"
+    (expect (remoto--search-query "torvalds") :to-equal "torvalds in:name")
     (expect (remoto--search-query "torvalds/") :to-equal "user:torvalds")
     (expect (remoto--search-query "torvalds/lin") :to-equal "lin in:name user:torvalds"))
 
@@ -467,7 +504,64 @@
             (lambda (_endpoint)
               (user-error "network error")))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
-      (expect (remoto--search-repos "torvalds") :to-be nil))))
+      (expect (remoto--search-repos "torvalds") :to-be nil)))
+
+  (it "expires cache entries after TTL"
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (remoto-search-cache-ttl 1)
+          (call-count 0))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_endpoint)
+                (setq call-count (1+ call-count))
+                '((items . (((full_name . "torvalds/linux")))))))
+      (remoto--search-repos "torvalds")
+      (expect call-count :to-equal 1)
+      ;; Manually expire the entry by backdating the timestamp
+      (let ((entry (gethash "torvalds" remoto--search-cache)))
+        (setcar entry (- (float-time) 10)))
+      ;; Next call should re-fetch
+      (remoto--search-repos "torvalds")
+      (expect call-count :to-equal 2)))
+
+  (it "caches empty results without re-hitting API"
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (call-count 0))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_endpoint)
+                (setq call-count (1+ call-count))
+                '((items))))
+      (remoto--search-repos "zzzznotfound")
+      (remoto--search-repos "zzzznotfound")
+      (expect call-count :to-equal 1)))
+
+  (it "delivers results via callback when provided"
+    (spy-on 'remoto--api :and-return-value
+            '((items . (((full_name . "torvalds/linux"))))))
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (captured nil))
+      (remoto--search-repos "torvalds"
+                            (lambda (results) (setq captured results)))
+      (expect captured :to-equal '("torvalds/linux"))))
+
+  (it "completes branch names when query contains @"
+    (spy-on 'remoto--fetch-branches :and-return-value
+            '("main" "develop" "dont-use-gh"))
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      (expect (remoto--search-repos "agzam/remoto.el@")
+              :to-equal '("agzam/remoto.el@main"
+                          "agzam/remoto.el@develop"
+                          "agzam/remoto.el@dont-use-gh"))))
+
+  (it "filters branches by prefix after @"
+    (spy-on 'remoto--fetch-branches :and-return-value
+            '("main" "develop" "dont-use-gh"))
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      (expect (remoto--search-repos "agzam/remoto.el@don")
+              :to-equal '("agzam/remoto.el@dont-use-gh"))))
+
+  (it "returns nil for @ query without valid owner/repo"
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      (expect (remoto--search-repos "noslash@main") :to-be nil))))
 
 (describe "remoto--read-repo"
   (it "passes URLs straight through without consult"
@@ -504,7 +598,17 @@
                (lambda (_collection &rest _args) "magit/magit"))
               ((symbol-function 'consult--dynamic-collection)
                (lambda (fun) fun)))
-      (expect (remoto--read-repo) :to-equal "magit/magit"))))
+      (expect (remoto--read-repo) :to-equal "magit/magit")))
+
+  (it "strips consult async separator from result"
+    (spy-on 'featurep :and-call-fake
+            (lambda (feature &rest _)
+              (or (eq feature 'consult) t)))
+    (cl-letf (((symbol-function 'consult--read)
+               (lambda (_collection &rest _args) "#agzam/remoto.el@dont-use-gh"))
+              ((symbol-function 'consult--dynamic-collection)
+               (lambda (fun) fun)))
+      (expect (remoto--read-repo) :to-equal "agzam/remoto.el@dont-use-gh"))))
 
 (provide 'remoto-tests)
 
