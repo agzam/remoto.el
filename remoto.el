@@ -702,7 +702,27 @@ Pass DIR-FLAG and SUFFIX through to `make-temp-file'."
 (defalias 'remoto--handle-delete-file #'remoto--read-only)
 (defalias 'remoto--handle-delete-directory #'remoto--read-only)
 (defalias 'remoto--handle-rename-file #'remoto--read-only)
-(defalias 'remoto--handle-copy-file #'remoto--read-only)
+(defun remoto--handle-copy-file (file newname
+                                      &optional ok-if-already-exists keep-time
+                                      preserve-uid-gid preserve-permissions)
+  "Copy FILE to NEWNAME. Works when destination is outside remoto.
+OK-IF-ALREADY-EXISTS, KEEP-TIME, PRESERVE-UID-GID, and
+PRESERVE-PERMISSIONS are passed through to `copy-file'."
+  (if (string-match-p remoto--path-regexp newname)
+      (remoto--read-only 'copy-file file newname)
+    (let ((local-copy (remoto--handle-file-local-copy file)))
+      (unless local-copy
+        (error "Remoto: failed to download %s" file))
+      (unwind-protect
+          (let ((inhibit-file-name-handlers
+                 (cons #'remoto-file-name-handler
+                       (and (eq inhibit-file-name-operation 'copy-file)
+                            inhibit-file-name-handlers)))
+                (inhibit-file-name-operation 'copy-file))
+            (copy-file local-copy newname ok-if-already-exists keep-time
+                       preserve-uid-gid preserve-permissions))
+        (when (file-exists-p local-copy)
+          (delete-file local-copy))))))
 (defalias 'remoto--handle-set-file-modes #'remoto--read-only)
 (defalias 'remoto--handle-set-file-times #'remoto--read-only)
 
