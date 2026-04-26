@@ -96,17 +96,8 @@
     (expect (gethash "\0truncated" remoto-itest--tree) :to-be nil))
 
   (it "includes root entry"
-    (let ((entry (gethash "" remoto-itest--tree)))
-      (expect entry :to-be-truthy)
-      ;; Diagnostic: test plist-get variants to isolate the Emacs 29 issue
-      (expect (format "plist-get=%S memq=%S eq-test=%S car=%S cadr=%S len=%S"
-                      (plist-get entry :type)
-                      (cadr (memq :type entry))
-                      (eq :type (car entry))
-                      (car entry)
-                      (cadr entry)
-                      (length entry))
-              :to-equal "diagnostic")))
+    (expect (gethash "" remoto-itest--tree) :to-be-truthy)
+    (expect (plist-get (gethash "" remoto-itest--tree) :type) :to-equal "tree"))
 
   (it "includes known files at expected paths"
     ;; top-level files

@@ -153,7 +153,7 @@ failures."
     (alist-get 'default_branch data)))
 
 (defconst remoto--dir-entry
-  '(:type "tree" :size 0 :sha "" :mode "040000")
+  (list :type "tree" :size 0 :sha "" :mode "040000")
   "Plist for synthesized directory entries (root, intermediates, `.', `..').")
 
 ;;;; Tree cache
@@ -163,6 +163,9 @@ failures."
 
 (defvar remoto--default-branch-cache (make-hash-table :test 'equal)
   "Cache: \"owner/repo\" -> default branch name.")
+
+(defvar remoto--branches-cache (make-hash-table :test 'equal)
+  "Cache: \"owner/repo\" -> (TIMESTAMP . BRANCH-NAMES).")
 
 (defun remoto--resolve-ref (parsed)
   "Ensure PARSED `remoto-path' has a concrete ref, resolving if needed.
@@ -791,6 +794,9 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
         (let* ((resolved (remoto--resolve-ref parsed))
                (key (remoto--repo-key resolved)))
           (remhash key remoto--tree-cache)
+          (remhash (format "%s/%s" (remoto-path-owner resolved)
+                           (remoto-path-repo resolved))
+                   remoto--branches-cache)
           (message "Remoto: cache cleared for %s" key)
           (when (derived-mode-p 'dired-mode)
             (revert-buffer)))
@@ -867,47 +873,79 @@ Otherwise searches by repository name."
             (format "%s in:name user:%s" repo-part owner)))
       (format "%s in:name" input))))
 
+(defun remoto--fetch-branches (owner repo)
+  "Fetch branch names for OWNER/REPO, cached per `remoto-search-cache-ttl'."
+  (let* ((key (format "%s/%s" owner repo))
+         (entry (gethash key remoto--branches-cache))
+         (now (float-time)))
+    (if (and entry
+             (or (zerop remoto-search-cache-ttl)
+                 (< (- now (car entry)) remoto-search-cache-ttl)))
+        (cdr entry)
+      (condition-case nil
+          (let* ((endpoint (format "repos/%s/%s/branches?per_page=100" owner repo))
+                 (data (remoto--api endpoint))
+                 (branches (mapcar (lambda (item) (alist-get 'name item)) data)))
+            (puthash key (cons now branches) remoto--branches-cache)
+            branches)
+        (user-error nil)))))
+
 (defun remoto--search-repos (query &optional callback)
   "Search GitHub repositories matching QUERY.
 Returns a list of owner/repo strings.  Requires at least 3 characters.
-When QUERY contains a slash and extends a cached query that covers the
-full owner part, filters cached results client-side.  Otherwise hits
-the API for fresh results.
+When QUERY contains `@', completes branch names for the specified repo.
 
 When CALLBACK is non-nil, passes results to it instead of returning
 them directly.  This supports consult's async dynamic collection
 protocol."
   (let ((results
-         (if (< (length query) 3)
-             nil
-           (let ((cached (remoto--search-cache-get query)))
-             (if (car cached)
-                 (cadr cached)
-               ;; Only filter from cache when narrowing within an owner's repos
-               (let* ((slash-pos (string-search "/" query))
-                      (parent-results
-                       (when slash-pos
-                         (cl-loop for key being the hash-keys of remoto--search-cache
-                                  for cached = (remoto--search-cache-get key)
-                                  when (and (car cached)
-                                            (string-prefix-p key query)
-                                            (<= slash-pos (length key))
-                                            (< (length key) (length query)))
-                                  return (cadr cached)))))
-                 (if parent-results
-                     (seq-filter (lambda (name) (string-prefix-p query name))
-                                 parent-results)
-                   (condition-case nil
-                       (let* ((endpoint (format "search/repositories?q=%s&per_page=30"
-                                                (url-hexify-string
-                                                 (remoto--search-query query))))
-                              (data (remoto--api endpoint))
-                              (items (alist-get 'items data))
-                              (results (mapcar (lambda (item)
-                                                 (alist-get 'full_name item))
-                                               items)))
-                         (remoto--search-cache-put query results))
-                     (user-error nil)))))))))
+         (let ((at-pos (string-search "@" query)))
+           (if at-pos
+               ;; Branch completion: owner/repo@prefix -> owner/repo@branch
+               (let* ((repo-part (substring query 0 at-pos))
+                      (branch-prefix (substring query (1+ at-pos))))
+                 (when (string-match
+                        (rx bos (group (+ (not "/"))) "/" (group (+ nonl)) eos)
+                        repo-part)
+                   (let* ((owner (match-string 1 repo-part))
+                          (repo (match-string 2 repo-part))
+                          (branches (remoto--fetch-branches owner repo)))
+                     (when branches
+                       (thread-last branches
+                         (seq-filter (lambda (b)
+                                       (or (string-empty-p branch-prefix)
+                                           (string-prefix-p branch-prefix b))))
+                         (mapcar (lambda (b)
+                                   (format "%s/%s@%s" owner repo b))))))))
+             ;; Normal repo search
+             (when (<= 3 (length query))
+               (let ((cached (remoto--search-cache-get query)))
+                 (if (car cached)
+                     (cadr cached)
+                   (let* ((slash-pos (string-search "/" query))
+                          (parent-results
+                           (when slash-pos
+                             (cl-loop for key being the hash-keys of remoto--search-cache
+                                      for entry = (remoto--search-cache-get key)
+                                      when (and (car entry)
+                                                (string-prefix-p key query)
+                                                (<= slash-pos (length key))
+                                                (< (length key) (length query)))
+                                      return (cadr entry)))))
+                     (if parent-results
+                         (seq-filter (lambda (name) (string-prefix-p query name))
+                                     parent-results)
+                       (condition-case nil
+                           (let* ((endpoint (format "search/repositories?q=%s&per_page=30"
+                                                    (url-hexify-string
+                                                     (remoto--search-query query))))
+                                  (data (remoto--api endpoint))
+                                  (items (alist-get 'items data))
+                                  (results (mapcar (lambda (item)
+                                                     (alist-get 'full_name item))
+                                                   items)))
+                             (remoto--search-cache-put query results))
+                         (user-error nil)))))))))))
     (if callback
         (funcall callback results)
       results)))
@@ -923,12 +961,15 @@ pick from results.  URLs and owner/repo shorthand bypass search."
   (if (and (featurep 'consult)
            (fboundp 'consult--read)
            (fboundp 'consult--dynamic-collection))
-      (consult--read
-       (consult--dynamic-collection #'remoto--search-repos)
-       :prompt "Search GitHub repos: "
-       :require-match nil
-       :sort nil
-       :history 'remoto--browse-history)
+      (let ((result (consult--read
+                     (consult--dynamic-collection #'remoto--search-repos)
+                     :prompt "Search GitHub repos: "
+                     :require-match nil
+                     :sort nil
+                     :initial "#"
+                     :history 'remoto--browse-history)))
+        ;; Strip consult's async split separator leaked into raw input
+        (string-trim-left result "#+"))
     (let ((input (read-string "GitHub repo (owner, owner/repo, or URL): "
                               nil 'remoto--browse-history)))
       ;; URLs and owner/repo go straight through

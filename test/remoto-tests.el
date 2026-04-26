@@ -35,7 +35,8 @@
   (declare (indent 0))
   `(let ((remoto--tree-cache (make-hash-table :test 'equal))
          (remoto--default-branch-cache (make-hash-table :test 'equal))
-         (remoto--content-cache (make-hash-table :test 'equal)))
+         (remoto--content-cache (make-hash-table :test 'equal))
+         (remoto--branches-cache (make-hash-table :test 'equal)))
      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
      (remoto-test--install-mock-tree)
      ,@body))
@@ -403,6 +404,34 @@
 
 ;;; Repository search
 
+(describe "remoto--fetch-branches"
+  (it "fetches branch names from API"
+    (spy-on 'remoto--api :and-return-value
+            '(((name . "main") (commit . ((sha . "abc"))))
+              ((name . "develop") (commit . ((sha . "def"))))
+              ((name . "feature/x") (commit . ((sha . "ghi"))))))
+    (let ((remoto--branches-cache (make-hash-table :test 'equal)))
+      (expect (remoto--fetch-branches "torvalds" "linux")
+              :to-equal '("main" "develop" "feature/x"))))
+
+  (it "caches results"
+    (let ((remoto--branches-cache (make-hash-table :test 'equal))
+          (call-count 0))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_endpoint)
+                (setq call-count (1+ call-count))
+                '(((name . "main")))))
+      (remoto--fetch-branches "torvalds" "linux")
+      (remoto--fetch-branches "torvalds" "linux")
+      (expect call-count :to-equal 1)))
+
+  (it "returns nil on API errors"
+    (spy-on 'remoto--api :and-call-fake
+            (lambda (_endpoint)
+              (user-error "not found")))
+    (let ((remoto--branches-cache (make-hash-table :test 'equal)))
+      (expect (remoto--fetch-branches "no" "repo") :to-be nil))))
+
 (describe "remoto--search-repos"
   (it "returns nil for short queries"
     (expect (remoto--search-repos "") :to-be nil)
@@ -512,7 +541,27 @@
           (captured nil))
       (remoto--search-repos "torvalds"
                             (lambda (results) (setq captured results)))
-      (expect captured :to-equal '("torvalds/linux")))))
+      (expect captured :to-equal '("torvalds/linux"))))
+
+  (it "completes branch names when query contains @"
+    (spy-on 'remoto--fetch-branches :and-return-value
+            '("main" "develop" "dont-use-gh"))
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      (expect (remoto--search-repos "agzam/remoto.el@")
+              :to-equal '("agzam/remoto.el@main"
+                          "agzam/remoto.el@develop"
+                          "agzam/remoto.el@dont-use-gh"))))
+
+  (it "filters branches by prefix after @"
+    (spy-on 'remoto--fetch-branches :and-return-value
+            '("main" "develop" "dont-use-gh"))
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      (expect (remoto--search-repos "agzam/remoto.el@don")
+              :to-equal '("agzam/remoto.el@dont-use-gh"))))
+
+  (it "returns nil for @ query without valid owner/repo"
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      (expect (remoto--search-repos "noslash@main") :to-be nil))))
 
 (describe "remoto--read-repo"
   (it "passes URLs straight through without consult"
@@ -549,7 +598,17 @@
                (lambda (_collection &rest _args) "magit/magit"))
               ((symbol-function 'consult--dynamic-collection)
                (lambda (fun) fun)))
-      (expect (remoto--read-repo) :to-equal "magit/magit"))))
+      (expect (remoto--read-repo) :to-equal "magit/magit")))
+
+  (it "strips consult async separator from result"
+    (spy-on 'featurep :and-call-fake
+            (lambda (feature &rest _)
+              (or (eq feature 'consult) t)))
+    (cl-letf (((symbol-function 'consult--read)
+               (lambda (_collection &rest _args) "#agzam/remoto.el@dont-use-gh"))
+              ((symbol-function 'consult--dynamic-collection)
+               (lambda (fun) fun)))
+      (expect (remoto--read-repo) :to-equal "agzam/remoto.el@dont-use-gh"))))
 
 (provide 'remoto-tests)
 

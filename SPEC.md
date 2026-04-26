@@ -255,8 +255,8 @@ ghub signals typed conditions for HTTP errors. `remoto--api` catches these and r
 
 ## Interactive Commands
 
-- `remoto-browse` - prompt for a repo (with search completion via GitHub's search API when `consult` is available, or two-step prompt otherwise), open dired at root or find-file for blob paths. Search results are cached for `remoto-search-cache-ttl` seconds (default 300). `remoto--search-repos` accepts an optional callback for consult's async dynamic collection protocol.
-- `remoto-refresh` - invalidate tree cache for current repo, re-fetch. Reverts dired buffer if in one.
+- `remoto-browse` - prompt for a repo (with search completion via GitHub's search API when `consult` is available, or two-step prompt otherwise), open dired at root or find-file for blob paths. Search results are cached for `remoto-search-cache-ttl` seconds (default 300). `remoto--search-repos` accepts an optional callback for consult's async dynamic collection protocol. When the query contains `@` (e.g. `owner/repo@`), switches to branch name completion - fetches branches via the GitHub Branches API and offers `owner/repo@branch` candidates, with prefix filtering. Branch results are cached in `remoto--branches-cache` with the same TTL as search results.
+- `remoto-refresh` - invalidate tree and branch caches for current repo, re-fetch. Reverts dired buffer if in one.
 - `remoto-copy-github-url` - for the current file/line, produce the corresponding `github.com` URL and copy to kill ring. Includes `#L<n>` suffix for files.
 
 ## Unloading
