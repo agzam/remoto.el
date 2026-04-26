@@ -253,6 +253,25 @@
         (expect (length children) :to-equal 2)
         (expect (mapcar #'car children) :to-equal '("main.el" "utils.el")))))
 
+  (it "excludes internal markers from root children"
+    (let ((remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal))
+          (remoto--content-cache (make-hash-table :test 'equal)))
+      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
+      (let ((table (make-hash-table :test 'equal)))
+        (puthash "" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
+        (puthash "/" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
+        (puthash "README.md" '((type . "blob") (size . 500) (sha . "aaa") (mode . "100644")) table)
+        (puthash "src" '((type . "tree") (size . 0) (sha . "bbb") (mode . "040000")) table)
+        (puthash "\0truncated" t table)
+        (puthash "\0fetched:" t table)
+        (puthash "testowner/testrepo@main" table remoto--tree-cache))
+      (let* ((children (remoto--tree-children
+                        (remoto--parse-path "/github:testowner/testrepo@main:/")))
+             (names (mapcar #'car children)))
+        (expect (length children) :to-equal 2)
+        (expect names :to-equal '("README.md" "src")))))
+
   (it "does not re-fetch already fetched directories"
     (let ((remoto--tree-cache (make-hash-table :test 'equal))
           (remoto--default-branch-cache (make-hash-table :test 'equal))

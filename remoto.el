@@ -300,7 +300,8 @@ For truncated trees, fetches the directory on demand."
     (sort
      (thread-last (hash-table-keys tree)
        (seq-filter (lambda (path)
-                     (and (string-prefix-p prefix path)
+                     (and (not (string-prefix-p "\0" path))
+                          (string-prefix-p prefix path)
                           (not (equal path dir-path))
                           ;; Direct child: no more slashes after prefix
                           (not (string-search "/" (substring path prefix-len))))))
