@@ -563,52 +563,29 @@
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
       (expect (remoto--search-repos "noslash@main") :to-be nil))))
 
-(describe "remoto--read-repo"
-  (it "passes URLs straight through without consult"
-    (spy-on 'featurep :and-call-fake
-            (lambda (feature &rest _)
-              (not (eq feature 'consult))))
-    (spy-on 'read-string :and-return-value "https://github.com/torvalds/linux")
-    (expect (remoto--read-repo) :to-equal "https://github.com/torvalds/linux"))
-
-  (it "passes owner/repo straight through without consult"
-    (spy-on 'featurep :and-call-fake
-            (lambda (feature &rest _)
-              (not (eq feature 'consult))))
-    (spy-on 'read-string :and-return-value "torvalds/linux")
-    (expect (remoto--read-repo) :to-equal "torvalds/linux"))
-
-  (it "searches and prompts for bare owner without consult"
-    (spy-on 'featurep :and-call-fake
-            (lambda (feature &rest _)
-              (not (eq feature 'consult))))
-    (spy-on 'read-string :and-return-value "torvalds")
+(describe "remoto--repo-completion-table"
+  (it "returns search results via completion protocol"
     (spy-on 'remoto--search-repos :and-return-value
             '("torvalds/linux" "torvalds/subsurface"))
+    (let ((result (remoto--repo-completion-table "torvalds" nil t)))
+      (expect result :to-equal '("torvalds/linux" "torvalds/subsurface"))))
+
+  (it "returns metadata"
+    (expect (remoto--repo-completion-table "" nil 'metadata)
+            :to-equal '(metadata (category . remoto-repo)))))
+
+(describe "remoto--read-repo"
+  (it "returns completing-read result directly"
     (spy-on 'completing-read :and-return-value "torvalds/linux")
-    (expect (remoto--read-repo) :to-equal "torvalds/linux")
-    (expect 'completing-read :to-have-been-called))
+    (expect (remoto--read-repo) :to-equal "torvalds/linux"))
 
-  (it "uses consult--read when consult is loaded"
-    (spy-on 'featurep :and-call-fake
-            (lambda (feature &rest _)
-              (or (eq feature 'consult) t)))
-    ;; Simulate consult functions being available
-    (cl-letf (((symbol-function 'consult--read)
-               (lambda (_collection &rest _args) "magit/magit"))
-              ((symbol-function 'consult--dynamic-collection)
-               (lambda (fun) fun)))
-      (expect (remoto--read-repo) :to-equal "magit/magit")))
+  (it "allows URLs as direct input"
+    (spy-on 'completing-read :and-return-value "https://github.com/torvalds/linux")
+    (expect (remoto--read-repo) :to-equal "https://github.com/torvalds/linux"))
 
-  (it "strips consult async separator from result"
-    (spy-on 'featurep :and-call-fake
-            (lambda (feature &rest _)
-              (or (eq feature 'consult) t)))
-    (cl-letf (((symbol-function 'consult--read)
-               (lambda (_collection &rest _args) "#agzam/remoto.el@dont-use-gh"))
-              ((symbol-function 'consult--dynamic-collection)
-               (lambda (fun) fun)))
-      (expect (remoto--read-repo) :to-equal "agzam/remoto.el@dont-use-gh"))))
+  (it "allows owner/repo@ref as direct input"
+    (spy-on 'completing-read :and-return-value "agzam/remoto.el@dont-use-gh")
+    (expect (remoto--read-repo) :to-equal "agzam/remoto.el@dont-use-gh")))
 
 (provide 'remoto-tests)
 
