@@ -81,6 +81,8 @@ Format: owner/repo@ref."
 
 ;;;; GitHub API
 
+(declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
+
 (defgroup remoto nil
   "Browse GitHub repos without cloning."
   :group 'tools
@@ -128,7 +130,7 @@ Handles both header-present and header-stripped response buffers."
        :false-object nil))))
 
 (defun remoto--ghub-get (resource auth endpoint)
-  "Call ghub-get on RESOURCE with AUTH, translating errors.
+  "Call `ghub-get' on RESOURCE with AUTH, translating errors.
 ENDPOINT is used in error messages for context."
   (condition-case err
       (let ((inhibit-message (not ghub-debug)))
@@ -403,7 +405,7 @@ Also returns t for partial paths used during completion."
     t)
    (t
     (when-let* ((parsed (remoto--parse-path filename)))
-      (not (null (remoto--tree-entry parsed)))))))
+      (and (remoto--tree-entry parsed) t)))))
 
 (defun remoto--handle-file-directory-p (filename)
   "Return t if FILENAME is a directory in the remote repo.
@@ -1236,13 +1238,12 @@ to search GitHub repositories."
 (defun remoto--github-input-p (input)
   "Return non-nil if INPUT can look like a GitHub URL or shorthand."
   (and (stringp input)
-       (not (null
-             (string-match-p
-              (rx bos
-                  (or "https://github.com/"
-                      "git@github.com:"
-                      (or "github.com/" "/github.com/")))
-              input)))))
+       (string-match-p
+        (rx bos
+            (or "https://github.com/"
+                "git@github.com:"
+                (or "github.com/" "/github.com/")))
+        input)))
 
 (defun remoto--parse-partial-canonical (input)
   "Parse partial canonical INPUT like /github:OWNER/REPO[@REF].
