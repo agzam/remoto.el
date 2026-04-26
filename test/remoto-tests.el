@@ -417,6 +417,36 @@
       (expect (make-directory "/github:testowner/testrepo@main:/newdir")
               :to-throw 'user-error))))
 
+;;; copy-file
+
+(describe "copy-file"
+  (it "copies remoto file to local destination"
+    (remoto-test-with-cache
+      (spy-on 'remoto--fetch-file-content :and-return-value "mock file content")
+      (let ((dest (make-temp-file "remoto-copy-test-")))
+        (unwind-protect
+            (progn
+              (copy-file "/github:testowner/testrepo@main:/src/main.el" dest t)
+              (expect (with-temp-buffer
+                        (insert-file-contents dest)
+                        (buffer-string))
+                      :to-equal "mock file content"))
+          (delete-file dest)))))
+
+  (it "signals read-only when destination is remoto"
+    (remoto-test-with-cache
+      (expect (copy-file "/github:testowner/testrepo@main:/src/main.el"
+                         "/github:testowner/testrepo@main:/src/copy.el")
+              :to-throw 'user-error)))
+
+  (it "signals read-only when copying local file to remoto"
+    (remoto-test-with-cache
+      (let ((src (make-temp-file "remoto-copy-src-")))
+        (unwind-protect
+            (expect (copy-file src "/github:testowner/testrepo@main:/dest.el")
+                    :to-throw 'user-error)
+          (delete-file src))))))
+
 ;;; Path normalization
 
 (describe "remoto--normalize-path"
