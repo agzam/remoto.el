@@ -171,25 +171,25 @@ This returns one directory level at a time. The tree cache stores what it has an
 
 | Operation | Implementation |
 |---|---|
-| `file-exists-p` | Lookup in tree cache |
-| `file-directory-p` | Check `:type` = `"tree"` in cache |
+| `file-exists-p` | Lookup in tree cache; returns t for partial paths (`/github:`, `/github:OWNER/`) |
+| `file-directory-p` | Check `:type` = `"tree"` in cache; returns t for partial paths |
 | `file-regular-p` | Check `:type` = `"blob"` in cache |
 | `file-readable-p` | Delegates to `file-exists-p` |
 | `file-writable-p` | Always nil |
 | `file-attributes` | Synthesize from cache entry (size, type, mode, epoch-0 timestamps) |
 | `directory-files` | List tree cache children for parent path, prepend `.` and `..` |
 | `directory-files-and-attributes` | Same, with attributes |
-| `file-name-all-completions` | Filter tree cache entries by prefix, append `/` to dirs |
+| `file-name-all-completions` | Filter tree cache entries by prefix, append `/` to dirs; at pre-repo levels, searches users or lists repos |
 | `file-name-completion` | Delegate to `try-completion` on completions list |
 | `insert-file-contents` | Fetch file content via API, insert into buffer |
 | `insert-directory` | Format dired-compatible listing from tree cache |
 | `expand-file-name` | Normalize path components, handle relative paths under remoto dirs |
 | `file-truename` | Return the path as-is (no symlink resolution) |
-| `file-remote-p` | Return the `/github:owner/repo@ref:` prefix (or method/host on request) |
+| `file-remote-p` | Return the `/github:owner/repo@ref:` prefix (or method/host on request); handles partial paths |
 | `file-local-copy` | Download to temp file, return temp path |
 | `make-nearby-temp-file` | Create temp file in system temp dir |
-| `file-name-directory` | Return directory part of remoto path |
-| `file-name-nondirectory` | Return non-directory part of remoto path |
+| `file-name-directory` | Return directory part of remoto path; handles partial paths for pre-repo completion |
+| `file-name-nondirectory` | Return non-directory part of remoto path; handles partial paths for pre-repo completion |
 | `file-name-as-directory` | Append `/` if not present |
 | `directory-file-name` | Strip trailing `/` (preserving `:/` after prefix) |
 | `file-name-case-insensitive-p` | Always nil (GitHub is case-sensitive) |
@@ -259,9 +259,39 @@ ghub signals typed conditions for HTTP errors. `remoto--api` catches these and r
 - `remoto-refresh` - invalidate tree and branch caches for current repo, re-fetch. Reverts dired buffer if in one.
 - `remoto-copy-github-url` - for the current file/line, produce the corresponding `github.com` URL and copy to kill ring. Includes `#L<n>` suffix for files.
 
+### find-file completion
+
+The `/github:` prefix enables multi-level completion directly in `find-file` (`C-x C-f`). This extends the file-name-handler to support pre-repo-level completions, so the standard Emacs file completion machinery drives the entire flow.
+
+Completion levels:
+
+| Input | Directory part | File part | Action |
+|---|---|---|---|
+| `/github:tor` | `/github:` | `tor` | Search users/orgs matching "tor" via `search/users` API |
+| `/github:torvalds/` | `/github:torvalds/` | (empty) | List repos via `users/torvalds/repos` API |
+| `/github:torvalds/lin` | `/github:torvalds/` | `lin` | Filter repos starting with "lin" |
+| `/github:torvalds/linux@` | `/github:torvalds/` | `linux@` | List branches via `repos/torvalds/linux/branches` API |
+| `/github:torvalds/linux@master:` | `/github:torvalds/linux@master:` | (empty) | File-level completion (existing tree-based) |
+
+Hitting RET on `/github:owner/repo` (without `@ref:`) resolves the default branch via `remoto--maybe-rewrite` and opens `/github:owner/repo@default:/` in dired.
+
+New API functions:
+
+- `remoto--search-users` - calls `search/users?q=PREFIX&per_page=30`. Caches results in `remoto--users-cache` (TTL-based, same as `remoto-search-cache-ttl`). Supports client-side narrowing: typing "torv" filters cached "tor" results without a new API call. Requires min 2 characters.
+- `remoto--fetch-user-repos` - calls `users/OWNER/repos?per_page=100&sort=updated`. Caches results in `remoto--user-repos-cache` (TTL-based).
+
+New caches:
+
+- `remoto--users-cache` - hash table: query string -> `(TIMESTAMP . USER-NAMES)`.
+- `remoto--user-repos-cache` - hash table: owner string -> `(TIMESTAMP . REPO-NAMES)`.
+
+Partial path handling:
+
+The file-name handler now recognizes partial paths (`/github:`, `/github:OWNER/`) that don't match `remoto--path-regexp`. For these paths, `file-exists-p` and `file-directory-p` return t (they are virtual completion directories), `file-name-directory` and `file-name-nondirectory` split correctly (e.g., `/github:foo` splits to directory `/github:` and nondirectory `foo`), and `file-remote-p` returns `/github:` as the remote prefix. `remoto--parse-partial-canonical` handles the intermediate form `/github:OWNER/REPO[@REF]` (without trailing `:`), converting it to a canonical path for opening.
+
 ## Unloading
 
-`remoto-unload-function` removes the `file-name-handler-alist` entry and all advice, ensuring clean `unload-feature` support.
+`remoto-unload-function` removes the `file-name-handler-alist` entry and all advice, and clears `remoto--users-cache` and `remoto--user-repos-cache`, ensuring clean `unload-feature` support.
 
 ## Limitations
 

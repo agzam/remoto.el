@@ -3,6 +3,15 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [Unreleased]
+
+** Added
+- ~find-file~ completion for ~/github:~ paths. Type ~/github:foo~ to search users/orgs, ~/github:owner/~ to list repos, append ~@~ after a repo name to complete branches. Transitions seamlessly into file-level completion within a repo.
+- ~remoto--search-users~ for searching GitHub users/orgs via the search API with caching and client-side narrowing.
+- ~remoto--fetch-user-repos~ for fetching repos of a user/org via the GitHub API with caching.
+- Partial path support in file operations (~file-exists-p~, ~file-directory-p~, ~file-name-directory~, ~file-name-nondirectory~, ~file-remote-p~) for pre-repo completion levels.
+- ~remoto--parse-partial-canonical~ for resolving ~/github:owner/repo~ and ~/github:owner/repo@ref~ paths when opening.
+
 * [1.0.0] - 2026-04-25
 
 ** Changed
