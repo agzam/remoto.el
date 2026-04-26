@@ -953,36 +953,23 @@ protocol."
 (defvar remoto--browse-history nil
   "Minibuffer history for `remoto-browse'.")
 
+(defun remoto--repo-completion-table (string pred action)
+  "Programmed completion table for GitHub repos and branches.
+STRING is the current minibuffer input, PRED a filter predicate,
+ACTION the completion action dispatched by `completing-read'."
+  (if (eq action 'metadata)
+      '(metadata (category . remoto-repo))
+    (complete-with-action action (remoto--search-repos string) string pred)))
+
 (defun remoto--read-repo ()
   "Read a GitHub repo from the minibuffer with search completion.
-Uses `consult--read' with async dynamic collection when consult is
-loaded.  Otherwise uses a two-step prompt: type a search query, then
-pick from results.  URLs and owner/repo shorthand bypass search."
-  (if (and (featurep 'consult)
-           (fboundp 'consult--read)
-           (fboundp 'consult--dynamic-collection))
-      (let ((result (consult--read
-                     (consult--dynamic-collection #'remoto--search-repos)
-                     :prompt "Search GitHub repos: "
-                     :require-match nil
-                     :sort nil
-                     :initial "#"
-                     :history 'remoto--browse-history)))
-        ;; Strip consult's async split separator leaked into raw input
-        (string-trim-left result "#+"))
-    (let ((input (read-string "GitHub repo (owner, owner/repo, or URL): "
-                              nil 'remoto--browse-history)))
-      ;; URLs and owner/repo go straight through
-      (if (or (string-match-p "https?://" input)
-              (string-match-p "git@" input)
-              (string-match-p "/" input))
-          input
-        ;; Bare name - search and let user pick
-        (let ((results (remoto--search-repos input)))
-          (if results
-              (completing-read "Select repo: " results nil t nil
-                               'remoto--browse-history)
-            (user-error "Remoto: no repos found for: %s" input)))))))
+Type 3+ characters to trigger GitHub search.  Tab completes.
+Append @ to complete branch names (e.g. owner/repo@<Tab>).
+URLs and owner/repo shorthand can be typed directly."
+  (completing-read "GitHub repo: "
+                   #'remoto--repo-completion-table
+                   nil nil nil
+                   'remoto--browse-history))
 
 ;;;###autoload
 (defun remoto-browse (input)
