@@ -153,8 +153,8 @@ failures."
     (alist-get 'default_branch data)))
 
 (defconst remoto--dir-entry
-  (list :type "tree" :size 0 :sha "" :mode "040000")
-  "Plist for synthesized directory entries (root, intermediates, `.', `..').")
+  '((type . "tree") (size . 0) (sha . "") (mode . "040000"))
+  "Alist for synthesized directory entries (root, intermediates, `.', `..').")
 
 ;;;; Tree cache
 
@@ -185,7 +185,7 @@ Returns a new `remoto-path' with ref filled in."
 
 (defun remoto--fetch-tree (owner repo ref)
   "Fetch full tree for OWNER/REPO at REF from GitHub API.
-Returns a hash table of path -> plist with keys :type :size :sha :mode."
+Returns a hash table of path -> alist with keys type, size, sha, mode."
   (let* ((endpoint (format "repos/%s/%s/git/trees/%s?recursive=1" owner repo ref))
          (data (remoto--api endpoint))
          (entries (alist-get 'tree data))
@@ -201,10 +201,10 @@ Returns a hash table of path -> plist with keys :type :size :sha :mode."
     ;; All entries from API
     (dolist (entry entries)
       (let ((path (alist-get 'path entry))
-            (plist (list :type (alist-get 'type entry)
-                         :size (or (alist-get 'size entry) 0)
-                         :sha  (alist-get 'sha entry)
-                         :mode (alist-get 'mode entry))))
+            (plist (list (cons 'type (alist-get 'type entry))
+                         (cons 'size (or (alist-get 'size entry) 0))
+                         (cons 'sha  (alist-get 'sha entry))
+                         (cons 'mode (alist-get 'mode entry)))))
         (puthash path plist table)
         ;; Synthesize intermediate directories
         (let ((parts (split-string path "/" t)))
@@ -251,10 +251,10 @@ On-demand fallback for repos whose recursive tree was truncated."
         (let* ((path (alist-get 'path entry))
                (api-type (alist-get 'type entry))
                (type (if (equal api-type "dir") "tree" "blob"))
-               (plist (list :type type
-                            :size (or (alist-get 'size entry) 0)
-                            :sha (or (alist-get 'sha entry) "")
-                            :mode (if (equal type "tree") "040000" "100644"))))
+               (plist (list (cons 'type type)
+                            (cons 'size (or (alist-get 'size entry) 0))
+                            (cons 'sha (or (alist-get 'sha entry) ""))
+                            (cons 'mode (if (equal type "tree") "040000" "100644")))))
           ;; Keep existing entries from Trees API (they have richer mode info)
           (unless (gethash path tree)
             (puthash path plist tree)))))))
@@ -367,13 +367,13 @@ Pass remaining ARGS to the resolved handler."
   "Return t if FILENAME is a directory in the remote repo."
   (when-let* ((parsed (remoto--parse-path filename))
               (entry (remoto--tree-entry parsed)))
-    (equal "tree" (plist-get entry :type))))
+    (equal "tree" (alist-get 'type entry))))
 
 (defun remoto--handle-file-regular-p (filename)
   "Return t if FILENAME is a regular file in the remote repo."
   (when-let* ((parsed (remoto--parse-path filename))
               (entry (remoto--tree-entry parsed)))
-    (equal "blob" (plist-get entry :type))))
+    (equal "blob" (alist-get 'type entry))))
 
 (defun remoto--handle-file-readable-p (filename)
   "Return non-nil if remote FILENAME is readable."
@@ -388,9 +388,9 @@ Pass remaining ARGS to the resolved handler."
 Synthesized from tree cache - timestamps are epoch 0."
   (when-let* ((parsed (remoto--parse-path filename))
               (entry (remoto--tree-entry parsed)))
-    (let* ((dir? (equal "tree" (plist-get entry :type)))
-           (size (or (plist-get entry :size) 0))
-           (mode-str (or (plist-get entry :mode) "100644"))
+    (let* ((dir? (equal "tree" (alist-get 'type entry)))
+           (size (or (alist-get 'size entry) 0))
+           (mode-str (or (alist-get 'mode entry) "100644"))
            (mode (string-to-number mode-str 8))
            ;; Use epoch 0 for all timestamps
            (time '(0 0 0 0)))
@@ -456,7 +456,7 @@ Pass FULL, MATCH, NOSORT, and ID-FORMAT through unchanged."
   (when-let* ((parsed (remoto--parse-path directory)))
     (thread-last (remoto--tree-children parsed)
       (mapcar (lambda (child)
-                (if (equal "tree" (plist-get (cdr child) :type))
+                (if (equal "tree" (alist-get 'type (cdr child)))
                     (concat (car child) "/")
                   (car child))))
       (seq-filter (lambda (name)
@@ -608,9 +608,9 @@ VISIT, BEG, END, REPLACE as per `insert-file-contents'."
 (defun remoto--format-dired-entry (name plist)
   "Format a single Dired line for NAME with PLIST attributes.
 No leading spaces - Dired and dired-subtree add their own."
-  (let* ((dir? (equal "tree" (plist-get plist :type)))
-         (size (or (plist-get plist :size) 0))
-         (mode (or (plist-get plist :mode) "100644"))
+  (let* ((dir? (equal "tree" (alist-get 'type plist)))
+         (size (or (alist-get 'size plist) 0))
+         (mode (or (alist-get 'mode plist) "100644"))
          (perms (remoto--mode-to-string mode dir?)))
     (format "%s  1 github github %8d Jan  1  2000 %s\n"
             perms size name)))
@@ -623,7 +623,7 @@ Use FULL-DIRECTORY-P to force directory-style output."
               (entry (remoto--tree-entry parsed)))
     (cond
      ((or full-directory-p
-          (equal "tree" (plist-get entry :type)))
+          (equal "tree" (alist-get 'type entry)))
       (insert "total 0\n")
       (insert (remoto--format-dired-entry "." remoto--dir-entry))
       (insert (remoto--format-dired-entry ".." remoto--dir-entry))
@@ -816,7 +816,7 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
            (ref (remoto-path-ref resolved))
            (path (remoto--relative-path (remoto-path-path resolved)))
            (entry (remoto--tree-entry resolved))
-           (type (if (and entry (equal "tree" (plist-get entry :type)))
+           (type (if (and entry (equal "tree" (alist-get 'type entry)))
                      "tree" "blob"))
            (line-suffix (when (and (equal type "blob")
                                    (not (derived-mode-p 'dired-mode)))
@@ -995,7 +995,7 @@ to search GitHub repositories."
          (resolved (remoto--resolve-ref parsed))
          (canonical (remoto--canonical-path resolved)))
     (if (equal "tree"
-               (plist-get (remoto--tree-entry resolved) :type))
+               (alist-get 'type (remoto--tree-entry resolved)))
         (dired canonical)
       (find-file canonical))))
 

@@ -97,22 +97,22 @@
 
   (it "includes root entry"
     (expect (gethash "" remoto-itest--tree) :to-be-truthy)
-    (expect (plist-get (gethash "" remoto-itest--tree) :type) :to-equal "tree"))
+    (expect (alist-get 'type (gethash "" remoto-itest--tree)) :to-equal "tree"))
 
   (it "includes known files at expected paths"
     ;; top-level files
     (expect (gethash "README" remoto-itest--tree) :to-be-truthy)
-    (expect (plist-get (gethash "README" remoto-itest--tree) :type) :to-equal "blob")
+    (expect (alist-get 'type (gethash "README" remoto-itest--tree)) :to-equal "blob")
     ;; nested file
     (expect (gethash "lisp/emacs-lisp/cl-lib.el" remoto-itest--tree) :to-be-truthy)
-    (expect (plist-get (gethash "lisp/emacs-lisp/cl-lib.el" remoto-itest--tree) :type)
+    (expect (alist-get 'type (gethash "lisp/emacs-lisp/cl-lib.el" remoto-itest--tree))
             :to-equal "blob"))
 
   (it "synthesizes intermediate directories"
     (expect (gethash "lisp" remoto-itest--tree) :to-be-truthy)
-    (expect (plist-get (gethash "lisp" remoto-itest--tree) :type) :to-equal "tree")
+    (expect (alist-get 'type (gethash "lisp" remoto-itest--tree)) :to-equal "tree")
     (expect (gethash "lisp/emacs-lisp" remoto-itest--tree) :to-be-truthy)
-    (expect (plist-get (gethash "lisp/emacs-lisp" remoto-itest--tree) :type) :to-equal "tree")))
+    (expect (alist-get 'type (gethash "lisp/emacs-lisp" remoto-itest--tree)) :to-equal "tree")))
 
 ;;; Tree entry lookup via parsed paths
 
@@ -139,7 +139,7 @@
       (let ((entry (remoto--tree-entry
                     (remoto--parse-path (concat remoto-itest-prefix "/")))))
         (expect entry :to-be-truthy)
-        (expect (plist-get entry :type) :to-equal "tree"))))
+        (expect (alist-get 'type entry) :to-equal "tree"))))
 
   (it "finds a deeply nested file"
     (let ((remoto--tree-cache remoto-itest--cache)
@@ -148,8 +148,8 @@
                     (remoto--parse-path
                      (concat remoto-itest-prefix "/lisp/emacs-lisp/cl-lib.el")))))
         (expect entry :to-be-truthy)
-        (expect (plist-get entry :type) :to-equal "blob")
-        (expect (plist-get entry :size) :to-be-greater-than 0))))
+        (expect (alist-get 'type entry) :to-equal "blob")
+        (expect (alist-get 'size entry) :to-be-greater-than 0))))
 
   (it "returns nil for nonexistent paths"
     (let ((remoto--tree-cache remoto-itest--cache)

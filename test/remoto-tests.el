@@ -13,14 +13,14 @@
 ;;; Helpers
 
 (defvar remoto-test--mock-tree
-  '(("README.md" (:type "blob" :size 500 :sha "aaa" :mode "100644"))
-    ("src" (:type "tree" :size 0 :sha "bbb" :mode "040000"))
-    ("src/main.el" (:type "blob" :size 1234 :sha "ccc" :mode "100644"))
-    ("src/utils.el" (:type "blob" :size 567 :sha "ddd" :mode "100644"))
-    ("bin/run" (:type "blob" :size 42 :sha "eee" :mode "100755"))
-    ("bin" (:type "tree" :size 0 :sha "fff" :mode "040000"))
-    ("" (:type "tree" :size 0 :sha "" :mode "040000"))
-    ("/" (:type "tree" :size 0 :sha "" :mode "040000")))
+  '(("README.md" ((type . "blob") (size . 500) (sha . "aaa") (mode . "100644")))
+    ("src" ((type . "tree") (size . 0) (sha . "bbb") (mode . "040000")))
+    ("src/main.el" ((type . "blob") (size . 1234) (sha . "ccc") (mode . "100644")))
+    ("src/utils.el" ((type . "blob") (size . 567) (sha . "ddd") (mode . "100644")))
+    ("bin/run" ((type . "blob") (size . 42) (sha . "eee") (mode . "100755")))
+    ("bin" ((type . "tree") (size . 0) (sha . "fff") (mode . "040000")))
+    ("" ((type . "tree") (size . 0) (sha . "") (mode . "040000")))
+    ("/" ((type . "tree") (size . 0) (sha . "") (mode . "040000"))))
   "Mock tree data for tests.")
 
 (defun remoto-test--install-mock-tree ()
@@ -145,8 +145,8 @@
     (remoto-test-with-cache
       (let* ((entry (remoto--tree-entry
                      (remoto--parse-path "/github:testowner/testrepo@main:/README.md")))
-             (entry-type (plist-get entry :type))
-             (entry-size (plist-get entry :size)))
+             (entry-type (alist-get 'type entry))
+             (entry-size (alist-get 'size entry)))
         (expect entry :to-be-truthy)
         (expect entry-type :to-equal "blob")
         (expect entry-size :to-equal 500))))
@@ -155,7 +155,7 @@
     (remoto-test-with-cache
       (let* ((entry (remoto--tree-entry
                      (remoto--parse-path "/github:testowner/testrepo@main:/src")))
-             (entry-type (plist-get entry :type)))
+             (entry-type (alist-get 'type entry)))
         (expect entry :to-be-truthy)
         (expect entry-type :to-equal "tree"))))
 
@@ -163,7 +163,7 @@
     (remoto-test-with-cache
       (let* ((entry (remoto--tree-entry
                      (remoto--parse-path "/github:testowner/testrepo@main:/")))
-             (entry-type (plist-get entry :type)))
+             (entry-type (alist-get 'type entry)))
         (expect entry :to-be-truthy)
         (expect entry-type :to-equal "tree"))))
 
@@ -178,7 +178,7 @@
       (let ((entry (remoto--tree-entry
                     (remoto--parse-path "/github:testowner/testrepo@main:/src//main.el"))))
         (expect entry :to-be-truthy)
-        (expect (plist-get entry :sha) :to-equal "ccc")))))
+        (expect (alist-get 'sha entry) :to-equal "ccc")))))
 
 (describe "remoto--tree-children"
   (it "lists root children"
@@ -205,9 +205,9 @@
       (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
       ;; Simulate a truncated tree with only root and src dir
       (let ((table (make-hash-table :test 'equal)))
-        (puthash "" '(:type "tree" :size 0 :sha "" :mode "040000") table)
-        (puthash "/" '(:type "tree" :size 0 :sha "" :mode "040000") table)
-        (puthash "src" '(:type "tree" :size 0 :sha "bbb" :mode "040000") table)
+        (puthash "" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
+        (puthash "/" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
+        (puthash "src" '((type . "tree") (size . 0) (sha . "bbb") (mode . "040000")) table)
         (puthash "\0truncated" t table)
         (puthash "testowner/testrepo@main" table remoto--tree-cache))
       ;; Mock the API call for on-demand fetch
@@ -223,10 +223,10 @@
       ;; Looking up src/main.el should trigger on-demand fetch
       (let* ((entry (remoto--tree-entry
                      (remoto--parse-path "/github:testowner/testrepo@main:/src/main.el")))
-             (entry-type (plist-get entry :type)))
+             (entry-type (alist-get 'type entry)))
         (expect entry :to-be-truthy)
         (expect entry-type :to-equal "blob")
-        (expect (plist-get entry :sha) :to-equal "ccc"))))
+        (expect (alist-get 'sha entry) :to-equal "ccc"))))
 
   (it "fetches directory children on demand"
     (let ((remoto--tree-cache (make-hash-table :test 'equal))
@@ -234,9 +234,9 @@
           (remoto--content-cache (make-hash-table :test 'equal)))
       (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
       (let ((table (make-hash-table :test 'equal)))
-        (puthash "" '(:type "tree" :size 0 :sha "" :mode "040000") table)
-        (puthash "/" '(:type "tree" :size 0 :sha "" :mode "040000") table)
-        (puthash "src" '(:type "tree" :size 0 :sha "bbb" :mode "040000") table)
+        (puthash "" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
+        (puthash "/" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
+        (puthash "src" '((type . "tree") (size . 0) (sha . "bbb") (mode . "040000")) table)
         (puthash "\0truncated" t table)
         (puthash "testowner/testrepo@main" table remoto--tree-cache))
       (spy-on 'remoto--api :and-call-fake
@@ -260,9 +260,9 @@
           (api-call-count 0))
       (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
       (let ((table (make-hash-table :test 'equal)))
-        (puthash "" '(:type "tree" :size 0 :sha "" :mode "040000") table)
-        (puthash "/" '(:type "tree" :size 0 :sha "" :mode "040000") table)
-        (puthash "src" '(:type "tree" :size 0 :sha "bbb" :mode "040000") table)
+        (puthash "" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
+        (puthash "/" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
+        (puthash "src" '((type . "tree") (size . 0) (sha . "bbb") (mode . "040000")) table)
         (puthash "\0truncated" t table)
         (puthash "testowner/testrepo@main" table remoto--tree-cache))
       (spy-on 'remoto--api :and-call-fake
@@ -350,19 +350,19 @@
 (describe "remoto--format-dired-entry"
   (it "formats a file entry"
     (let ((line (remoto--format-dired-entry
-                 "file.el" '(:type "blob" :size 1234 :mode "100644"))))
+                 "file.el" '((type . "blob") (size . 1234) (mode . "100644")))))
       (expect line :to-match "^-rw-r--r--")
       (expect line :to-match "1234")
       (expect line :to-match "file\\.el")))
 
   (it "formats a directory entry"
     (let ((line (remoto--format-dired-entry
-                 "src" '(:type "tree" :size 0 :mode "040000"))))
+                 "src" '((type . "tree") (size . 0) (mode . "040000")))))
       (expect line :to-match "^drwxr-xr-x")))
 
   (it "formats an executable entry"
     (let ((line (remoto--format-dired-entry
-                 "run" '(:type "blob" :size 42 :mode "100755"))))
+                 "run" '((type . "blob") (size . 42) (mode . "100755")))))
       (expect line :to-match "^-rwxr-xr-x"))))
 
 ;;; Read-only enforcement
