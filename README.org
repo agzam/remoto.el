@@ -33,6 +33,7 @@ You need to load the package so it can register its file handler and advice.
   :demand t)
 #+end_src
 
+The package is not on MELPA yet. Maybe upvote the [[https://github.com/melpa/melpa/pull/9978][submission PR]], who knows, perhaps it gets accepted faster.
 
 ** Usage
 
