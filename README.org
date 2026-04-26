@@ -120,7 +120,7 @@ We can only imagine a world where git's transport layer gives you a browsable fi
 
 ** Limitations
 
-- Read-only. No commits, no pushes, no file modifications.
+- Read-only. No commits, no pushes, no file modifications. You still can copy them out.
 - No git operations (log, blame, diff).
 - Timestamps in dired are synthetic (the tree API has no timestamps).
 - Very large repos (100k+ files) use slower per-directory fetching.

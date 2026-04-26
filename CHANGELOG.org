@@ -3,7 +3,7 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
-* [Unreleased]
+* [1.1.0] - 2026-04-26
 
 ** Added
 - ~find-file~ completion for ~/github:~ paths. Type ~/github:foo~ to search users/orgs, ~/github:owner/~ to list repos, append ~@~ after a repo name to complete branches. Transitions seamlessly into file-level completion within a repo.
