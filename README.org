@@ -92,6 +92,18 @@ The virtual filesystem uses paths of the form:
   
 For a read-only tree browser backed by a REST API, a direct file-name-handler is the simpler, more natural fit
 
+*** Why not just use plain HTTP?
+
+Git's own protocols let you talk to a remote repo without cloning it, so why not use that, right?
+
+- Tree listing. There's no raw HTTP URL that gives you a directory listing. raw.githubblabla.com can't do directory indexes. You'd have to shell out to `git ls-tree ... etc.` over the ssh, which means essentially implementing a partial git client.
+
+- Branch listing and repo search - no git protocol equivalent for those - need the API
+
+- Current approach fetches the entire tree in one API call. Doing the same over git pack protocol means negotiating a fetch, receiving packfile data and parsing it. Much heavier, much more code.
+
+We can only imagine a world where git's transport layer gives you a browsable filesystem interface. It doesn't - git's protocols are optimized for syncing object graphs, not random-access file browsing.
+
 ** Limitations
 
 - Read-only. No commits, no pushes, no file modifications.

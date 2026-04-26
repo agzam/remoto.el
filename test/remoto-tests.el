@@ -421,6 +421,57 @@
   (it "handles root"
     (expect (remoto--normalize-path "/") :to-equal "/")))
 
+;;; remoto-copy-github-url
+
+(describe "remoto-copy-github-url"
+  (it "copies file URL with line number from a file buffer"
+    (remoto-test-with-cache
+      (let ((buffer-file-name "/github:testowner/testrepo@main:/src/main.el"))
+        (with-temp-buffer
+          (insert "line1\nline2\nline3\n")
+          (setq-local buffer-file-name "/github:testowner/testrepo@main:/src/main.el")
+          (goto-char (point-min))
+          (forward-line 2)
+          (remoto-copy-github-url)
+          (expect (car kill-ring)
+                  :to-equal "https://github.com/testowner/testrepo/blob/main/src/main.el#L3")))))
+
+  (it "copies directory URL from dired with point on a directory"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (dired-mode)
+        (setq-local dired-directory "/github:testowner/testrepo@main:/")
+        (spy-on 'dired-get-filename :and-return-value
+                "/github:testowner/testrepo@main:/src")
+        (remoto-copy-github-url)
+        (expect (car kill-ring)
+                :to-equal "https://github.com/testowner/testrepo/tree/main/src"))))
+
+  (it "copies file URL from dired with point on a file"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (dired-mode)
+        (setq-local dired-directory "/github:testowner/testrepo@main:/")
+        (spy-on 'dired-get-filename :and-return-value
+                "/github:testowner/testrepo@main:/README.md")
+        (remoto-copy-github-url)
+        (expect (car kill-ring)
+                :to-equal "https://github.com/testowner/testrepo/blob/main/README.md"))))
+
+  (it "falls back to dired-directory when point is not on a file"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (dired-mode)
+        (setq-local dired-directory "/github:testowner/testrepo@main:/")
+        (spy-on 'dired-get-filename :and-return-value nil)
+        (remoto-copy-github-url)
+        (expect (car kill-ring)
+                :to-equal "https://github.com/testowner/testrepo/tree/main/"))))
+
+  (it "signals error outside remoto buffers"
+    (with-temp-buffer
+      (expect (remoto-copy-github-url) :to-throw 'user-error))))
+
 ;;; Repository search
 
 (describe "remoto--fetch-branches"

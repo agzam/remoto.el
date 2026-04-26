@@ -807,7 +807,11 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
 (defun remoto-copy-github-url ()
   "Copy the GitHub web URL for the current file/line to kill ring."
   (interactive)
-  (let* ((file (or buffer-file-name dired-directory default-directory))
+  (let* ((file (or buffer-file-name
+                   (when (derived-mode-p 'dired-mode)
+                     (dired-get-filename nil t))
+                   dired-directory
+                   default-directory))
          (parsed (remoto--parse-path file)))
     (unless parsed
       (user-error "Remoto: not in a remoto buffer"))
