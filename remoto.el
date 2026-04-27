@@ -512,11 +512,21 @@ Pass FULL, MATCH, NOSORT, and ID-FORMAT through unchanged."
 
 (defun remoto--parse-partial-github-path (directory)
   "Parse a partial /github: DIRECTORY for pre-repo completion.
-Returns a plist (:level :owner) or nil if not a partial path.
-:level is `root' for /github: and `owner' for /github:OWNER/."
+Returns a plist with :level plus context keys, or nil.
+:level is `root' for /github:, `owner' for /github:OWNER/,
+or `repo' for /github:OWNER/REPO@."
   (cond
    ((string-match (rx bos "/github:" eos) directory)
     (list :level 'root :owner nil))
+   ((string-match (rx bos "/github:"
+                      (group (+ (not (any "/:@"))))
+                      "/"
+                      (group (+ (not (any "/:@"))))
+                      "@" eos)
+                  directory)
+    (list :level 'repo
+          :owner (match-string 1 directory)
+          :repo (match-string 2 directory)))
    ((string-match (rx bos "/github:"
                       (group (+ (not (any "/:@"))))
                       "/" eos)
@@ -536,21 +546,24 @@ Handles three levels: user search at /github:, repo listing at
              (seq-filter (lambda (u) (string-prefix-p file u)))
              (mapcar (lambda (u) (concat u "/"))))))
         ('owner
+         ;; Repo completion at /github:OWNER/
          (let ((owner (plist-get partial :owner)))
-           (if-let* ((at-pos (string-search "@" file)))
-               ;; Branch completion: FILE is "repo@branchprefix"
-               (let* ((repo (substring file 0 at-pos))
-                      (branch-prefix (substring file (1+ at-pos)))
-                      (branches (remoto--fetch-branches owner repo)))
-                 (thread-last branches
-                   (seq-filter (lambda (b)
-                                 (or (string-empty-p branch-prefix)
-                                     (string-prefix-p branch-prefix b))))
-                   (mapcar (lambda (b) (format "%s@%s:" repo b)))))
-             ;; Repo completion
-             (when-let* ((repos (remoto--fetch-user-repos owner)))
-               (seq-filter (lambda (r) (string-prefix-p file r))
-                           repos))))))
+           (when-let* ((repos (remoto--fetch-user-repos owner)))
+             (seq-filter (lambda (r) (string-prefix-p file r))
+                         repos))))
+        ('repo
+         ;; Branch completion at /github:OWNER/REPO@
+         (if (string-suffix-p ":" file)
+             ;; Branch already selected (e.g. "main:") - exact match
+             (list file)
+           (let* ((owner (plist-get partial :owner))
+                  (repo (plist-get partial :repo))
+                  (branches (remoto--fetch-branches owner repo)))
+             (thread-last branches
+               (seq-filter (lambda (b)
+                             (or (string-empty-p file)
+                                 (string-prefix-p file b))))
+               (mapcar (lambda (b) (concat b ":"))))))))
     ;; Full canonical path - existing behavior
     (when-let* ((parsed (remoto--parse-path directory)))
       (thread-last (remoto--tree-children parsed)
@@ -635,7 +648,17 @@ Handles partial paths for pre-repo completion."
                 ;; but file-name-directory on /github:fo would return /
                 ;; so handle manually
                 ""))))
-   ;; /github:owner/repo or /github:owner/repo@branch
+   ;; /github:owner/repo@branch - treat repo@ as directory
+   ((and (string-prefix-p "/github:" filename)
+         (not (remoto--parse-path filename))
+         (string-match (rx bos "/github:"
+                           (+ (not (any "/:@")))
+                           "/"
+                           (+ (not (any "/:@")))
+                           "@")
+                       filename))
+    (match-string 0 filename))
+   ;; /github:owner/repo (no @)
    ((and (string-prefix-p "/github:" filename)
          (not (remoto--parse-path filename))
          (string-match (rx bos "/github:"
@@ -668,7 +691,17 @@ Handles partial paths for pre-repo completion."
    ((string-match (rx bos "/github:" (group (+ (not (any "/:@")))) eos)
                   filename)
     (match-string 1 filename))
-   ;; /github:owner/repo or /github:owner/repo@branch -> "repo" or "repo@branch"
+   ;; /github:owner/repo@ -> ""
+   ((and (string-prefix-p "/github:" filename)
+         (string-suffix-p "@" filename)
+         (not (remoto--parse-path filename)))
+    "")
+   ;; /github:owner/repo@branch -> "branch"
+   ((and (string-prefix-p "/github:" filename)
+         (not (remoto--parse-path filename))
+         (string-match (rx "@" (group (+ (not (any "/:@")))) eos) filename))
+    (match-string 1 filename))
+   ;; /github:owner/repo -> "repo"
    ((and (string-prefix-p "/github:" filename)
          (not (remoto--parse-path filename))
          (string-match (rx bos "/github:" (+ (not (any "/:@"))) "/"
@@ -1144,7 +1177,7 @@ endpoint which includes private repositories."
           (let* ((self (remoto--get-authenticated-user))
                  (selfp (and self (string-equal-ignore-case key self)))
                  (endpoint (if selfp
-                               "user/repos?per_page=100&sort=updated&type=all"
+                               "user/repos?per_page=100&sort=updated&type=owner"
                              (format "users/%s/repos?per_page=100&sort=updated"
                                      (url-hexify-string owner))))
                  (data (remoto--api endpoint))

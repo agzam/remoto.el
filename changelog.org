@@ -3,11 +3,14 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
-* [1.2.0] - 2026-04-26
+* [1.2.0] - 2026-04-27
 
 ** Added
-- Private repository listing for the authenticated user. When browsing your own repos at ~/github:yourname/~, remoto now uses the ~/user/repos~ endpoint which includes private repositories. Other users' repos continue using the public ~/users/{owner}/repos~ endpoint.
+- Private repository listing for the authenticated user. When browsing your own repos at ~/github:yourname/~, remoto now uses the ~/user/repos?type=owner~ endpoint which includes private repositories. Other users' repos continue using the public ~/users/{owner}/repos~ endpoint.
 - ~remoto--get-authenticated-user~ to detect and cache the logged-in GitHub user via the ~/user~ API.
+
+** Fixed
+- Branch completion now works with orderless/vertico. The ~@~ in ~/github:owner/repo@~ is treated as a directory boundary so completion frameworks that fetch all candidates before filtering (e.g. orderless) get branch names instead of the repo list.
 
 * [1.1.0] - 2026-04-26
 

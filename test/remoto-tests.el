@@ -867,9 +867,9 @@
     (expect (remoto--handle-file-name-directory "/github:foobar/zapzop")
             :to-equal "/github:foobar/"))
 
-  (it "file-name-directory returns /github:owner/ for /github:owner/repo@ref"
+  (it "file-name-directory returns /github:owner/repo@ for /github:owner/repo@ref"
     (expect (remoto--handle-file-name-directory "/github:foobar/zapzop@main")
-            :to-equal "/github:foobar/"))
+            :to-equal "/github:foobar/zapzop@"))
 
   (it "file-name-nondirectory returns empty for /github:"
     (expect (remoto--handle-file-name-nondirectory "/github:") :to-equal ""))
@@ -884,9 +884,9 @@
     (expect (remoto--handle-file-name-nondirectory "/github:foobar/zapzop")
             :to-equal "zapzop"))
 
-  (it "file-name-nondirectory returns repo@ref for /github:owner/repo@ref"
+  (it "file-name-nondirectory returns ref for /github:owner/repo@ref"
     (expect (remoto--handle-file-name-nondirectory "/github:foobar/zapzop@main")
-            :to-equal "zapzop@main")))
+            :to-equal "main")))
 
 ;;; User search
 
@@ -1013,7 +1013,7 @@
                 '(((name . "linux") (full_name . "torvalds/linux"))
                   ((name . "private-proj") (full_name . "torvalds/private-proj")))))
       (remoto--fetch-user-repos "torvalds")
-      (expect endpoint-called :to-equal "user/repos?per_page=100&sort=updated&type=all")))
+      (expect endpoint-called :to-equal "user/repos?per_page=100&sort=updated&type=owner")))
 
   (it "uses /user/repos endpoint case-insensitively"
     (let ((remoto--user-repos-cache (make-hash-table :test 'equal))
@@ -1025,7 +1025,7 @@
                 (setq endpoint-called ep)
                 '(((name . "linux")))))
       (remoto--fetch-user-repos "torvalds")
-      (expect endpoint-called :to-equal "user/repos?per_page=100&sort=updated&type=all")))
+      (expect endpoint-called :to-equal "user/repos?per_page=100&sort=updated&type=owner")))
 
   (it "uses /users/{owner}/repos for other users"
     (let ((remoto--user-repos-cache (make-hash-table :test 'equal))
@@ -1092,17 +1092,22 @@
     (let ((completions (remoto--handle-file-name-all-completions "lin" "/github:torvalds/")))
       (expect completions :to-equal '("linux"))))
 
-  (it "returns branch completions when @ present"
+  (it "returns branch completions at repo@ directory"
     (spy-on 'remoto--fetch-branches :and-return-value '("main" "develop"))
     (let ((completions (remoto--handle-file-name-all-completions
-                        "linux@" "/github:torvalds/")))
-      (expect completions :to-equal '("linux@main:" "linux@develop:"))))
+                        "" "/github:torvalds/linux@")))
+      (expect completions :to-equal '("main:" "develop:"))))
 
-  (it "filters branches by prefix after @"
+  (it "filters branches by prefix at repo@ directory"
     (spy-on 'remoto--fetch-branches :and-return-value '("main" "develop"))
     (let ((completions (remoto--handle-file-name-all-completions
-                        "linux@dev" "/github:torvalds/")))
-      (expect completions :to-equal '("linux@develop:"))))
+                        "dev" "/github:torvalds/linux@")))
+      (expect completions :to-equal '("develop:"))))
+
+  (it "returns exact match for completed branch:"
+    (let ((completions (remoto--handle-file-name-all-completions
+                        "main:" "/github:torvalds/linux@")))
+      (expect completions :to-equal '("main:"))))
 
   (it "falls through to tree-based completion for full canonical paths"
     (remoto-test-with-cache
