@@ -3,6 +3,12 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [1.2.0] - 2026-04-26
+
+** Added
+- Private repository listing for the authenticated user. When browsing your own repos at ~/github:yourname/~, remoto now uses the ~/user/repos~ endpoint which includes private repositories. Other users' repos continue using the public ~/users/{owner}/repos~ endpoint.
+- ~remoto--get-authenticated-user~ to detect and cache the logged-in GitHub user via the ~/user~ API.
+
 * [1.1.0] - 2026-04-26
 
 ** Added

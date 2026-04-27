@@ -5,7 +5,7 @@
 ;; Author: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: April 24, 2026
-;; Version: 0.1.0
+;; Version: 1.2.0
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
 ;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
@@ -113,6 +113,11 @@ access and caches the failure for the rest of the session.  Use
 Causes `remoto--api' to skip token lookup and use unauthenticated
 requests.  Reset with `remoto-reset-auth'.")
 
+(defvar remoto--authenticated-user nil
+  "Cached GitHub login of the authenticated user, or nil if unknown.
+Set by `remoto--get-authenticated-user' on first successful lookup.
+Cleared by `remoto-reset-auth'.")
+
 (defun remoto--json-reader (_status)
   "Parse JSON response with list-type arrays for remoto compatibility.
 Handles both header-present and header-stripped response buffers."
@@ -176,6 +181,7 @@ failures."
 Use after adding a GitHub token to auth-source."
   (interactive)
   (setq remoto--auth-failed nil)
+  (setq remoto--authenticated-user nil)
   (message "Remoto: auth cache cleared; will retry token lookup on next request"))
 
 (defun remoto--default-branch (owner repo)
@@ -1110,9 +1116,23 @@ Uses client-side narrowing when a parent query is cached."
                     results)
                 (user-error nil)))))))))
 
+(defun remoto--get-authenticated-user ()
+  "Return the GitHub login of the authenticated user, or nil.
+Caches the result for the session.  Returns nil when auth has
+failed or the API call errors."
+  (or remoto--authenticated-user
+      (unless remoto--auth-failed
+        (condition-case nil
+            (when-let* ((data (remoto--api "user"))
+                        (login (alist-get 'login data)))
+              (setq remoto--authenticated-user login))
+          (user-error nil)))))
+
 (defun remoto--fetch-user-repos (owner)
   "Fetch repo names for OWNER, cached with TTL.
-Returns a list of repo name strings (not full_name)."
+Returns a list of repo name strings (not full_name).
+When OWNER matches the authenticated user, uses the /user/repos
+endpoint which includes private repositories."
   (let* ((key (downcase owner))
          (entry (gethash key remoto--user-repos-cache))
          (now (float-time)))
@@ -1121,8 +1141,12 @@ Returns a list of repo name strings (not full_name)."
                  (< (- now (car entry)) remoto-search-cache-ttl)))
         (cdr entry)
       (condition-case nil
-          (let* ((endpoint (format "users/%s/repos?per_page=100&sort=updated"
-                                   (url-hexify-string owner)))
+          (let* ((self (remoto--get-authenticated-user))
+                 (selfp (and self (string-equal-ignore-case key self)))
+                 (endpoint (if selfp
+                               "user/repos?per_page=100&sort=updated&type=all"
+                             (format "users/%s/repos?per_page=100&sort=updated"
+                                     (url-hexify-string owner))))
                  (data (remoto--api endpoint))
                  (repos (mapcar (lambda (item) (alist-get 'name item)) data)))
             (puthash key (cons now repos) remoto--user-repos-cache)

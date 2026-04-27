@@ -39,7 +39,8 @@
          (remoto--branches-cache (make-hash-table :test 'equal))
          (remoto--search-cache (make-hash-table :test 'equal))
          (remoto--users-cache (make-hash-table :test 'equal))
-         (remoto--user-repos-cache (make-hash-table :test 'equal)))
+         (remoto--user-repos-cache (make-hash-table :test 'equal))
+         (remoto--authenticated-user nil))
      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
      (remoto-test--install-mock-tree)
      ,@body))
@@ -943,12 +944,14 @@
     (spy-on 'remoto--api :and-return-value
             '(((name . "linux") (full_name . "torvalds/linux"))
               ((name . "subsurface") (full_name . "torvalds/subsurface"))))
-    (let ((remoto--user-repos-cache (make-hash-table :test 'equal)))
+    (let ((remoto--user-repos-cache (make-hash-table :test 'equal))
+          (remoto--auth-failed t))
       (expect (remoto--fetch-user-repos "torvalds")
               :to-equal '("linux" "subsurface"))))
 
   (it "caches results"
     (let ((remoto--user-repos-cache (make-hash-table :test 'equal))
+          (remoto--auth-failed t)
           (call-count 0))
       (spy-on 'remoto--api :and-call-fake
               (lambda (_endpoint)
@@ -961,8 +964,106 @@
   (it "returns nil on API errors"
     (spy-on 'remoto--api :and-call-fake
             (lambda (_) (user-error "not found")))
-    (let ((remoto--user-repos-cache (make-hash-table :test 'equal)))
+    (let ((remoto--user-repos-cache (make-hash-table :test 'equal))
+          (remoto--auth-failed t))
       (expect (remoto--fetch-user-repos "nouser") :to-be nil))))
+
+(describe "remoto--get-authenticated-user"
+  (it "returns login from /user endpoint"
+    (let ((remoto--authenticated-user nil)
+          (remoto--auth-failed nil))
+      (spy-on 'remoto--api :and-return-value '((login . "agzam")))
+      (expect (remoto--get-authenticated-user) :to-equal "agzam")))
+
+  (it "caches the result for subsequent calls"
+    (let ((remoto--authenticated-user nil)
+          (remoto--auth-failed nil)
+          (call-count 0))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_)
+                (setq call-count (1+ call-count))
+                '((login . "agzam"))))
+      (remoto--get-authenticated-user)
+      (remoto--get-authenticated-user)
+      (expect call-count :to-equal 1)))
+
+  (it "returns nil when auth has failed"
+    (let ((remoto--authenticated-user nil)
+          (remoto--auth-failed t))
+      (spy-on 'remoto--api)
+      (expect (remoto--get-authenticated-user) :to-be nil)
+      (expect 'remoto--api :not :to-have-been-called)))
+
+  (it "returns nil on API error"
+    (let ((remoto--authenticated-user nil)
+          (remoto--auth-failed nil))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_) (user-error "auth failed")))
+      (expect (remoto--get-authenticated-user) :to-be nil))))
+
+(describe "remoto--fetch-user-repos with authenticated user"
+  (it "uses /user/repos endpoint for authenticated user's own repos"
+    (let ((remoto--user-repos-cache (make-hash-table :test 'equal))
+          (remoto--authenticated-user "torvalds")
+          (remoto--auth-failed nil)
+          (endpoint-called nil))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (ep)
+                (setq endpoint-called ep)
+                '(((name . "linux") (full_name . "torvalds/linux"))
+                  ((name . "private-proj") (full_name . "torvalds/private-proj")))))
+      (remoto--fetch-user-repos "torvalds")
+      (expect endpoint-called :to-equal "user/repos?per_page=100&sort=updated&type=all")))
+
+  (it "uses /user/repos endpoint case-insensitively"
+    (let ((remoto--user-repos-cache (make-hash-table :test 'equal))
+          (remoto--authenticated-user "Torvalds")
+          (remoto--auth-failed nil)
+          (endpoint-called nil))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (ep)
+                (setq endpoint-called ep)
+                '(((name . "linux")))))
+      (remoto--fetch-user-repos "torvalds")
+      (expect endpoint-called :to-equal "user/repos?per_page=100&sort=updated&type=all")))
+
+  (it "uses /users/{owner}/repos for other users"
+    (let ((remoto--user-repos-cache (make-hash-table :test 'equal))
+          (remoto--authenticated-user "agzam")
+          (remoto--auth-failed nil)
+          (endpoint-called nil))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (ep)
+                (setq endpoint-called ep)
+                '(((name . "linux")))))
+      (remoto--fetch-user-repos "torvalds")
+      (expect endpoint-called :to-equal "users/torvalds/repos?per_page=100&sort=updated")))
+
+  (it "skips self-detection when auth has failed"
+    (let ((remoto--user-repos-cache (make-hash-table :test 'equal))
+          (remoto--authenticated-user nil)
+          (remoto--auth-failed t)
+          (endpoint-called nil))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (ep)
+                (setq endpoint-called ep)
+                '(((name . "linux")))))
+      (remoto--fetch-user-repos "torvalds")
+      (expect endpoint-called :to-equal "users/torvalds/repos?per_page=100&sort=updated"))))
+
+(describe "remoto-reset-auth clears authenticated user"
+  (it "clears cached authenticated user"
+    (let ((old-auth remoto--auth-failed)
+          (old-user remoto--authenticated-user))
+      (unwind-protect
+          (progn
+            (setq remoto--auth-failed t
+                  remoto--authenticated-user "agzam")
+            (remoto-reset-auth)
+            (expect remoto--authenticated-user :to-be nil)
+            (expect remoto--auth-failed :to-be nil))
+        (setq remoto--auth-failed old-auth
+              remoto--authenticated-user old-user)))))
 
 ;;; Pre-repo completions
 
