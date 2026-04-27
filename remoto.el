@@ -29,6 +29,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'files-x)
 (require 'ghub)
 
 ;;;; Path parsing

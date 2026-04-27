@@ -1286,6 +1286,21 @@
     (expect (remoto--handle-file-name-completion "zzz" "/github:")
             :to-be nil)))
 
+;;; Dired integration
+
+(describe "dired-noselect on remoto paths"
+  (it "does not error on connection-local variables"
+    (remoto-test-with-cache
+      (let ((buf (dired-noselect "/github:testowner/testrepo@main:/")))
+        (unwind-protect
+            (progn
+              (expect buf :to-be-truthy)
+              (expect (buffer-live-p buf) :to-be-truthy)
+              (with-current-buffer buf
+                (expect major-mode :to-equal 'dired-mode)
+                (expect (buffer-string) :to-match "README\\.md")))
+          (kill-buffer buf))))))
+
 ;;; maybe-rewrite for partial canonical paths
 
 (describe "remoto--maybe-rewrite with partial canonical paths"
