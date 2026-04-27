@@ -109,7 +109,8 @@ access and caches the failure for the rest of the session.  Use
   :group 'remoto)
 
 (defvar remoto--auth-failed nil
-  "Non-nil when authenticated GitHub access has failed or timed out.
+  "Non-nil when authenticated GitHub access has permanently failed.
+Set on actual auth errors (missing token, 401), NOT on timeouts.
 Causes `remoto--api' to skip token lookup and use unauthenticated
 requests.  Reset with `remoto-reset-auth'.")
 
@@ -166,8 +167,7 @@ failures."
           (let ((result (with-timeout (remoto-auth-timeout 'remoto--timed-out)
                           (remoto--ghub-get resource auth endpoint))))
             (when (eq result 'remoto--timed-out)
-              (setq remoto--auth-failed t)
-              (message "Remoto: auth lookup timed out; using unauthenticated access (see `remoto-reset-auth')")
+              (message "Remoto: auth lookup timed out; retrying next call (see `remoto-auth-timeout')")
               (setq result (remoto--ghub-get resource 'none endpoint)))
             result)
         (error
@@ -522,7 +522,7 @@ or `repo' for /github:OWNER/REPO@."
                       (group (+ (not (any "/:@"))))
                       "/"
                       (group (+ (not (any "/:@"))))
-                      "@" eos)
+                      "@" (? "/") eos)
                   directory)
     (list :level 'repo
           :owner (match-string 1 directory)
@@ -1176,13 +1176,20 @@ endpoint which includes private repositories."
       (condition-case nil
           (let* ((self (remoto--get-authenticated-user))
                  (selfp (and self (string-equal-ignore-case key self)))
+                 (auth-uncertain (and (not self) (not remoto--auth-failed)))
                  (endpoint (if selfp
                                "user/repos?per_page=100&sort=updated&type=owner"
                              (format "users/%s/repos?per_page=100&sort=updated"
                                      (url-hexify-string owner))))
                  (data (remoto--api endpoint))
                  (repos (mapcar (lambda (item) (alist-get 'name item)) data)))
-            (puthash key (cons now repos) remoto--user-repos-cache)
+            ;; Don't cache when auth state is uncertain (e.g. GPG
+            ;; timeout on first call).  We may have fallen back to
+            ;; the public endpoint for what is actually the
+            ;; authenticated user - caching would poison results
+            ;; until TTL expires.
+            (unless auth-uncertain
+              (puthash key (cons now repos) remoto--user-repos-cache))
             repos)
         (user-error nil)))))
 
@@ -1384,6 +1391,18 @@ Call ORIG-FN with FILENAME and ARGS after any rewrite."
   (advice-add 'dired :around #'remoto--dired-around-a))
 (unless (advice-member-p #'remoto--find-file-around-a 'find-file-noselect)
   (advice-add 'find-file-noselect :around #'remoto--find-file-around-a))
+
+;;;; Eager auth warm-up
+
+(defun remoto--warm-auth ()
+  "Pre-fetch the authenticated GitHub user in the background.
+Runs on an idle timer so GPG decryption happens before the user
+types anything, avoiding timeout-induced fallback to public-only
+repo listings."
+  (unless (or remoto--authenticated-user remoto--auth-failed)
+    (remoto--get-authenticated-user)))
+
+(run-with-idle-timer 2 nil #'remoto--warm-auth)
 
 ;;;; Handler registration
 

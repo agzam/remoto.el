@@ -720,7 +720,7 @@
 ;;; Auth fallback
 
 (describe "remoto--api auth fallback"
-  (it "falls back to unauthenticated when auth times out"
+  (it "falls back to unauthenticated when auth times out but does not cache failure"
     (let ((remoto--auth-failed nil)
           (remoto-github-auth nil)
           (remoto-auth-timeout 0.3))
@@ -730,7 +730,7 @@
                     '((name . "test-repo"))
                   (sleep-for 5))))
       (expect (remoto--api "repos/owner/repo") :to-equal '((name . "test-repo")))
-      (expect remoto--auth-failed :to-be-truthy)))
+      (expect remoto--auth-failed :to-be nil)))
 
   (it "falls back to unauthenticated on auth error"
     (let ((remoto--auth-failed nil)
@@ -811,7 +811,13 @@
   (it "returns nil for full canonical paths"
     (expect (remoto--parse-partial-github-path "/github:a/b@main:/src") :to-be nil))
 
-  (it "returns nil for /github:owner/repo"
+  (it "parses /github:owner/repo@ as repo level"
+    (let ((result (remoto--parse-partial-github-path "/github:torvalds/linux@")))
+      (expect (plist-get result :level) :to-equal 'repo)
+      (expect (plist-get result :owner) :to-equal "torvalds")
+      (expect (plist-get result :repo) :to-equal "linux")))
+
+  (it "returns nil for /github:owner/repo (no @)"
     (expect (remoto--parse-partial-github-path "/github:a/b") :to-be nil)))
 
 (describe "remoto--parse-partial-canonical"
@@ -1064,6 +1070,155 @@
             (expect remoto--auth-failed :to-be nil))
         (setq remoto--auth-failed old-auth
               remoto--authenticated-user old-user)))))
+
+;;; Auth timeout resilience
+
+(describe "auth timeout does not poison session"
+  (it "retries auth on the next API call after a timeout"
+    (let ((remoto--auth-failed nil)
+          (remoto-github-auth nil)
+          (remoto-auth-timeout 0.3)
+          (call-count 0))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (setq call-count (1+ call-count))
+                (if (eq (plist-get args :auth) 'none)
+                    '((name . "test-repo"))
+                  ;; First auth attempt times out, second succeeds
+                  (if (< call-count 3)
+                      (sleep-for 5)
+                    '((name . "test-repo"))))))
+      ;; First call: auth times out, falls back to unauthenticated
+      (remoto--api "repos/owner/repo")
+      ;; Second call: should retry auth (not skip it)
+      (let ((remoto-auth-timeout 5))
+        (remoto--api "repos/owner/repo"))
+      ;; ghub-get was called with non-none auth on the second attempt
+      (expect remoto--auth-failed :to-be nil)))
+
+  (it "does not cache repo results when auth state is uncertain"
+    (let ((remoto--user-repos-cache (make-hash-table :test 'equal))
+          (remoto--authenticated-user nil)
+          (remoto--auth-failed nil))
+      ;; Simulate: get-authenticated-user returns nil (timeout),
+      ;; but auth hasn't permanently failed
+      (spy-on 'remoto--get-authenticated-user :and-return-value nil)
+      (spy-on 'remoto--api :and-return-value
+              '(((name . "public-repo") (full_name . "agzam/public-repo"))))
+      (let ((repos (remoto--fetch-user-repos "agzam")))
+        ;; Returns results for this call
+        (expect repos :to-equal '("public-repo"))
+        ;; But does NOT cache them (auth was uncertain)
+        (expect (gethash "agzam" remoto--user-repos-cache) :to-be nil))))
+
+  (it "caches repo results when auth succeeds"
+    (let ((remoto--user-repos-cache (make-hash-table :test 'equal))
+          (remoto--authenticated-user "agzam")
+          (remoto--auth-failed nil))
+      (spy-on 'remoto--api :and-return-value
+              '(((name . "private-repo") (full_name . "agzam/private-repo"))))
+      (remoto--fetch-user-repos "agzam")
+      (expect (gethash "agzam" remoto--user-repos-cache) :to-be-truthy)))
+
+  (it "caches repo results when auth permanently failed"
+    (let ((remoto--user-repos-cache (make-hash-table :test 'equal))
+          (remoto--authenticated-user nil)
+          (remoto--auth-failed t))
+      (spy-on 'remoto--api :and-return-value
+              '(((name . "public-repo") (full_name . "agzam/public-repo"))))
+      (remoto--fetch-user-repos "agzam")
+      ;; Auth permanently failed - we know this is the public endpoint,
+      ;; safe to cache
+      (expect (gethash "agzam" remoto--user-repos-cache) :to-be-truthy)))
+
+  (it "second completion call gets private repos after GPG agent warms up"
+    (let ((remoto--user-repos-cache (make-hash-table :test 'equal))
+          (remoto--authenticated-user nil)
+          (remoto--auth-failed nil)
+          (auth-call-count 0))
+      ;; First call: get-authenticated-user fails (GPG timeout)
+      ;; Second call: succeeds (GPG agent has passphrase)
+      (spy-on 'remoto--get-authenticated-user :and-call-fake
+              (lambda ()
+                (setq auth-call-count (1+ auth-call-count))
+                (if (< auth-call-count 2)
+                    nil
+                  (setq remoto--authenticated-user "agzam")
+                  "agzam")))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (endpoint)
+                (if (string-prefix-p "user/repos" endpoint)
+                    '(((name . "private-repo")) ((name . "public-repo")))
+                  '(((name . "public-repo"))))))
+      ;; First call: no auth, public endpoint, NOT cached
+      (let ((repos1 (remoto--fetch-user-repos "agzam")))
+        (expect repos1 :to-equal '("public-repo"))
+        (expect (gethash "agzam" remoto--user-repos-cache) :to-be nil))
+      ;; Second call: auth works, private endpoint, cached
+      (let ((repos2 (remoto--fetch-user-repos "agzam")))
+        (expect repos2 :to-equal '("private-repo" "public-repo"))
+        (expect (gethash "agzam" remoto--user-repos-cache) :to-be-truthy)))))
+
+;;; Partial path file operations - repo@ level
+
+(describe "repo@ level partial path operations"
+  (it "file-exists-p returns t for /github:owner/repo@"
+    (expect (remoto--handle-file-exists-p "/github:foobar/zapzop@") :to-be t))
+
+  (it "file-directory-p returns t for /github:owner/repo@"
+    (expect (remoto--handle-file-directory-p "/github:foobar/zapzop@") :to-be t))
+
+  (it "file-name-directory returns /github:owner/repo@ for /github:owner/repo@"
+    (expect (remoto--handle-file-name-directory "/github:foobar/zapzop@")
+            :to-equal "/github:foobar/zapzop@"))
+
+  (it "file-name-nondirectory returns empty for /github:owner/repo@"
+    (expect (remoto--handle-file-name-nondirectory "/github:foobar/zapzop@")
+            :to-equal "")))
+
+;;; End-to-end completion flow
+
+(describe "end-to-end completion flow"
+  (it "completes owner -> repo -> branch -> file sequentially"
+    (remoto-test-with-cache
+      ;; Step 1: /github: + "tor" -> user completions
+      (spy-on 'remoto--search-users :and-return-value '("torvalds"))
+      (let ((users (remoto--handle-file-name-all-completions "tor" "/github:")))
+        (expect users :to-equal '("torvalds/")))
+
+      ;; Step 2: /github:torvalds/ + "" -> repo completions
+      (spy-on 'remoto--fetch-user-repos :and-return-value '("linux" "subsurface"))
+      (let ((repos (remoto--handle-file-name-all-completions "" "/github:torvalds/")))
+        (expect repos :to-equal '("linux" "subsurface")))
+
+      ;; Step 3: verify path splitting for orderless at repo@ boundary
+      (expect (remoto--handle-file-name-directory "/github:torvalds/linux@")
+              :to-equal "/github:torvalds/linux@")
+      (expect (remoto--handle-file-name-nondirectory "/github:torvalds/linux@")
+              :to-equal "")
+
+      ;; Step 4: /github:torvalds/linux@ + "" -> branch completions
+      (spy-on 'remoto--fetch-branches :and-return-value '("master" "stable"))
+      (let ((branches (remoto--handle-file-name-all-completions
+                       "" "/github:torvalds/linux@")))
+        (expect branches :to-equal '("master:" "stable:")))
+
+      ;; Step 5: /github:torvalds/linux@master:/ + "s" -> file completions
+      (let ((files (remoto--handle-file-name-all-completions
+                    "s" "/github:testowner/testrepo@main:/")))
+        (expect (member "src/" files) :to-be-truthy))))
+
+  (it "orderless-style: fetches all candidates then filters client-side"
+    ;; This simulates what orderless does: file-name-all-completions "" dir
+    ;; then filters the full list client-side
+    (spy-on 'remoto--fetch-user-repos :and-return-value
+            '("linux" "subsurface" "libdc-for-dirk"))
+    ;; orderless calls with empty file, gets everything
+    (let ((all (remoto--handle-file-name-all-completions "" "/github:torvalds/")))
+      (expect (length all) :to-equal 3)
+      ;; Then filters client-side
+      (let ((filtered (seq-filter (lambda (r) (string-prefix-p "lin" r)) all)))
+        (expect filtered :to-equal '("linux"))))))
 
 ;;; Pre-repo completions
 
