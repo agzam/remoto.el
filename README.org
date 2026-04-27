@@ -94,7 +94,7 @@ The virtual filesystem uses paths of the form:
 2. Directory listings, ~file-exists-p~, completions - all served from the cached tree in memory.
 3. File contents are fetched on demand when you actually open a file.
 4. Content is cached by SHA, so re-opening the same file is instant.
-5. Authentication, SSO, private repos - all handled transparently by ~gh~.
+5. Authentication, SSO, private repos - all handled transparently by ~ghub~.
 
 ** FAQ
 *** Why this isn't a [[https://www.gnu.org/software/emacs/manual/html_node/tramp/][TRAMP]] backend?
@@ -125,6 +125,7 @@ We can only imagine a world where git's transport layer gives you a browsable fi
 - Timestamps in dired are synthetic (the tree API has no timestamps).
 - Very large repos (100k+ files) use slower per-directory fetching.
 - Rate limit: 5,000 requests/hour (normal browsing stays well within this).
+- Repo completion at ~/github:owner/~ shows at most 100 repos (sorted by recently updated). Use ~remoto-browse~ to search beyond that.
 
 * Changelog
 

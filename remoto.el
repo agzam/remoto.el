@@ -5,7 +5,7 @@
 ;; Author: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: April 24, 2026
-;; Version: 0.1.0
+;; Version: 1.2.0
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
 ;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
@@ -29,6 +29,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'files-x)
 (require 'ghub)
 
 ;;;; Path parsing
@@ -109,9 +110,15 @@ access and caches the failure for the rest of the session.  Use
   :group 'remoto)
 
 (defvar remoto--auth-failed nil
-  "Non-nil when authenticated GitHub access has failed or timed out.
+  "Non-nil when authenticated GitHub access has permanently failed.
+Set on actual auth errors (missing token, 401), NOT on timeouts.
 Causes `remoto--api' to skip token lookup and use unauthenticated
 requests.  Reset with `remoto-reset-auth'.")
+
+(defvar remoto--authenticated-user nil
+  "Cached GitHub login of the authenticated user, or nil if unknown.
+Set by `remoto--get-authenticated-user' on first successful lookup.
+Cleared by `remoto-reset-auth'.")
 
 (defun remoto--json-reader (_status)
   "Parse JSON response with list-type arrays for remoto compatibility.
@@ -161,8 +168,7 @@ failures."
           (let ((result (with-timeout (remoto-auth-timeout 'remoto--timed-out)
                           (remoto--ghub-get resource auth endpoint))))
             (when (eq result 'remoto--timed-out)
-              (setq remoto--auth-failed t)
-              (message "Remoto: auth lookup timed out; using unauthenticated access (see `remoto-reset-auth')")
+              (message "Remoto: auth lookup timed out; retrying next call (see `remoto-auth-timeout')")
               (setq result (remoto--ghub-get resource 'none endpoint)))
             result)
         (error
@@ -176,6 +182,7 @@ failures."
 Use after adding a GitHub token to auth-source."
   (interactive)
   (setq remoto--auth-failed nil)
+  (setq remoto--authenticated-user nil)
   (message "Remoto: auth cache cleared; will retry token lookup on next request"))
 
 (defun remoto--default-branch (owner repo)
@@ -506,11 +513,21 @@ Pass FULL, MATCH, NOSORT, and ID-FORMAT through unchanged."
 
 (defun remoto--parse-partial-github-path (directory)
   "Parse a partial /github: DIRECTORY for pre-repo completion.
-Returns a plist (:level :owner) or nil if not a partial path.
-:level is `root' for /github: and `owner' for /github:OWNER/."
+Returns a plist with :level plus context keys, or nil.
+:level is `root' for /github:, `owner' for /github:OWNER/,
+or `repo' for /github:OWNER/REPO@."
   (cond
    ((string-match (rx bos "/github:" eos) directory)
     (list :level 'root :owner nil))
+   ((string-match (rx bos "/github:"
+                      (group (+ (not (any "/:@"))))
+                      "/"
+                      (group (+ (not (any "/:@"))))
+                      "@" (? "/") eos)
+                  directory)
+    (list :level 'repo
+          :owner (match-string 1 directory)
+          :repo (match-string 2 directory)))
    ((string-match (rx bos "/github:"
                       (group (+ (not (any "/:@"))))
                       "/" eos)
@@ -530,21 +547,24 @@ Handles three levels: user search at /github:, repo listing at
              (seq-filter (lambda (u) (string-prefix-p file u)))
              (mapcar (lambda (u) (concat u "/"))))))
         ('owner
+         ;; Repo completion at /github:OWNER/
          (let ((owner (plist-get partial :owner)))
-           (if-let* ((at-pos (string-search "@" file)))
-               ;; Branch completion: FILE is "repo@branchprefix"
-               (let* ((repo (substring file 0 at-pos))
-                      (branch-prefix (substring file (1+ at-pos)))
-                      (branches (remoto--fetch-branches owner repo)))
-                 (thread-last branches
-                   (seq-filter (lambda (b)
-                                 (or (string-empty-p branch-prefix)
-                                     (string-prefix-p branch-prefix b))))
-                   (mapcar (lambda (b) (format "%s@%s:" repo b)))))
-             ;; Repo completion
-             (when-let* ((repos (remoto--fetch-user-repos owner)))
-               (seq-filter (lambda (r) (string-prefix-p file r))
-                           repos))))))
+           (when-let* ((repos (remoto--fetch-user-repos owner)))
+             (seq-filter (lambda (r) (string-prefix-p file r))
+                         repos))))
+        ('repo
+         ;; Branch completion at /github:OWNER/REPO@
+         (if (string-suffix-p ":" file)
+             ;; Branch already selected (e.g. "main:") - exact match
+             (list file)
+           (let* ((owner (plist-get partial :owner))
+                  (repo (plist-get partial :repo))
+                  (branches (remoto--fetch-branches owner repo)))
+             (thread-last branches
+               (seq-filter (lambda (b)
+                             (or (string-empty-p file)
+                                 (string-prefix-p file b))))
+               (mapcar (lambda (b) (concat b ":"))))))))
     ;; Full canonical path - existing behavior
     (when-let* ((parsed (remoto--parse-path directory)))
       (thread-last (remoto--tree-children parsed)
@@ -629,7 +649,17 @@ Handles partial paths for pre-repo completion."
                 ;; but file-name-directory on /github:fo would return /
                 ;; so handle manually
                 ""))))
-   ;; /github:owner/repo or /github:owner/repo@branch
+   ;; /github:owner/repo@branch - treat repo@ as directory
+   ((and (string-prefix-p "/github:" filename)
+         (not (remoto--parse-path filename))
+         (string-match (rx bos "/github:"
+                           (+ (not (any "/:@")))
+                           "/"
+                           (+ (not (any "/:@")))
+                           "@")
+                       filename))
+    (match-string 0 filename))
+   ;; /github:owner/repo (no @)
    ((and (string-prefix-p "/github:" filename)
          (not (remoto--parse-path filename))
          (string-match (rx bos "/github:"
@@ -662,7 +692,17 @@ Handles partial paths for pre-repo completion."
    ((string-match (rx bos "/github:" (group (+ (not (any "/:@")))) eos)
                   filename)
     (match-string 1 filename))
-   ;; /github:owner/repo or /github:owner/repo@branch -> "repo" or "repo@branch"
+   ;; /github:owner/repo@ -> ""
+   ((and (string-prefix-p "/github:" filename)
+         (string-suffix-p "@" filename)
+         (not (remoto--parse-path filename)))
+    "")
+   ;; /github:owner/repo@branch -> "branch"
+   ((and (string-prefix-p "/github:" filename)
+         (not (remoto--parse-path filename))
+         (string-match (rx "@" (group (+ (not (any "/:@")))) eos) filename))
+    (match-string 1 filename))
+   ;; /github:owner/repo -> "repo"
    ((and (string-prefix-p "/github:" filename)
          (not (remoto--parse-path filename))
          (string-match (rx bos "/github:" (+ (not (any "/:@"))) "/"
@@ -1110,9 +1150,23 @@ Uses client-side narrowing when a parent query is cached."
                     results)
                 (user-error nil)))))))))
 
+(defun remoto--get-authenticated-user ()
+  "Return the GitHub login of the authenticated user, or nil.
+Caches the result for the session.  Returns nil when auth has
+failed or the API call errors."
+  (or remoto--authenticated-user
+      (unless remoto--auth-failed
+        (condition-case nil
+            (when-let* ((data (remoto--api "user"))
+                        (login (alist-get 'login data)))
+              (setq remoto--authenticated-user login))
+          (user-error nil)))))
+
 (defun remoto--fetch-user-repos (owner)
   "Fetch repo names for OWNER, cached with TTL.
-Returns a list of repo name strings (not full_name)."
+Returns a list of repo name strings (not full_name).
+When OWNER matches the authenticated user, uses the /user/repos
+endpoint which includes private repositories."
   (let* ((key (downcase owner))
          (entry (gethash key remoto--user-repos-cache))
          (now (float-time)))
@@ -1121,11 +1175,22 @@ Returns a list of repo name strings (not full_name)."
                  (< (- now (car entry)) remoto-search-cache-ttl)))
         (cdr entry)
       (condition-case nil
-          (let* ((endpoint (format "users/%s/repos?per_page=100&sort=updated"
-                                   (url-hexify-string owner)))
+          (let* ((self (remoto--get-authenticated-user))
+                 (selfp (and self (string-equal-ignore-case key self)))
+                 (auth-uncertain (and (not self) (not remoto--auth-failed)))
+                 (endpoint (if selfp
+                               "user/repos?per_page=100&sort=updated&type=owner"
+                             (format "users/%s/repos?per_page=100&sort=updated"
+                                     (url-hexify-string owner))))
                  (data (remoto--api endpoint))
                  (repos (mapcar (lambda (item) (alist-get 'name item)) data)))
-            (puthash key (cons now repos) remoto--user-repos-cache)
+            ;; Don't cache when auth state is uncertain (e.g. GPG
+            ;; timeout on first call).  We may have fallen back to
+            ;; the public endpoint for what is actually the
+            ;; authenticated user - caching would poison results
+            ;; until TTL expires.
+            (unless auth-uncertain
+              (puthash key (cons now repos) remoto--user-repos-cache))
             repos)
         (user-error nil)))))
 
@@ -1327,6 +1392,18 @@ Call ORIG-FN with FILENAME and ARGS after any rewrite."
   (advice-add 'dired :around #'remoto--dired-around-a))
 (unless (advice-member-p #'remoto--find-file-around-a 'find-file-noselect)
   (advice-add 'find-file-noselect :around #'remoto--find-file-around-a))
+
+;;;; Eager auth warm-up
+
+(defun remoto--warm-auth ()
+  "Pre-fetch the authenticated GitHub user in the background.
+Runs on an idle timer so GPG decryption happens before the user
+types anything, avoiding timeout-induced fallback to public-only
+repo listings."
+  (unless (or remoto--authenticated-user remoto--auth-failed)
+    (remoto--get-authenticated-user)))
+
+(run-with-idle-timer 2 nil #'remoto--warm-auth)
 
 ;;;; Handler registration
 
