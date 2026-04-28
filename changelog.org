@@ -3,6 +3,23 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [1.3.0] - 2026-04-28
+
+** Changed
+- Repo completion now uses the GitHub search API instead of pre-fetching all repos. At ~/github:owner/~ with empty input, the 30 most recently updated repos are shown. As the user types, matching repos are fetched via ~search/repositories~. This replaces the old approach that fetched every repo for an owner (thousands for large orgs), which caused hangs.
+- Auth timeout in ~remoto--api~ now only applies on the first call before the authenticated user is known. Once auth succeeds, the timeout is skipped so slow API responses (e.g. search) are not aborted.
+- HTTP errors (404, 403) from the GitHub API no longer poison ~remoto--auth-failed~. Only actual auth-source/token errors trigger the unauthenticated fallback.
+
+** Added
+- ~remoto--search-owner-repos~ for searching repos within an owner via the search API, with caching and client-side narrowing for longer queries.
+- ~remoto--recent-owner-repos~ for fetching the 30 most recently pushed repos of an owner.
+- ~file-accessible-directory-p~ handler for remoto paths.
+- ~read-file-name-internal~ advice so ~/github:~ completion works correctly with Vertico/orderless when ~default-directory~ prefixes are present.
+- ~file-exists-p~ now returns t for ~/github:owner/repo~ partial paths (no ~@~), fixing completion transitions.
+
+** Removed
+- ~remoto--fetch-user-repos~ and ~remoto--user-repos-cache~. The "fetch all repos then filter client-side" approach is replaced by search API calls.
+
 * [1.2.0] - 2026-04-27
 
 ** Added
