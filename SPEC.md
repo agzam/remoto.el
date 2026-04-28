@@ -183,7 +183,8 @@ This returns one directory level at a time. The tree cache stores what it has an
 | `file-name-completion` | Delegate to `try-completion` on completions list |
 | `insert-file-contents` | Fetch file content via API, insert into buffer |
 | `insert-directory` | Format dired-compatible listing from tree cache |
-| `expand-file-name` | Normalize path components, handle relative paths under remoto dirs |
+| `expand-file-name` | Normalize path components, handle relative paths under remoto dirs; for partial paths (e.g. `/github:owner/`) concatenates directly |
+| `file-accessible-directory-p` | Delegates to `file-directory-p` - remote dirs are always readable |
 | `file-truename` | Return the path as-is (no symlink resolution) |
 | `file-remote-p` | Return the `/github:owner/repo@ref:` prefix (or method/host on request); handles partial paths |
 | `file-local-copy` | Download to temp file, return temp path |
@@ -268,8 +269,8 @@ Completion levels:
 | Input | Directory part | File part | Action |
 |---|---|---|---|
 | `/github:tor` | `/github:` | `tor` | Search users/orgs matching "tor" via `search/users` API |
-| `/github:torvalds/` | `/github:torvalds/` | (empty) | List repos via `users/torvalds/repos` API |
-| `/github:torvalds/lin` | `/github:torvalds/` | `lin` | Filter repos starting with "lin" |
+| `/github:torvalds/` | `/github:torvalds/` | (empty) | Show 30 most recently updated repos via `search/repositories?q=user:torvalds&sort=updated` |
+| `/github:torvalds/lin` | `/github:torvalds/` | `lin` | Search repos matching "lin" via `search/repositories?q=lin+in:name+user:torvalds` |
 | `/github:torvalds/linux@` | `/github:torvalds/` | `linux@` | List branches via `repos/torvalds/linux/branches` API |
 | `/github:torvalds/linux@master:` | `/github:torvalds/linux@master:` | (empty) | File-level completion (existing tree-based) |
 
@@ -278,12 +279,13 @@ Hitting RET on `/github:owner/repo` (without `@ref:`) resolves the default branc
 New API functions:
 
 - `remoto--search-users` - calls `search/users?q=PREFIX&per_page=30`. Caches results in `remoto--users-cache` (TTL-based, same as `remoto-search-cache-ttl`). Supports client-side narrowing: typing "torv" filters cached "tor" results without a new API call. Requires min 2 characters.
-- `remoto--fetch-user-repos` - calls `users/OWNER/repos?per_page=100&sort=updated`. Caches results in `remoto--user-repos-cache` (TTL-based).
+- `remoto--recent-owner-repos` - calls `search/repositories?q=user:OWNER&sort=updated&per_page=30`. Returns the 30 most recently pushed repos for an owner. Used when the input is empty at `/github:OWNER/`.
+- `remoto--search-owner-repos` - calls `search/repositories?q=QUERY+in:name+user:OWNER&per_page=100`. Searches repos by name within an owner. Supports client-side narrowing from cached shorter queries. Requires min 2 characters.
 
 New caches:
 
 - `remoto--users-cache` - hash table: query string -> `(TIMESTAMP . USER-NAMES)`.
-- `remoto--user-repos-cache` - hash table: owner string -> `(TIMESTAMP . REPO-NAMES)`.
+- `remoto--search-cache` - unified cache: key string -> `(TIMESTAMP . RESULTS)`. Used for user search (`\0users:PREFIX`), recent repos (`\0repos-recent:OWNER`), and repo search (`\0repos:OWNER/QUERY`).
 
 Partial path handling:
 
@@ -291,7 +293,7 @@ The file-name handler now recognizes partial paths (`/github:`, `/github:OWNER/`
 
 ## Unloading
 
-`remoto-unload-function` removes the `file-name-handler-alist` entry and all advice, and clears `remoto--users-cache` and `remoto--user-repos-cache`, ensuring clean `unload-feature` support.
+`remoto-unload-function` removes the `file-name-handler-alist` entry and all advice, and clears `remoto--users-cache`, ensuring clean `unload-feature` support.
 
 ## Limitations
 

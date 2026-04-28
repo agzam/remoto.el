@@ -165,12 +165,29 @@ failures."
     (if (eq auth 'none)
         (remoto--ghub-get resource 'none endpoint)
       (condition-case err
-          (let ((result (with-timeout (remoto-auth-timeout 'remoto--timed-out)
-                          (remoto--ghub-get resource auth endpoint))))
-            (when (eq result 'remoto--timed-out)
-              (message "Remoto: auth lookup timed out; retrying next call (see `remoto-auth-timeout')")
-              (setq result (remoto--ghub-get resource 'none endpoint)))
-            result)
+          ;; Only apply the auth timeout on the first call (before we
+          ;; know whether auth works).  Once the authenticated user is
+          ;; cached, auth-source won't block, so skip the timeout to
+          ;; avoid aborting slow HTTP responses.
+          (if remoto--authenticated-user
+              (remoto--ghub-get resource auth endpoint)
+            (let ((result (with-timeout (remoto-auth-timeout 'remoto--timed-out)
+                            (remoto--ghub-get resource auth endpoint))))
+              (when (eq result 'remoto--timed-out)
+                (message "Remoto: auth lookup timed out; retrying next call (see `remoto-auth-timeout')")
+                (setq result (remoto--ghub-get resource 'none endpoint)))
+              result))
+        ;; Re-raise API errors (404, 403, etc.) from remoto--ghub-get;
+        ;; these are not auth failures.  Other user-errors (e.g. ghub's
+        ;; "Cannot determine username") are auth config issues - fall
+        ;; through to unauthenticated access.
+        (user-error
+         (if (string-prefix-p "Remoto:" (cadr err))
+             (signal (car err) (cdr err))
+           (setq remoto--auth-failed t)
+           (message "Remoto: auth unavailable (%s); using unauthenticated access"
+                    (error-message-string err))
+           (remoto--ghub-get resource 'none endpoint)))
         (error
          (setq remoto--auth-failed t)
          (message "Remoto: auth unavailable (%s); using unauthenticated access"
@@ -209,9 +226,6 @@ Use after adding a GitHub token to auth-source."
   "Cache: query string -> (TIMESTAMP . USER-NAMES).
 Entries expire after `remoto-search-cache-ttl' seconds.")
 
-(defvar remoto--user-repos-cache (make-hash-table :test 'equal)
-  "Cache: owner string -> (TIMESTAMP . REPO-NAMES).
-Entries expire after `remoto-search-cache-ttl' seconds.")
 
 (defun remoto--resolve-ref (parsed)
   "Ensure PARSED `remoto-path' has a concrete ref, resolving if needed.
@@ -404,11 +418,20 @@ Pass remaining ARGS to the resolved handler."
 
 (defun remoto--handle-file-exists-p (filename)
   "Return t if FILENAME exists in the remote repo.
-Also returns t for partial paths used during completion."
+Also returns t for partial paths used during completion,
+including owner/repo paths that haven't added @ yet."
   (cond
    ((string-match (rx bos "/github:" (? "/") eos) filename) t)
    ((remoto--parse-partial-github-path
      (remoto--handle-file-name-as-directory filename))
+    t)
+   ;; /github:owner/repo (no @) - valid during completion
+   ((string-match (rx bos "/github:"
+                      (+ (not (any "/:@")))
+                      "/"
+                      (+ (not (any "/:@")))
+                      (? "/") eos)
+                  filename)
     t)
    (t
     (when-let* ((parsed (remoto--parse-path filename)))
@@ -428,6 +451,11 @@ Also returns t for partial paths like /github: and /github:OWNER/."
     (when-let* ((parsed (remoto--parse-path filename))
                 (entry (remoto--tree-entry parsed)))
       (equal "tree" (alist-get 'type entry))))))
+
+(defun remoto--handle-file-accessible-directory-p (filename)
+  "Return t if FILENAME is an accessible directory.
+Delegates to `file-directory-p' - remote dirs are always readable."
+  (remoto--handle-file-directory-p filename))
 
 (defun remoto--handle-file-regular-p (filename)
   "Return t if FILENAME is a regular file in the remote repo."
@@ -537,21 +565,30 @@ or `repo' for /github:OWNER/REPO@."
 (defun remoto--handle-file-name-all-completions (file directory)
   "Return completions for FILE in remote DIRECTORY.
 Handles three levels: user search at /github:, repo listing at
-/github:OWNER/, and file listing within a repo."
+/github:OWNER/, and file listing within a repo.  Network calls
+are wrapped in `while-no-input' so typing interrupts pending API
+requests instead of blocking Emacs."
   (if-let* ((partial (remoto--parse-partial-github-path directory)))
       (pcase (plist-get partial :level)
         ('root
          ;; Search users/orgs matching FILE
-         (when-let* ((users (remoto--search-users file)))
-           (thread-last users
-             (seq-filter (lambda (u) (string-prefix-p file u)))
-             (mapcar (lambda (u) (concat u "/"))))))
+         (let ((result (while-no-input (remoto--search-users file))))
+           (when (listp result)
+             (let ((filtered (thread-last result
+                               (seq-filter (lambda (u) (string-prefix-p file u))))))
+               ;; Pre-fetch repos for the top match so the cache is
+               ;; warm by the time the user types "/"
+               (when-let* ((top (car filtered)))
+                 (remoto--prefetch-owner-repos top))
+               (mapcar (lambda (u) (concat u "/")) filtered)))))
         ('owner
          ;; Repo completion at /github:OWNER/
-         (let ((owner (plist-get partial :owner)))
-           (when-let* ((repos (remoto--fetch-user-repos owner)))
-             (seq-filter (lambda (r) (string-prefix-p file r))
-                         repos))))
+         (let* ((owner (plist-get partial :owner))
+                (result (while-no-input
+                          (if (string-empty-p file)
+                              (remoto--recent-owner-repos owner)
+                            (remoto--search-owner-repos owner file)))))
+           (when (listp result) result)))
         ('repo
          ;; Branch completion at /github:OWNER/REPO@
          (if (string-suffix-p ":" file)
@@ -559,12 +596,14 @@ Handles three levels: user search at /github:, repo listing at
              (list file)
            (let* ((owner (plist-get partial :owner))
                   (repo (plist-get partial :repo))
-                  (branches (remoto--fetch-branches owner repo)))
-             (thread-last branches
-               (seq-filter (lambda (b)
-                             (or (string-empty-p file)
-                                 (string-prefix-p file b))))
-               (mapcar (lambda (b) (concat b ":"))))))))
+                  (result (while-no-input
+                            (remoto--fetch-branches owner repo))))
+             (when (listp result)
+               (thread-last result
+                 (seq-filter (lambda (b)
+                               (or (string-empty-p file)
+                                   (string-prefix-p file b))))
+                 (mapcar (lambda (b) (concat b ":")))))))))
     ;; Full canonical path - existing behavior
     (when-let* ((parsed (remoto--parse-path directory)))
       (thread-last (remoto--tree-children parsed)
@@ -577,14 +616,19 @@ Handles three levels: user search at /github:, repo listing at
 
 (defun remoto--handle-file-name-completion (file directory &optional predicate)
   "Complete FILE in remote DIRECTORY using optional PREDICATE.
-Handles partial /github: paths for pre-repo completion."
-  (let ((completions (remoto--handle-file-name-all-completions file directory)))
+Handles partial /github: paths for pre-repo completion.
+PREDICATE may be a function, nil, or a string directory-prefix
+passed through by `completion-file-name-table' - strings are
+ignored since remoto paths always qualify."
+  (let ((completions (remoto--handle-file-name-all-completions file directory))
+        ;; completion-file-name-table passes the read-file-name
+        ;; directory as a string predicate - not a callable filter
+        (pred (if (stringp predicate) nil predicate)))
     (cond
      ((null completions) nil)
      ((null (cdr completions))
-      ;; Single match - return t for exact match, the string otherwise
       (if (equal file (car completions)) t (car completions)))
-     (t (try-completion file completions predicate)))))
+     (t (try-completion file completions pred)))))
 
 (defun remoto--handle-expand-file-name (name &optional dir)
   "Expand NAME relative to DIR for remoto paths."
@@ -603,11 +647,13 @@ Handles partial /github: paths for pre-repo completion."
       (expand-file-name name))
      ;; Relative path under a remoto directory
      ((and dir (string-prefix-p "/github:" dir))
-      (let* ((prefix (remoto--file-name-prefix dir))
-             (parsed (remoto--parse-path dir))
-             (dir-path (remoto-path-path parsed))
-             (combined (concat dir-path "/" name)))
-        (concat prefix (remoto--normalize-path combined))))
+      (if-let* ((parsed (remoto--parse-path dir))
+                (prefix (remoto--file-name-prefix dir)))
+          (let* ((dir-path (remoto-path-path parsed))
+                 (combined (concat dir-path "/" name)))
+            (concat prefix (remoto--normalize-path combined)))
+        ;; Partial path (e.g. /github:owner/ or /github:owner/repo@)
+        (concat dir name)))
      ;; Not our path, delegate
      (t (expand-file-name name dir)))))
 
@@ -1150,6 +1196,76 @@ Uses client-side narrowing when a parent query is cached."
                     results)
                 (user-error nil)))))))))
 
+(defvar remoto--prefetch-timer nil
+  "Idle timer for speculative repo pre-fetching.")
+
+(defun remoto--prefetch-owner-repos (owner)
+  "Pre-fetch recent repos for OWNER on idle, warming the cache.
+Cancels any previously scheduled pre-fetch."
+  (when remoto--prefetch-timer
+    (cancel-timer remoto--prefetch-timer))
+  (setq remoto--prefetch-timer
+        (run-with-idle-timer
+         0.25 nil
+         (lambda ()
+           (setq remoto--prefetch-timer nil)
+           ;; Wrap in while-no-input so typing interrupts the
+           ;; synchronous HTTP call instead of blocking Emacs.
+           (while-no-input
+             (remoto--recent-owner-repos owner))))))
+
+(defun remoto--recent-owner-repos (owner)
+  "Fetch recently-updated repos for OWNER, cached with TTL.
+Returns up to 30 repo name strings, sorted by last push."
+  (let* ((cache-key (format "\0repos-recent:%s" (downcase owner))))
+    (pcase-let ((`(,hit ,results) (remoto--search-cache-get cache-key)))
+      (if hit results
+        (condition-case nil
+            (let* ((q (url-hexify-string (format "user:%s" owner)))
+                   (endpoint (format "search/repositories?q=%s&sort=updated&per_page=30" q))
+                   (items (alist-get 'items (remoto--api endpoint)))
+                   (repos (mapcar (lambda (item) (alist-get 'name item))
+                                  items)))
+              (remoto--search-cache-put cache-key repos))
+          (user-error nil))))))
+
+(defun remoto--search-owner-repos (owner query)
+  "Search OWNER's repos matching QUERY via GitHub search API.
+Returns repo names. Requires at least 2 characters in QUERY.
+Uses client-side narrowing when a parent query is cached."
+  (when (<= 2 (length query))
+    (let* ((owner-down (downcase owner))
+           (query-down (downcase query))
+           (cache-key (format "\0repos:%s/%s" owner-down query-down)))
+      (pcase-let ((`(,hit ,results) (remoto--search-cache-get cache-key)))
+        (if hit results
+          ;; Try narrowing from a shorter cached query for same owner
+          (let ((narrowed
+                 (cl-loop for len from (1- (length query-down)) downto 2
+                          for prefix = (substring query-down 0 len)
+                          for pk = (format "\0repos:%s/%s" owner-down prefix)
+                          for entry = (gethash pk remoto--search-cache)
+                          when (and entry
+                                    (or (zerop remoto-search-cache-ttl)
+                                        (< (- (float-time) (car entry))
+                                           remoto-search-cache-ttl)))
+                          return (seq-filter
+                                  (lambda (r)
+                                    (string-search query-down (downcase r)))
+                                  (cdr entry)))))
+            (if narrowed
+                (remoto--search-cache-put cache-key narrowed)
+              ;; Fetch from API
+              (condition-case nil
+                  (let* ((q (url-hexify-string
+                            (format "%s in:name user:%s" query owner)))
+                         (endpoint (format "search/repositories?q=%s&per_page=100" q))
+                         (items (alist-get 'items (remoto--api endpoint)))
+                         (repos (mapcar (lambda (item) (alist-get 'name item))
+                                        items)))
+                    (remoto--search-cache-put cache-key repos))
+                (user-error nil)))))))))
+
 (defun remoto--get-authenticated-user ()
   "Return the GitHub login of the authenticated user, or nil.
 Caches the result for the session.  Returns nil when auth has
@@ -1161,38 +1277,6 @@ failed or the API call errors."
                         (login (alist-get 'login data)))
               (setq remoto--authenticated-user login))
           (user-error nil)))))
-
-(defun remoto--fetch-user-repos (owner)
-  "Fetch repo names for OWNER, cached with TTL.
-Returns a list of repo name strings (not full_name).
-When OWNER matches the authenticated user, uses the /user/repos
-endpoint which includes private repositories."
-  (let* ((key (downcase owner))
-         (entry (gethash key remoto--user-repos-cache))
-         (now (float-time)))
-    (if (and entry
-             (or (zerop remoto-search-cache-ttl)
-                 (< (- now (car entry)) remoto-search-cache-ttl)))
-        (cdr entry)
-      (condition-case nil
-          (let* ((self (remoto--get-authenticated-user))
-                 (selfp (and self (string-equal-ignore-case key self)))
-                 (auth-uncertain (and (not self) (not remoto--auth-failed)))
-                 (endpoint (if selfp
-                               "user/repos?per_page=100&sort=updated&type=owner"
-                             (format "users/%s/repos?per_page=100&sort=updated"
-                                     (url-hexify-string owner))))
-                 (data (remoto--api endpoint))
-                 (repos (mapcar (lambda (item) (alist-get 'name item)) data)))
-            ;; Don't cache when auth state is uncertain (e.g. GPG
-            ;; timeout on first call).  We may have fallen back to
-            ;; the public endpoint for what is actually the
-            ;; authenticated user - caching would poison results
-            ;; until TTL expires.
-            (unless auth-uncertain
-              (puthash key (cons now repos) remoto--user-repos-cache))
-            repos)
-        (user-error nil)))))
 
 (defun remoto--complete-branches (query at-pos)
   "Complete branch names for QUERY with @ at AT-POS.
@@ -1416,6 +1500,42 @@ repo listings."
   (push (cons remoto--handler-regexp #'remoto-file-name-handler)
         file-name-handler-alist))
 
+(defun remoto--read-file-name-internal-a (orig string pred action)
+  "Fix completion for /github: paths inside `read-file-name'.
+Re-attaches the raw prefix that `substitute-in-file-name' strips,
+so completion frameworks (Vertico, etc.) can match candidates
+against the actual minibuffer content."
+  (let ((effective (substitute-in-file-name string)))
+    (cond
+     ;; Non-github path - pass through.
+     ((not (string-prefix-p "/github:" effective))
+      (funcall orig string pred action))
+     ;; Non-standard action (metadata, boundaries, etc.) - pass
+     ;; through with the original string so internal quoting works.
+     ((not (memq action '(nil t lambda)))
+      (funcall orig string pred action))
+     ;; Standard completion action - fixup prefixes.
+     (t
+      (let* ((gh-pos (string-search "/github:" string))
+             (raw-prefix (if (and gh-pos (< 0 gh-pos))
+                             (substring string 0 gh-pos)
+                           ""))
+             (result (funcall orig effective pred action)))
+        (pcase action
+          ('t
+           (let ((full-prefix (concat raw-prefix
+                                      (or (file-name-directory effective) ""))))
+             (mapcar (lambda (c) (concat full-prefix c)) result)))
+          ('nil
+           (cond
+            ((eq result t) t)
+            ((stringp result) (concat raw-prefix result))
+            (t result)))
+          ('lambda result)))))))
+
+(advice-add 'read-file-name-internal :around
+            #'remoto--read-file-name-internal-a)
+
 ;;;; Unload
 
 (defun remoto-unload-function ()
@@ -1424,8 +1544,8 @@ repo listings."
         (assoc-delete-all remoto--handler-regexp file-name-handler-alist))
   (advice-remove 'dired #'remoto--dired-around-a)
   (advice-remove 'find-file-noselect #'remoto--find-file-around-a)
+  (advice-remove 'read-file-name-internal #'remoto--read-file-name-internal-a)
   (clrhash remoto--users-cache)
-  (clrhash remoto--user-repos-cache)
   nil)
 
 (provide 'remoto)
