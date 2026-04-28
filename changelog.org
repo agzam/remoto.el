@@ -17,6 +17,9 @@ Changes to the project, following Keep a Changelog conventions.
 - ~read-file-name-internal~ advice so ~/github:~ completion works correctly with Vertico/orderless when ~default-directory~ prefixes are present.
 - ~file-exists-p~ now returns t for ~/github:owner/repo~ partial paths (no ~@~), fixing completion transitions.
 
+** Fixed
+- ~expand-file-name~ no longer crashes on partial ~/github:~ paths (e.g. ~/github:owner/~ or ~/github:owner/repo@~). This broke ~embark-collect~ and ~embark-export~ at the repo and branch completion levels.
+
 ** Removed
 - ~remoto--fetch-user-repos~ and ~remoto--user-repos-cache~. The "fetch all repos then filter client-side" approach is replaced by search API calls.
 

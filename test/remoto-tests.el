@@ -367,6 +367,14 @@
         (expect (expand-file-name "/tmp/foo")
                 :to-equal "/tmp/foo"))))
 
+  (it "expand-file-name handles partial /github:owner/ dir"
+    (expect (expand-file-name "somerepo" "/github:owner/")
+            :to-equal "/github:owner/somerepo"))
+
+  (it "expand-file-name handles partial /github:owner/repo@ dir"
+    (expect (expand-file-name "main:" "/github:owner/repo@")
+            :to-equal "/github:owner/repo@main:"))
+
   (it "insert-file-contents does not move point"
     (remoto-test-with-cache
       (spy-on 'remoto--fetch-file-content

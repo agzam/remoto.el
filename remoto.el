@@ -628,11 +628,13 @@ ignored since remoto paths always qualify."
       (expand-file-name name))
      ;; Relative path under a remoto directory
      ((and dir (string-prefix-p "/github:" dir))
-      (let* ((prefix (remoto--file-name-prefix dir))
-             (parsed (remoto--parse-path dir))
-             (dir-path (remoto-path-path parsed))
-             (combined (concat dir-path "/" name)))
-        (concat prefix (remoto--normalize-path combined))))
+      (if-let* ((parsed (remoto--parse-path dir))
+                (prefix (remoto--file-name-prefix dir)))
+          (let* ((dir-path (remoto-path-path parsed))
+                 (combined (concat dir-path "/" name)))
+            (concat prefix (remoto--normalize-path combined)))
+        ;; Partial path (e.g. /github:owner/ or /github:owner/repo@)
+        (concat dir name)))
      ;; Not our path, delegate
      (t (expand-file-name name dir)))))
 
