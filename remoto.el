@@ -177,9 +177,17 @@ failures."
                 (message "Remoto: auth lookup timed out; retrying next call (see `remoto-auth-timeout')")
                 (setq result (remoto--ghub-get resource 'none endpoint)))
               result))
-        ;; Re-raise API errors (404, 403, etc.) as-is; these are not
-        ;; auth failures and must not poison remoto--auth-failed.
-        (user-error (signal (car err) (cdr err)))
+        ;; Re-raise API errors (404, 403, etc.) from remoto--ghub-get;
+        ;; these are not auth failures.  Other user-errors (e.g. ghub's
+        ;; "Cannot determine username") are auth config issues - fall
+        ;; through to unauthenticated access.
+        (user-error
+         (if (string-prefix-p "Remoto:" (cadr err))
+             (signal (car err) (cdr err))
+           (setq remoto--auth-failed t)
+           (message "Remoto: auth unavailable (%s); using unauthenticated access"
+                    (error-message-string err))
+           (remoto--ghub-get resource 'none endpoint)))
         (error
          (setq remoto--auth-failed t)
          (message "Remoto: auth unavailable (%s); using unauthenticated access"

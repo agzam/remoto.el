@@ -19,6 +19,7 @@ Changes to the project, following Keep a Changelog conventions.
 
 ** Fixed
 - ~expand-file-name~ no longer crashes on partial ~/github:~ paths (e.g. ~/github:owner/~ or ~/github:owner/repo@~). This broke ~embark-collect~ and ~embark-export~ at the repo and branch completion levels.
+- ~remoto--api~ now falls back to unauthenticated access when ghub raises a ~user-error~ about missing username config (e.g. ~github.user~ unset). Previously this was re-raised as an API error, crashing instead of falling through to the unauthenticated path.
 
 ** Removed
 - ~remoto--fetch-user-repos~ and ~remoto--user-repos-cache~. The "fetch all repos then filter client-side" approach is replaced by search API calls.
