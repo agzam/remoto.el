@@ -5,7 +5,7 @@
 ;; Author: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: April 24, 2026
-;; Version: 1.2.0
+;; Version: 1.3.0
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
 ;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
@@ -766,7 +766,7 @@ Handles partial paths for pre-repo completion."
 ;;;; File content fetching
 
 (defun remoto--relative-path (path)
-  "Strip leading slash from PATH for API calls."
+  "Strip leading slash from PATH for API requests."
   (if (string-prefix-p "/" path) (substring path 1) path))
 
 (defvar remoto--content-cache (make-hash-table :test 'equal)
@@ -1504,7 +1504,8 @@ repo listings."
   "Fix completion for /github: paths inside `read-file-name'.
 Re-attaches the raw prefix that `substitute-in-file-name' strips,
 so completion frameworks (Vertico, etc.) can match candidates
-against the actual minibuffer content."
+against the actual minibuffer content.
+Args: ORIG, STRING, PRED, ACTION."
   (let ((effective (substitute-in-file-name string)))
     (cond
      ;; Non-github path - pass through.
