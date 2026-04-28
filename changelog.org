@@ -13,6 +13,8 @@ Changes to the project, following Keep a Changelog conventions.
 ** Added
 - ~remoto--search-owner-repos~ for searching repos within an owner via the search API, with caching and client-side narrowing for longer queries.
 - ~remoto--recent-owner-repos~ for fetching the 30 most recently pushed repos of an owner.
+- Non-blocking completion: all pre-repo completion levels (user search, repo listing, branch listing) are wrapped in ~while-no-input~ so typing interrupts pending API calls instead of freezing Emacs.
+- Speculative pre-fetch: when user search returns results, an idle timer pre-fetches repos for the top match so the cache is warm by the time the user types ~/~.
 - ~file-accessible-directory-p~ handler for remoto paths.
 - ~read-file-name-internal~ advice so ~/github:~ completion works correctly with Vertico/orderless when ~default-directory~ prefixes are present.
 - ~file-exists-p~ now returns t for ~/github:owner/repo~ partial paths (no ~@~), fixing completion transitions.

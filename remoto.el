@@ -565,21 +565,30 @@ or `repo' for /github:OWNER/REPO@."
 (defun remoto--handle-file-name-all-completions (file directory)
   "Return completions for FILE in remote DIRECTORY.
 Handles three levels: user search at /github:, repo listing at
-/github:OWNER/, and file listing within a repo."
+/github:OWNER/, and file listing within a repo.  Network calls
+are wrapped in `while-no-input' so typing interrupts pending API
+requests instead of blocking Emacs."
   (if-let* ((partial (remoto--parse-partial-github-path directory)))
       (pcase (plist-get partial :level)
         ('root
          ;; Search users/orgs matching FILE
-         (when-let* ((users (remoto--search-users file)))
-           (thread-last users
-             (seq-filter (lambda (u) (string-prefix-p file u)))
-             (mapcar (lambda (u) (concat u "/"))))))
+         (let ((result (while-no-input (remoto--search-users file))))
+           (when (listp result)
+             (let ((filtered (thread-last result
+                               (seq-filter (lambda (u) (string-prefix-p file u))))))
+               ;; Pre-fetch repos for the top match so the cache is
+               ;; warm by the time the user types "/"
+               (when-let* ((top (car filtered)))
+                 (remoto--prefetch-owner-repos top))
+               (mapcar (lambda (u) (concat u "/")) filtered)))))
         ('owner
          ;; Repo completion at /github:OWNER/
-         (let ((owner (plist-get partial :owner)))
-           (if (string-empty-p file)
-               (remoto--recent-owner-repos owner)
-             (remoto--search-owner-repos owner file))))
+         (let* ((owner (plist-get partial :owner))
+                (result (while-no-input
+                          (if (string-empty-p file)
+                              (remoto--recent-owner-repos owner)
+                            (remoto--search-owner-repos owner file)))))
+           (when (listp result) result)))
         ('repo
          ;; Branch completion at /github:OWNER/REPO@
          (if (string-suffix-p ":" file)
@@ -587,12 +596,14 @@ Handles three levels: user search at /github:, repo listing at
              (list file)
            (let* ((owner (plist-get partial :owner))
                   (repo (plist-get partial :repo))
-                  (branches (remoto--fetch-branches owner repo)))
-             (thread-last branches
-               (seq-filter (lambda (b)
-                             (or (string-empty-p file)
-                                 (string-prefix-p file b))))
-               (mapcar (lambda (b) (concat b ":"))))))))
+                  (result (while-no-input
+                            (remoto--fetch-branches owner repo))))
+             (when (listp result)
+               (thread-last result
+                 (seq-filter (lambda (b)
+                               (or (string-empty-p file)
+                                   (string-prefix-p file b))))
+                 (mapcar (lambda (b) (concat b ":")))))))))
     ;; Full canonical path - existing behavior
     (when-let* ((parsed (remoto--parse-path directory)))
       (thread-last (remoto--tree-children parsed)
@@ -1184,6 +1195,24 @@ Uses client-side narrowing when a parent query is cached."
                              remoto--search-cache)
                     results)
                 (user-error nil)))))))))
+
+(defvar remoto--prefetch-timer nil
+  "Idle timer for speculative repo pre-fetching.")
+
+(defun remoto--prefetch-owner-repos (owner)
+  "Pre-fetch recent repos for OWNER on idle, warming the cache.
+Cancels any previously scheduled pre-fetch."
+  (when remoto--prefetch-timer
+    (cancel-timer remoto--prefetch-timer))
+  (setq remoto--prefetch-timer
+        (run-with-idle-timer
+         0.25 nil
+         (lambda ()
+           (setq remoto--prefetch-timer nil)
+           ;; Wrap in while-no-input so typing interrupts the
+           ;; synchronous HTTP call instead of blocking Emacs.
+           (while-no-input
+             (remoto--recent-owner-repos owner))))))
 
 (defun remoto--recent-owner-repos (owner)
   "Fetch recently-updated repos for OWNER, cached with TTL.

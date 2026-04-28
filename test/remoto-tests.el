@@ -1114,6 +1114,12 @@
     (let ((completions (remoto--handle-file-name-all-completions "torv" "/github:")))
       (expect completions :to-equal '("torvalds/"))))
 
+  (it "schedules pre-fetch for top user match"
+    (spy-on 'remoto--search-users :and-return-value '("torvalds" "torgeirhelge"))
+    (spy-on 'remoto--prefetch-owner-repos)
+    (remoto--handle-file-name-all-completions "tor" "/github:")
+    (expect 'remoto--prefetch-owner-repos :to-have-been-called-with "torvalds"))
+
   (it "returns nil for empty user query"
     (let ((completions (remoto--handle-file-name-all-completions "" "/github:")))
       (expect completions :to-be nil)))
