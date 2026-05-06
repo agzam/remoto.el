@@ -1842,6 +1842,14 @@ repo listings."
   (push (cons remoto--handler-regexp #'remoto-file-name-handler)
         file-name-handler-alist))
 
+(defun remoto--get-prop (candidate prop)
+  "Get text property PROP from CANDIDATE, searching from end.
+Handles candidates with prefix prepended by completion framework."
+  (let ((len (length candidate)))
+    (when (< 0 len)
+      (or (get-text-property (1- len) prop candidate)
+          (get-text-property 0 prop candidate)))))
+
 (defun remoto--completion-metadata (directory)
   "Return completion metadata alist for DIRECTORY, or nil.
 Provides group-function and affixation-function for @ and # modes."
@@ -1851,14 +1859,14 @@ Provides group-function and affixation-function for @ and # modes."
                   directory)
     (let ((group-fn (lambda (candidate transform)
                       (if transform candidate
-                        (if (get-text-property 0 'remoto-issue-pr candidate)
+                        (if (remoto--get-prop candidate 'remoto-issue-pr)
                             "Pull Request"
                           "Issue"))))
           (affix-fn (lambda (candidates)
                       (mapcar (lambda (c)
-                                (let ((title (or (get-text-property 0 'remoto-issue-title c) ""))
-                                      (state (or (get-text-property 0 'remoto-issue-state c) ""))
-                                      (is-pr (get-text-property 0 'remoto-issue-pr c)))
+                                (let ((title (or (remoto--get-prop c 'remoto-issue-title) ""))
+                                      (state (or (remoto--get-prop c 'remoto-issue-state) ""))
+                                      (is-pr (remoto--get-prop c 'remoto-issue-pr)))
                                   (list c
                                         (if is-pr "PR " "   ")
                                         (format " %s [%s]" title state))))
@@ -1870,7 +1878,7 @@ Provides group-function and affixation-function for @ and # modes."
                   directory)
     (let ((group-fn (lambda (candidate transform)
                       (if transform candidate
-                        (if (equal "tag" (get-text-property 0 'remoto-ref-type candidate))
+                        (if (equal "tag" (remoto--get-prop candidate 'remoto-ref-type))
                             "Tag"
                           "Branch")))))
       `((group-function . ,group-fn))))
@@ -1878,7 +1886,7 @@ Provides group-function and affixation-function for @ and # modes."
    ((string-match (rx "/github:" (+ (not (any "/:@#"))) "/" eos) directory)
     (let ((affix-fn (lambda (candidates)
                       (mapcar (lambda (c)
-                                (let ((desc (or (get-text-property 0 'remoto-repo-desc c) "")))
+                                (let ((desc (or (remoto--get-prop c 'remoto-repo-desc) "")))
                                   (list c "" (if (string-empty-p desc) ""
                                                (concat "  " desc)))))
                               candidates))))
