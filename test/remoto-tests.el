@@ -1955,6 +1955,62 @@ Returns the full path after completion, or INPUT if no completion."
     (remoto--fetch-user-orgs "anyone")
     (expect 'remoto--api :to-have-been-called-with "user/orgs?per_page=100")))
 
+;;; ---- File commit annotations ----
+
+(describe "file commit annotations"
+  (it "propertizes file candidates with commit messages"
+    (spy-on 'remoto--api :and-call-fake
+            (lambda (endpoint)
+              (cond
+               ((string-match-p "git/trees" endpoint)
+                '((sha . "abc") (tree . (((path . "README.md") (type . "blob")
+                                          (size . 100) (sha . "aaa") (mode . "100644"))
+                                         ((path . "src") (type . "tree")
+                                          (size . 0) (sha . "bbb") (mode . "040000"))))))
+               ((string-match-p "commits.*path=README" endpoint)
+                '(((commit (message . "Initial commit\n\nBody text")))))
+               ((string-match-p "commits.*path=src" endpoint)
+                '(((commit (message . "Add source directory")))))
+               (t nil))))
+    (let ((remoto--file-commits-cache (make-hash-table :test 'equal))
+          (remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
+      (remoto-test--install-mock-tree)
+      (let ((result (remoto--fetch-file-commits "testowner" "testrepo" "main" ""
+                                                '("README.md" "src/"))))
+        (expect (alist-get "README.md" result nil nil #'equal)
+                :to-equal "Initial commit")
+        (expect (alist-get "src/" result nil nil #'equal)
+                :to-equal "Add source directory"))))
+
+  (it "provides file commit metadata for canonical paths"
+    (let* ((meta (remoto--completion-metadata "/github:foo/bar@main:/"))
+           (affix-fn (alist-get 'affixation-function meta))
+           (candidate (propertize "file.el" 'remoto-file-commit "Fix typo")))
+      (expect affix-fn :not :to-be nil)
+      (let ((result (funcall affix-fn (list candidate))))
+        (expect (string-match-p "Fix typo" (nth 2 (car result))) :to-be-truthy))))
+
+  (it "provides file commit metadata for files-default paths"
+    (let* ((meta (remoto--completion-metadata "/github:foo/bar/"))
+           (affix-fn (alist-get 'affixation-function meta))
+           (candidate (propertize "src/" 'remoto-file-commit "Refactor modules")))
+      (expect affix-fn :not :to-be nil)
+      (let ((result (funcall affix-fn (list candidate))))
+        (expect (string-match-p "Refactor modules" (nth 2 (car result))) :to-be-truthy))))
+
+  (it "caches results across calls"
+    (let ((remoto--file-commits-cache (make-hash-table :test 'equal))
+          (call-count 0))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_endpoint)
+                (cl-incf call-count)
+                '(((commit (message . "cached msg"))))))
+      (remoto--fetch-file-commits "o" "r" "main" "" '("f.el"))
+      (remoto--fetch-file-commits "o" "r" "main" "" '("f.el"))
+      (expect call-count :to-equal 1))))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:

@@ -720,13 +720,23 @@ instead of blocking Emacs."
                     (parsed (remoto--parse-path canonical)))
                (when parsed
                  (remoto--ensure-tree parsed)
-                 (thread-last (remoto--tree-children parsed)
-                   (mapcar (lambda (child)
-                             (if (equal "tree" (alist-get 'type (cdr child)))
-                                 (concat (car child) "/")
-                               (car child))))
-                   (seq-filter (lambda (name)
-                                 (string-prefix-p file name)))))))))
+                 (let* ((children (remoto--tree-children parsed))
+                        (names (mapcar (lambda (child)
+                                         (if (equal "tree" (alist-get 'type (cdr child)))
+                                             (concat (car child) "/")
+                                           (car child)))
+                                       children))
+                        (filtered (seq-filter (lambda (name)
+                                               (string-prefix-p file name))
+                                             names))
+                        (commits (remoto--fetch-file-commits
+                                  owner repo branch subpath filtered)))
+                   (mapcar (lambda (name)
+                             (let ((msg (alist-get name commits nil nil #'equal)))
+                               (if msg
+                                   (propertize name 'remoto-file-commit msg)
+                                 name)))
+                           filtered)))))))
         ('issues
          ;; Issue/PR completion at /github:OWNER/REPO#
          (let* ((owner (plist-get partial :owner))
@@ -781,13 +791,29 @@ instead of blocking Emacs."
                           (t (> (string-to-number a) (string-to-number b))))))))))))
     ;; Full canonical path - existing behavior
     (when-let* ((parsed (remoto--parse-path directory)))
-      (thread-last (remoto--tree-children parsed)
-        (mapcar (lambda (child)
-                  (if (equal "tree" (alist-get 'type (cdr child)))
-                      (concat (car child) "/")
-                    (car child))))
-        (seq-filter (lambda (name)
-                      (string-prefix-p file name)))))))
+      (let* ((owner (remoto-path-owner parsed))
+             (repo (remoto-path-repo parsed))
+             (ref (remoto-path-ref parsed))
+             (path (remoto-path-path parsed))
+             (dir-path (if (equal path "/") ""
+                         (string-trim-left path "/")))
+             (children (remoto--tree-children parsed))
+             (names (thread-last children
+                      (mapcar (lambda (child)
+                                (if (equal "tree" (alist-get 'type (cdr child)))
+                                    (concat (car child) "/")
+                                  (car child))))
+                      (seq-filter (lambda (name)
+                                    (string-prefix-p file name)))))
+             (commits (when ref
+                        (remoto--fetch-file-commits
+                         owner repo ref dir-path names))))
+        (mapcar (lambda (name)
+                  (let ((msg (alist-get name commits nil nil #'equal)))
+                    (if msg
+                        (propertize name 'remoto-file-commit msg)
+                      name)))
+                names)))))
 
 (defun remoto--handle-file-name-completion (file directory &optional predicate)
   "Complete FILE in remote DIRECTORY using optional PREDICATE.
@@ -1448,6 +1474,44 @@ Returns list of comment alists, or nil on error."
       (remoto--api (format "repos/%s/%s/issues/%s/comments" owner repo number))
     (user-error nil)))
 
+(defvar remoto--file-commits-cache (make-hash-table :test 'equal)
+  "Cache for per-file last commit messages.
+Key: \"owner/repo@ref:dir\", Value: (TIMESTAMP . ALIST).
+ALIST maps filename -> first line of commit message.")
+
+(defun remoto--fetch-file-commits (owner repo ref dir-path children)
+  "Fetch last commit message for each file in CHILDREN.
+DIR-PATH is the directory path within OWNER/REPO at REF.
+CHILDREN is a list of filenames. Returns alist of (name . msg).
+Cached per `remoto-search-cache-ttl'. Capped at 20 API calls."
+  (let* ((key (format "%s/%s@%s:%s" owner repo ref dir-path))
+         (entry (gethash key remoto--file-commits-cache))
+         (now (float-time)))
+    (if (and entry
+             (or (zerop remoto-search-cache-ttl)
+                 (< (- now (car entry)) remoto-search-cache-ttl)))
+        (cdr entry)
+      (condition-case nil
+          (let ((result nil))
+            (dolist (child (seq-take children 20))
+              (let* ((bare-name (string-trim-right child "/"))
+                     (file-path (if (string-empty-p dir-path)
+                                    bare-name
+                                  (concat dir-path "/" bare-name)))
+                     (endpoint (format "repos/%s/%s/commits?sha=%s&path=%s&per_page=1"
+                                       owner repo
+                                       (url-hexify-string ref)
+                                       (url-hexify-string file-path)))
+                     (commits (remoto--api endpoint)))
+                (when-let* ((first (car commits))
+                            (c (alist-get 'commit first))
+                            (raw (alist-get 'message c))
+                            (msg (car (split-string raw "\n" t))))
+                  (push (cons child msg) result))))
+            (puthash key (cons now result) remoto--file-commits-cache)
+            result)
+        (user-error nil)))))
+
 (defun remoto--fetch-user-orgs (_user)
   "Fetch organization memberships for the authenticated user.
 Uses /user/orgs which includes private memberships.
@@ -1916,6 +1980,18 @@ Provides group-function and affixation-function for @ and # modes."
                             "Tag"
                           "Branch")))))
       `((group-function . ,group-fn))))
+   ;; File mode: canonical path or files-default (owner/repo/ with optional subpath)
+   ((or (string-match (rx "@" (+ (not (any ":"))) ":" (? "/")) directory)
+        (string-match (rx "/github:" (+ (not (any "/:@#"))) "/"
+                          (+ (not (any "/:@#"))) "/" (* nonl) eos)
+                      directory))
+    (let ((affix-fn (lambda (candidates)
+                      (remoto--align-affixations
+                       (mapcar (lambda (c)
+                                 (let ((msg (or (remoto--get-prop c 'remoto-file-commit) "")))
+                                   (list c "" msg)))
+                               candidates)))))
+      `((affixation-function . ,affix-fn))))
    ;; Owner mode: /github:OWNER/ - repo descriptions
    ((string-match (rx "/github:" (+ (not (any "/:@#"))) "/" eos) directory)
     (let ((affix-fn (lambda (candidates)
@@ -2014,6 +2090,7 @@ Args: ORIG, STRING, PRED, ACTION."
   (clrhash remoto--search-cache)
   (clrhash remoto--tags-cache)
   (clrhash remoto--issues-cache)
+  (clrhash remoto--file-commits-cache)
   nil)
 
 (provide 'remoto)
