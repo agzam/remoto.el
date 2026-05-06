@@ -245,6 +245,11 @@ TRAMP's `tramp-file-name-regexp` matches `/method:...` patterns, which would int
 
 ## Error Handling
 
+Two policies:
+
+1. During completion (typing/TAB): all errors swallowed, empty list returned. Every `remoto--fetch-*` uses `(condition-case nil ... (user-error nil))`.
+2. During open (RET): errors surface as `user-error` ("Remoto: not found: ...").
+
 ghub signals typed conditions for HTTP errors. `remoto--api` catches these and re-signals as `user-error`:
 
 - `ghub-404` - not found (repo missing, private without access)
@@ -262,38 +267,117 @@ ghub signals typed conditions for HTTP errors. `remoto--api` catches these and r
 
 ### find-file completion
 
-The `/github:` prefix enables multi-level completion directly in `find-file` (`C-x C-f`). This extends the file-name-handler to support pre-repo-level completions, so the standard Emacs file completion machinery drives the entire flow.
+The `/github:` prefix enables multi-level completion directly in `find-file` (`C-x C-f`). Standard Emacs file completion machinery drives the entire flow.
 
-Completion levels:
+#### Delimiter rules
 
-| Input | Directory part | File part | Action |
+The first delimiter character after `OWNER/REPO` determines the completion mode:
+
+| Delimiter | Mode | Example |
+|---|---|---|
+| `/` | files-default (browse on default branch) | `/github:owner/repo/src/` |
+| `@` | repo (pick branch or tag) | `/github:owner/repo@v1.0:` |
+| `#` | issues (browse issues/PRs) | `/github:owner/repo#42` |
+
+Once consumed, other delimiters become literal (e.g. `/github:foo/bar/@` - the `@` is a filename character).
+
+#### Completion levels
+
+| Level | Directory | Query | Action |
 |---|---|---|---|
-| `/github:tor` | `/github:` | `tor` | Search users/orgs matching "tor" via `search/users` API |
-| `/github:torvalds/` | `/github:torvalds/` | (empty) | Show 30 most recently updated repos via `search/repositories?q=user:torvalds&sort=updated` |
-| `/github:torvalds/lin` | `/github:torvalds/` | `lin` | Search repos matching "lin" via `search/repositories?q=lin+in:name+user:torvalds` |
-| `/github:torvalds/linux@` | `/github:torvalds/` | `linux@` | List branches via `repos/torvalds/linux/branches` API |
-| `/github:torvalds/linux@master:` | `/github:torvalds/linux@master:` | (empty) | File-level completion (existing tree-based) |
+| `root` | `/github:` | empty | Show authenticated user + org memberships (via `/user/orgs`) |
+| `root` | `/github:` | 2+ chars | Search users/orgs via `search/users` |
+| `owner` | `/github:OWNER/` | empty | 30 most recently updated repos |
+| `owner` | `/github:OWNER/` | 2+ chars | Search repos by name |
+| `repo` | `/github:OWNER/REPO@` | any | Branches + tags merged, `:` suffix on selection |
+| `files-default` | `/github:OWNER/REPO/[subdir/]` | any | Tree listing on default branch |
+| `issues` | `/github:OWNER/REPO#` | empty | Top 30 open issues+PRs |
+| `issues` | `/github:OWNER/REPO#` | numeric | Direct fetch + cache filter |
+| `issues` | `/github:OWNER/REPO#` | text | Search via `search/issues` |
+| canonical | `/github:OWNER/REPO@REF:/path/` | any | Tree listing at path |
 
-Hitting RET on `/github:owner/repo` (without `@ref:`) resolves the default branch via `remoto--maybe-rewrite` and opens `/github:owner/repo@default:/` in dired.
+#### Annotations (affixation-function)
 
-New API functions:
+Each level provides annotations via completion metadata `affixation-function`. Alignment uses `(space :align-to N)` display property. All annotations get `remoto-annotation` face.
 
-- `remoto--search-users` - calls `search/users?q=PREFIX&per_page=30`. Caches results in `remoto--users-cache` (TTL-based, same as `remoto-search-cache-ttl`). Supports client-side narrowing: typing "torv" filters cached "tor" results without a new API call. Requires min 2 characters.
-- `remoto--recent-owner-repos` - calls `search/repositories?q=user:OWNER&sort=updated&per_page=30`. Returns the 30 most recently pushed repos for an owner. Used when the input is empty at `/github:OWNER/`.
-- `remoto--search-owner-repos` - calls `search/repositories?q=QUERY+in:name+user:OWNER&per_page=100`. Searches repos by name within an owner. Supports client-side narrowing from cached shorter queries. Requires min 2 characters.
+| Level | Annotation |
+|---|---|
+| root | User/Organization type + org description |
+| owner | Repository description |
+| repo | group-function: "Branch" vs "Tag" |
+| files-default, canonical | Last commit message per file (up to 20 API calls, cached) |
+| issues | PR/Issue prefix + title + state; group-function: "Pull Request" vs "Issue" |
 
-New caches:
+PRs are sorted before issues. Completion category is set to `remoto` (with `partial-completion` style) to prevent Marginalia from overriding.
 
-- `remoto--users-cache` - hash table: query string -> `(TIMESTAMP . USER-NAMES)`.
-- `remoto--search-cache` - unified cache: key string -> `(TIMESTAMP . RESULTS)`. Used for user search (`\0users:PREFIX`), recent repos (`\0repos-recent:OWNER`), and repo search (`\0repos:OWNER/QUERY`).
+#### Path normalization on RET
 
-Partial path handling:
+| Short form | Normalized to |
+|---|---|
+| `/github:owner/repo/` | `/github:owner/repo@DEFAULTBRANCH:/` |
+| `/github:owner/repo/src/main.el` | `/github:owner/repo@DEFAULTBRANCH:/src/main.el` |
+| `/github:owner/repo#42` | Routed to `remoto-topic-display` (no file operation) |
 
-The file-name handler now recognizes partial paths (`/github:`, `/github:OWNER/`) that don't match `remoto--path-regexp`. For these paths, `file-exists-p` and `file-directory-p` return t (they are virtual completion directories), `file-name-directory` and `file-name-nondirectory` split correctly (e.g., `/github:foo` splits to directory `/github:` and nondirectory `foo`), and `file-remote-p` returns `/github:` as the remote prefix. `remoto--parse-partial-canonical` handles the intermediate form `/github:OWNER/REPO[@REF]` (without trailing `:`), converting it to a canonical path for opening.
+The `#NUM` interception happens in `remoto--find-file-around-a` BEFORE `remoto--maybe-rewrite` (rewrite would mangle the `#` delimiter).
+
+#### file-exists-p RET guard
+
+Returns nil for incomplete paths (triggers `[Confirm]` prompt):
+
+| Returns t | Returns nil |
+|---|---|
+| `/github:`, `/github:owner/`, `/github:owner/repo/`, `/github:owner/repo#42`, canonical paths in tree | `/github:owner/repo` (bare), `/github:owner/repo#`, `/github:owner/repo@`, `/github:owner#` |
+
+#### API functions
+
+- `remoto--search-users` - `search/users`. Cached, client-side narrowing from parent queries. Min 2 chars.
+- `remoto--recent-owner-repos` - `search/repositories?q=user:OWNER&sort=updated`. Cached.
+- `remoto--search-owner-repos` - `search/repositories?q=QUERY+in:name+user:OWNER`. Cached, client-side narrowing.
+- `remoto--fetch-branches` - `repos/OWNER/REPO/branches`. TTL-cached in `remoto--branches-cache`.
+- `remoto--fetch-tags` - `repos/OWNER/REPO/tags`. TTL-cached in `remoto--tags-cache`.
+- `remoto--fetch-issues` - `repos/OWNER/REPO/issues?state=open&sort=updated`. TTL-cached in `remoto--issues-cache`.
+- `remoto--search-issues` - `search/issues?q=QUERY+repo:OWNER/REPO`. Not cached (ephemeral).
+- `remoto--fetch-issue` - `repos/OWNER/REPO/issues/NUMBER`. Not cached.
+- `remoto--fetch-user-orgs` - `/user/orgs` (authenticated endpoint, includes private memberships).
+- `remoto--fetch-file-commits` - `repos/OWNER/REPO/commits?sha=REF&path=FILE&per_page=1` per file (capped at 20). TTL-cached in `remoto--file-commits-cache`.
+
+#### Caches
+
+| Variable | Key | Value | TTL |
+|---|---|---|---|
+| `remoto--tree-cache` | `"owner/repo@ref"` | hash-table (path -> entry) | Manual |
+| `remoto--default-branch-cache` | `"owner/repo"` | branch name string | Manual |
+| `remoto--branches-cache` | `"owner/repo"` | `(TIMESTAMP . LIST)` | `remoto-search-cache-ttl` |
+| `remoto--tags-cache` | `"owner/repo"` | `(TIMESTAMP . LIST)` | `remoto-search-cache-ttl` |
+| `remoto--issues-cache` | `"owner/repo"` | `(TIMESTAMP . ALIST)` | `remoto-search-cache-ttl` |
+| `remoto--users-cache` | query string | `(TIMESTAMP . NAMES)` | `remoto-search-cache-ttl` |
+| `remoto--search-cache` | typed key | `(TIMESTAMP . RESULTS)` | `remoto-search-cache-ttl` |
+| `remoto--content-cache` | SHA | decoded string | Never (content-addressable) |
+| `remoto--file-commits-cache` | `"owner/repo@ref:dir"` | `(TIMESTAMP . ALIST)` | `remoto-search-cache-ttl` |
+
+#### Partial path handling
+
+The handler recognizes partial paths (`/github:`, `/github:OWNER/`) that don't match `remoto--path-regexp`. For these: `file-exists-p` and `file-directory-p` return t, `file-name-directory`/`nondirectory` split correctly, `file-remote-p` returns `/github:` prefix. `remoto--parse-partial-canonical` handles `/github:OWNER/REPO[@REF]` (excludes `#` from repo name character class).
+
+## Topic Display (remoto-topic.el)
+
+Opening `/github:owner/repo#NUM` via `find-file` routes to `remoto-topic-display` instead of file operations. Detects whether the number is an issue or PR and renders accordingly.
+
+For PRs: fetches full PR data (`repos/OWNER/REPO/pulls/NUM`) for diff stats, branch info, merge state, and review summary (`repos/OWNER/REPO/pulls/NUM/reviews`).
+
+For both: fetches comments (`repos/OWNER/REPO/issues/NUM/comments`).
+
+Buffer name: `*remoto: owner/repo#NUM*`. Mode: `remoto-topic-mode` (derived from `special-mode`). Keybindings: `b` (browse URL), `g` (refresh). Carriage returns stripped from body/comments.
+
+Faces: `remoto-topic-title`, `remoto-topic-state-open`, `remoto-topic-state-closed`, `remoto-topic-state-merged`, `remoto-topic-meta`, `remoto-topic-comment-header`, `remoto-topic-additions`, `remoto-topic-deletions`.
 
 ## Unloading
 
-`remoto-unload-function` removes the `file-name-handler-alist` entry and all advice, and clears `remoto--users-cache`, ensuring clean `unload-feature` support.
+`remoto-unload-function` removes the handler-alist entry and all advice, clears all caches (tree, default-branch, branches, tags, issues, users, search, content, file-commits).
+
+## Known Technical Debt
+
+- `remoto-browse` and `find-file` completion have parallel dispatch/formatting code. The fetch logic is shared (`remoto--fetch-dir-children-light`, `remoto--fetch-branches`, `remoto--fetch-issues`, etc.), but the mode parsing (`remoto--browse-parse-input` vs `remoto--parse-partial-github-path`) and candidate formatting (full paths vs bare names) are duplicated. A shared dispatcher returning raw candidates per mode, with each UI layer applying its prefix, would eliminate this. Non-trivial because `file-name-all-completions` splits input into `(file directory)` while `completing-read` uses a single string.
 
 ## Limitations
 
@@ -367,7 +451,8 @@ Each prefix would have its own entry in `file-name-handler-alist`, dispatching t
 
 ```
 remoto.el/
-  remoto.el          ;; the package - single file
+  remoto.el          ;; core: file-name-handler, completion, API, caching
+  remoto-topic.el    ;; issue/PR display buffers
   SPEC.md            ;; this spec
   README.org         ;; user-facing documentation
   CHANGELOG.org      ;; release history

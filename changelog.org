@@ -3,6 +3,33 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [1.4.0] - 2026-05-06
+
+** Added
+- Three new completion levels: files-default (~/github:o/r/~), issues (~/github:o/r#~), branches+tags (~/github:o/r@~).
+- Root level (~/github:~) shows authenticated user + org memberships when query is empty.
+- ~remoto-topic.el~ - dedicated issue/PR display buffers. PR-aware rendering with diff stats, branch info, merge state, and review summary.
+- Completion annotations at every level via ~affixation-function~: repo descriptions, issue/PR titles, branch/tag grouping, user/org type, per-file last commit messages.
+- ~remoto--fetch-tags~ for tag completion at the ~@~ level.
+- ~remoto--fetch-issues~, ~remoto--search-issues~, ~remoto--fetch-issue~ for ~#~ level.
+- ~remoto--fetch-issue-comments~ for topic display.
+- ~remoto--fetch-file-commits~ for per-file commit message annotations (capped at 20 per directory).
+- ~remoto--fetch-user-orgs~ using authenticated ~/user/orgs~ endpoint.
+- ~remoto-annotation~ face (inherits ~completions-annotations~).
+- Annotation alignment via ~(space :align-to N)~ display property.
+- ~remoto-topic-mode~ (derived from ~special-mode~) with ~b~ (browse) and ~g~ (refresh) keybindings.
+
+** Changed
+- Completion category set to ~remoto~ (with ~partial-completion~ style) when annotations are active, preventing Marginalia from overriding.
+- PRs sorted before issues in ~#~ completion.
+- ~remoto--parse-partial-canonical~ excludes ~#~ from owner/repo character class.
+- ~remoto-unload-function~ now clears all 9 caches.
+
+** Fixed
+- ~find-file-noselect~ on ~/github:o/r#42~ now correctly routes to topic display instead of treating ~#42~ as part of the repo name.
+- ~remoto--maybe-rewrite~ no longer mangles ~#NUM~ paths.
+- Carriage returns (~^M~) stripped from issue/PR body and comments.
+
 * [1.3.0] - 2026-04-28
 
 ** Changed
