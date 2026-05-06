@@ -582,103 +582,86 @@
     (expect (remoto--search-query "torvalds/") :to-equal "user:torvalds")
     (expect (remoto--search-query "torvalds/lin") :to-equal "lin in:name user:torvalds"))
 
-  (it "parses search API response into owner/repo list"
-    (spy-on 'remoto--api :and-return-value
-            '((items . (((full_name . "torvalds/linux"))
-                        ((full_name . "torvalds/subsurface"))))))
+  (it "populates cache via async callback"
+    (spy-on 'remoto--debounce :and-call-fake (lambda (_key fn) (funcall fn)))
+    (spy-on 'remoto--api-async :and-call-fake
+            (lambda (_endpoint callback)
+              (funcall callback '((items . (((full_name . "torvalds/linux"))
+                                            ((full_name . "torvalds/subsurface"))))))))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      ;; First call triggers async, returns nil (cache empty)
+      (remoto--search-repos "torvalds")
+      ;; Cache now populated; second call returns results
       (expect (remoto--search-repos "torvalds")
               :to-equal '("torvalds/linux" "torvalds/subsurface"))))
 
-  (it "caches results for repeated queries"
-    (let ((remoto--search-cache (make-hash-table :test 'equal))
-          (call-count 0))
-      (spy-on 'remoto--api :and-call-fake
-              (lambda (_endpoint)
-                (setq call-count (1+ call-count))
-                '((items . (((full_name . "torvalds/linux")))))))
-      (remoto--search-repos "torvalds")
-      (remoto--search-repos "torvalds")
-      (expect call-count :to-equal 1)))
+  (it "returns cached results without scheduling async"
+    (spy-on 'remoto--debounce)
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      (puthash "torvalds" (cons (float-time) '("torvalds/linux"))
+               remoto--search-cache)
+      (expect (remoto--search-repos "torvalds")
+              :to-equal '("torvalds/linux"))
+      (expect 'remoto--debounce :not :to-have-been-called)))
 
   (it "filters cached results when query narrows past a slash"
-    (let ((remoto--search-cache (make-hash-table :test 'equal))
-          (call-count 0))
-      (spy-on 'remoto--api :and-call-fake
-              (lambda (_endpoint)
-                (setq call-count (1+ call-count))
-                '((items . (((full_name . "agzam/spacehammer"))
-                            ((full_name . "agzam/dotfiles"))
-                            ((full_name . "agzam/remoto.el")))))))
-      ;; First call hits the API
-      (let ((results (remoto--search-repos "agzam")))
-        (expect (length results) :to-equal 3))
-      ;; Query with slash filters cached results, no new API call
-      (let ((results (remoto--search-repos "agzam/spa")))
-        (expect results :to-equal '("agzam/spacehammer"))
-        (expect call-count :to-equal 1))
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      ;; Pre-populate cache
+      (puthash "agzam"
+               (cons (float-time) '("agzam/spacehammer" "agzam/dotfiles" "agzam/remoto.el"))
+               remoto--search-cache)
+      ;; Query with slash filters cached results
+      (expect (remoto--search-repos "agzam/spa")
+              :to-equal '("agzam/spacehammer"))
       ;; Further narrowing still uses cache
-      (let ((results (remoto--search-repos "agzam/spaceh")))
-        (expect results :to-equal '("agzam/spacehammer"))
-        (expect call-count :to-equal 1))
-      ;; No match returns empty list, still no API call
-      (let ((results (remoto--search-repos "agzam/zzz")))
-        (expect results :to-be nil)
-        (expect call-count :to-equal 1))))
+      (expect (remoto--search-repos "agzam/spaceh")
+              :to-equal '("agzam/spacehammer"))
+      ;; No match returns nil
+      (expect (remoto--search-repos "agzam/zzz")
+              :to-be nil)))
 
-  (it "does not filter from short prefix cache without slash"
-    (let ((remoto--search-cache (make-hash-table :test 'equal))
-          (call-count 0))
-      (spy-on 'remoto--api :and-call-fake
-              (lambda (_endpoint)
-                (setq call-count (1+ call-count))
-                '((items . (((full_name . "agzam/spacehammer")))))))
-      ;; "agz" hits the API
-      (remoto--search-repos "agz")
-      ;; "agzam" should NOT filter from "agz" cache - different search
-      (remoto--search-repos "agzam")
-      (expect call-count :to-equal 2)))
+  (it "schedules async for non-narrowable cache miss"
+    (spy-on 'remoto--debounce)
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      ;; "agz" has no cache and no parent - schedules async
+      (expect (remoto--search-repos "agz") :to-be nil)
+      (expect 'remoto--debounce :to-have-been-called)))
 
-  (it "returns nil on API errors"
-    (spy-on 'remoto--api :and-call-fake
-            (lambda (_endpoint)
-              (user-error "network error")))
+  (it "returns nil on cache miss (async pending)"
+    (spy-on 'remoto--debounce)
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
       (expect (remoto--search-repos "torvalds") :to-be nil)))
 
   (it "expires cache entries after TTL"
     (let ((remoto--search-cache (make-hash-table :test 'equal))
-          (remoto-search-cache-ttl 1)
-          (call-count 0))
-      (spy-on 'remoto--api :and-call-fake
-              (lambda (_endpoint)
-                (setq call-count (1+ call-count))
-                '((items . (((full_name . "torvalds/linux")))))))
-      (remoto--search-repos "torvalds")
-      (expect call-count :to-equal 1)
-      ;; Manually expire the entry by backdating the timestamp
-      (let ((entry (gethash "torvalds" remoto--search-cache)))
-        (setcar entry (- (float-time) 10)))
-      ;; Next call should re-fetch
-      (remoto--search-repos "torvalds")
-      (expect call-count :to-equal 2)))
+          (remoto-search-cache-ttl 1))
+      ;; Populate cache with backdated timestamp
+      (puthash "torvalds" (cons (- (float-time) 10) '("torvalds/linux"))
+               remoto--search-cache)
+      ;; Expired entry should not be returned
+      (spy-on 'remoto--debounce)
+      (expect (remoto--search-repos "torvalds") :to-be nil)))
 
-  (it "caches empty results without re-hitting API"
-    (let ((remoto--search-cache (make-hash-table :test 'equal))
-          (call-count 0))
-      (spy-on 'remoto--api :and-call-fake
-              (lambda (_endpoint)
-                (setq call-count (1+ call-count))
-                '((items))))
+  (it "caches empty results without re-scheduling async"
+    (spy-on 'remoto--debounce :and-call-fake (lambda (_key fn) (funcall fn)))
+    (spy-on 'remoto--api-async :and-call-fake
+            (lambda (_endpoint callback)
+              (funcall callback '((items)))))
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      ;; First call: async populates cache with nil results
       (remoto--search-repos "zzzznotfound")
+      ;; Reset spy to track second call
+      (spy-on 'remoto--debounce)
+      ;; Second call hits cache (empty results)
       (remoto--search-repos "zzzznotfound")
-      (expect call-count :to-equal 1)))
+      (expect 'remoto--debounce :not :to-have-been-called)))
 
   (it "delivers results via callback when provided"
-    (spy-on 'remoto--api :and-return-value
-            '((items . (((full_name . "torvalds/linux"))))))
     (let ((remoto--search-cache (make-hash-table :test 'equal))
           (captured nil))
+      ;; Pre-populate cache so search-repos-fetch returns immediately
+      (puthash "torvalds" (cons (float-time) '("torvalds/linux"))
+               remoto--search-cache)
       (remoto--search-repos "torvalds"
                             (lambda (results) (setq captured results)))
       (expect captured :to-equal '("torvalds/linux"))))
@@ -769,10 +752,13 @@
               :to-be-truthy)))
 
   (it "search results carry repo descriptions"
-    (spy-on 'remoto--api :and-return-value
-            '((items . (((full_name . "torvalds/linux")
-                         (description . "Linux kernel"))))))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      ;; Pre-populate cache with propertized results (as async would)
+      (puthash "torvalds"
+               (cons (float-time)
+                     (list (propertize "torvalds/linux"
+                                       'remoto-repo-desc "Linux kernel")))
+               remoto--search-cache)
       (let ((result (remoto--repo-completion-table "torvalds" nil t)))
         (expect (car result) :to-equal "torvalds/linux")
         (expect (get-text-property 0 'remoto-repo-desc (car result))
@@ -1113,95 +1099,123 @@
 ;;; User search
 
 (describe "remoto--search-users"
-  (it "returns nil for short queries"
-    (expect (remoto--search-users "") :to-be nil)
-    (expect (remoto--search-users "a") :to-be nil))
+  (it "returns nil for queries below min-search-chars"
+    (let ((remoto-min-search-chars 3))
+      (expect (remoto--search-users "") :to-be nil)
+      (expect (remoto--search-users "a") :to-be nil)
+      (expect (remoto--search-users "ab") :to-be nil)))
 
-  (it "fetches users from search API"
-    (spy-on 'remoto--api :and-return-value
-            '((items . (((login . "torvalds"))
-                        ((login . "torgeirhelge"))))))
+  (it "schedules async fetch on cache miss, returns nil"
+    (spy-on 'remoto--debounce)
     (let ((remoto--search-cache (make-hash-table :test 'equal))
-          (remoto--users-cache (make-hash-table :test 'equal)))
+          (remoto--users-cache (make-hash-table :test 'equal))
+          (remoto-min-search-chars 3))
+      (expect (remoto--search-users "tor") :to-be nil)
+      (expect 'remoto--debounce :to-have-been-called)))
+
+  (it "populates cache via async callback"
+    ;; Make debounce execute immediately, mock api-async to invoke callback
+    (spy-on 'remoto--debounce :and-call-fake (lambda (_key fn) (funcall fn)))
+    (spy-on 'remoto--api-async :and-call-fake
+            (lambda (_endpoint callback)
+              (funcall callback '((items . (((login . "torvalds") (type . "User"))
+                                            ((login . "torgeirhelge") (type . "User"))))))))
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (remoto--users-cache (make-hash-table :test 'equal))
+          (remoto-min-search-chars 3))
+      ;; First call: triggers async, returns nil
+      (remoto--search-users "tor")
+      ;; Cache should now be populated by the callback
       (expect (remoto--search-users "tor")
               :to-equal '("torvalds" "torgeirhelge"))))
 
-  (it "caches results and avoids repeat API calls"
+  (it "returns cached results without async call"
+    (spy-on 'remoto--debounce)
     (let ((remoto--search-cache (make-hash-table :test 'equal))
           (remoto--users-cache (make-hash-table :test 'equal))
-          (call-count 0))
-      (spy-on 'remoto--api :and-call-fake
-              (lambda (_endpoint)
-                (setq call-count (1+ call-count))
-                '((items . (((login . "torvalds")))))))
-      (remoto--search-users "tor")
-      (remoto--search-users "tor")
-      (expect call-count :to-equal 1)))
+          (remoto-min-search-chars 3))
+      ;; Pre-populate cache
+      (puthash "\0users:tor" (cons (float-time) '("torvalds" "torgeirhelge"))
+               remoto--search-cache)
+      (expect (remoto--search-users "tor")
+              :to-equal '("torvalds" "torgeirhelge"))
+      ;; Should not have scheduled any async fetch
+      (expect 'remoto--debounce :not :to-have-been-called)))
 
-  (it "narrows cached results for longer prefixes"
+  (it "narrows cached results for longer prefixes without API call"
+    (spy-on 'remoto--debounce)
     (let ((remoto--search-cache (make-hash-table :test 'equal))
           (remoto--users-cache (make-hash-table :test 'equal))
-          (call-count 0))
-      (spy-on 'remoto--api :and-call-fake
-              (lambda (_endpoint)
-                (setq call-count (1+ call-count))
-                '((items . (((login . "torvalds"))
-                            ((login . "torgeirhelge")))))))
-      (remoto--search-users "tor")
+          (remoto-min-search-chars 3))
+      ;; Seed the users-cache with a shorter query
+      (puthash "tor" (cons (float-time) '("torvalds" "torgeirhelge"))
+               remoto--users-cache)
       (let ((result (remoto--search-users "torv")))
         (expect result :to-equal '("torvalds"))
-        (expect call-count :to-equal 1))))
-
-  (it "returns nil on API errors"
-    (spy-on 'remoto--api :and-call-fake
-            (lambda (_) (user-error "network")))
-    (let ((remoto--search-cache (make-hash-table :test 'equal))
-          (remoto--users-cache (make-hash-table :test 'equal)))
-      (expect (remoto--search-users "tor") :to-be nil))))
+        (expect 'remoto--debounce :not :to-have-been-called)))))
 
 ;;; Owner repo search
 
 (describe "remoto--search-owner-repos"
-  (it "returns nil for short queries"
-    (let ((remoto--search-cache (make-hash-table :test 'equal)))
-      (expect (remoto--search-owner-repos "torvalds" "") :to-be nil)
-      (expect (remoto--search-owner-repos "torvalds" "l") :to-be nil)))
-
-  (it "searches repos via API"
-    (spy-on 'remoto--api :and-return-value
-            '((items . (((name . "linux"))
-                        ((name . "libfdt"))))))
-    (let ((remoto--search-cache (make-hash-table :test 'equal)))
-      (let ((result (remoto--search-owner-repos "torvalds" "lin")))
-        (expect result :to-equal '("linux" "libfdt"))
-        (expect 'remoto--api :to-have-been-called)
-        (let ((call-args (spy-calls-args-for 'remoto--api 0)))
-          (expect (car call-args) :to-match "user%3Atorvalds")
-          (expect (car call-args) :to-match "lin")))))
-
-  (it "caches results"
+  (it "returns nil for empty query"
     (let ((remoto--search-cache (make-hash-table :test 'equal))
-          (call-count 0))
-      (spy-on 'remoto--api :and-call-fake
-              (lambda (_endpoint)
-                (setq call-count (1+ call-count))
-                '((items . (((name . "linux")))))))
+          (remoto-min-search-chars 3))
+      (expect (remoto--search-owner-repos "torvalds" "") :to-be nil)))
+
+  (it "narrows from recent-repos cache below min-search-chars"
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (remoto-min-search-chars 3)
+          (remoto-repo-cache-ttl 1800))
+      ;; Seed recent-repos cache
+      (puthash "\0repos-recent:torvalds"
+               (cons (float-time) '("linux" "libfdt" "subsurface"))
+               remoto--search-cache)
+      ;; Short query ("li") narrows from recent cache
+      (expect (remoto--search-owner-repos "torvalds" "li")
+              :to-equal '("linux" "libfdt"))))
+
+  (it "schedules async fetch on cache miss"
+    (spy-on 'remoto--debounce)
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (remoto-min-search-chars 3))
+      (expect (remoto--search-owner-repos "torvalds" "lin") :to-be nil)
+      (expect 'remoto--debounce :to-have-been-called)))
+
+  (it "populates cache via async callback"
+    (spy-on 'remoto--debounce :and-call-fake (lambda (_key fn) (funcall fn)))
+    (spy-on 'remoto--api-async :and-call-fake
+            (lambda (_endpoint callback)
+              (funcall callback '((items . (((name . "linux"))
+                                            ((name . "libfdt"))))))))
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (remoto-min-search-chars 3))
       (remoto--search-owner-repos "torvalds" "lin")
-      (remoto--search-owner-repos "torvalds" "lin")
-      (expect call-count :to-equal 1)))
+      ;; Cache now populated
+      (expect (remoto--search-owner-repos "torvalds" "lin")
+              :to-equal '("linux" "libfdt"))))
+
+  (it "returns cached results without async call"
+    (spy-on 'remoto--debounce)
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (remoto-min-search-chars 3))
+      (puthash "\0repos:torvalds/lin"
+               (cons (float-time) '("linux" "libfdt"))
+               remoto--search-cache)
+      (expect (remoto--search-owner-repos "torvalds" "lin")
+              :to-equal '("linux" "libfdt"))
+      (expect 'remoto--debounce :not :to-have-been-called)))
 
   (it "narrows cached results for longer query"
+    (spy-on 'remoto--debounce)
     (let ((remoto--search-cache (make-hash-table :test 'equal))
-          (call-count 0))
-      (spy-on 'remoto--api :and-call-fake
-              (lambda (_endpoint)
-                (setq call-count (1+ call-count))
-                '((items . (((name . "linux"))
-                            ((name . "libfdt")))))))
-      (remoto--search-owner-repos "torvalds" "li")
+          (remoto-min-search-chars 3))
+      ;; Seed with shorter query
+      (puthash "\0repos:torvalds/li"
+               (cons (float-time) '("linux" "libfdt"))
+               remoto--search-cache)
       (let ((result (remoto--search-owner-repos "torvalds" "lin")))
         (expect result :to-equal '("linux"))
-        (expect call-count :to-equal 1)))))
+        (expect 'remoto--debounce :not :to-have-been-called)))))
 
 (describe "remoto--get-authenticated-user"
   (it "returns login from /user endpoint"
@@ -1994,6 +2008,7 @@ Returns the full path after completion, or INPUT if no completion."
   (it "completes unique issue number"
     (spy-on 'remoto--fetch-issues :and-return-value
             '(((number . 42) (title . "Bug"))))
+    (spy-on 'remoto--fetch-issue :and-return-value nil)
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
       (expect (remoto-test--tab-complete "/github:foo/bar#4")
               :to-equal "/github:foo/bar#42")))
@@ -2316,6 +2331,137 @@ Returns the full path after completion, or INPUT if no completion."
               (lambda (_endpoint) (error "Connection refused")))
       (expect (remoto--fetch-file-commits "o" "r" "main" "" '("f.el"))
               :to-be nil))))
+
+;;; Async completion infrastructure
+
+(describe "remoto--debounce"
+  (it "calls run-with-idle-timer with configured delay"
+    (spy-on 'run-with-idle-timer)
+    (spy-on 'cancel-timer)
+    (let ((remoto-debounce-delay 0.5)
+          (remoto--debounce-timer nil)
+          (remoto--debounce-key nil)
+          (remoto--async-generation 0))
+      (remoto--debounce "key1" #'ignore)
+      (expect 'run-with-idle-timer :to-have-been-called)
+      (let ((args (spy-calls-args-for 'run-with-idle-timer 0)))
+        (expect (nth 0 args) :to-equal 0.5))))
+
+  (it "cancels previous timer when key changes"
+    (let* ((fake-timer (list 'timer))
+           (remoto--debounce-timer fake-timer)
+           (remoto--debounce-key "old-key")
+           (remoto--async-generation 0)
+           (remoto-debounce-delay 0.3))
+      (spy-on 'cancel-timer)
+      (spy-on 'run-with-idle-timer :and-return-value (list 'new-timer))
+      (remoto--debounce "new-key" #'ignore)
+      (expect 'cancel-timer :to-have-been-called-with fake-timer)))
+
+  (it "keeps existing timer when same key is re-submitted"
+    (let* ((fake-timer (list 'timer))
+           (remoto--debounce-timer fake-timer)
+           (remoto--debounce-key "same-key")
+           (remoto--async-generation 5)
+           (remoto-debounce-delay 0.3))
+      (spy-on 'cancel-timer)
+      (spy-on 'run-with-idle-timer)
+      (remoto--debounce "same-key" #'ignore)
+      ;; Should not cancel or reschedule
+      (expect 'cancel-timer :not :to-have-been-called)
+      (expect 'run-with-idle-timer :not :to-have-been-called)
+      ;; Generation should not change
+      (expect remoto--async-generation :to-equal 5)))
+
+  (it "increments async generation on each new key"
+    (let ((remoto--debounce-timer nil)
+          (remoto--debounce-key nil)
+          (remoto--async-generation 5)
+          (remoto-debounce-delay 0.3))
+      (spy-on 'run-with-idle-timer :and-return-value 'fake-timer)
+      (spy-on 'cancel-timer)
+      (remoto--debounce "key1" #'ignore)
+      (expect remoto--async-generation :to-equal 6)
+      ;; Same key - no increment (timer still pending)
+      (remoto--debounce "key1" #'ignore)
+      (expect remoto--async-generation :to-equal 6)
+      ;; Different key - cancels old, increments
+      (remoto--debounce "key2" #'ignore)
+      (expect remoto--async-generation :to-equal 7))))
+
+(describe "remoto--api-async"
+  (it "delegates to ghub-get with :callback"
+    (spy-on 'ghub-get)
+    (let ((remoto--auth-failed nil)
+          (remoto-github-auth nil)
+          (remoto--authenticated-user "testuser"))
+      (remoto--api-async "search/users?q=foo" #'ignore)
+      (expect 'ghub-get :to-have-been-called)))
+
+  (it "uses auth=none when auth has failed"
+    (spy-on 'ghub-get)
+    (let ((remoto--auth-failed t))
+      (remoto--api-async "user" #'ignore)
+      (let ((args (spy-calls-args-for 'ghub-get 0)))
+        (expect (plist-get (cddr args) :auth) :to-equal 'none))))
+
+  (it "passes nil auth for default ghub token when authenticated"
+    (spy-on 'ghub-get)
+    (let ((remoto--auth-failed nil)
+          (remoto-github-auth nil)
+          (remoto--authenticated-user "testuser"))
+      (remoto--api-async "user/orgs" #'ignore)
+      (let ((args (spy-calls-args-for 'ghub-get 0)))
+        ;; nil auth lets ghub use its default token mechanism
+        (expect (plist-get (cddr args) :auth) :to-be nil)))))
+
+(describe "remoto--search-cache-get with custom TTL"
+  (it "respects custom TTL parameter"
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (remoto-search-cache-ttl 300))
+      ;; Entry 10 seconds old
+      (puthash "key" (cons (- (float-time) 10) '("val"))
+               remoto--search-cache)
+      ;; Default TTL (300s) - should be fresh
+      (expect (car (remoto--search-cache-get "key")) :to-be-truthy)
+      ;; Custom short TTL (5s) - should be expired
+      (expect (car (remoto--search-cache-get "key" 5)) :to-be nil))))
+
+(describe "remoto--recent-owner-repos"
+  (it "returns nil on cache miss and schedules async"
+    (spy-on 'remoto--debounce)
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (remoto-repo-cache-ttl 1800))
+      (expect (remoto--recent-owner-repos "torvalds") :to-be nil)
+      (expect 'remoto--debounce :to-have-been-called)))
+
+  (it "returns cached repos immediately"
+    (spy-on 'remoto--debounce)
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (remoto-repo-cache-ttl 1800)
+          (remoto-search-cache-ttl 300))
+      (puthash "\0repos-recent:torvalds"
+               (cons (float-time) '("linux" "uemacs"))
+               remoto--search-cache)
+      (expect (remoto--recent-owner-repos "torvalds")
+              :to-equal '("linux" "uemacs"))
+      ;; Should not schedule async since cache is fresh
+      (expect 'remoto--debounce :not :to-have-been-called)))
+
+  (it "schedules background refresh for stale-but-usable cache"
+    (spy-on 'remoto--debounce)
+    (let ((remoto--search-cache (make-hash-table :test 'equal))
+          (remoto-repo-cache-ttl 1800)
+          (remoto-search-cache-ttl 300))
+      ;; Cache entry older than short TTL but within repo TTL
+      (puthash "\0repos-recent:torvalds"
+               (cons (- (float-time) 600) '("linux" "uemacs"))
+               remoto--search-cache)
+      (let ((result (remoto--recent-owner-repos "torvalds")))
+        ;; Returns stale results immediately
+        (expect result :to-equal '("linux" "uemacs"))
+        ;; But also schedules background refresh
+        (expect 'remoto--debounce :to-have-been-called)))))
 
 (provide 'remoto-tests)
 

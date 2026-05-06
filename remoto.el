@@ -681,36 +681,33 @@ Levels: `root', `owner', `repo' (branches/tags), `files-default', `issues'."
 Handles multiple levels: user search at /github:, repo listing at
 /github:OWNER/, branch/tag at /github:OWNER/REPO@, files at
 /github:OWNER/REPO/, issues at /github:OWNER/REPO#, and file
-listing within a repo.  Network calls are wrapped in
-`while-no-input' so typing interrupts pending API requests
-instead of blocking Emacs."
+listing within a repo.  Search-level calls (user, repo) are
+non-blocking: cached results are returned immediately while async
+fetches populate the cache in the background."
   (if-let* ((partial (remoto--parse-partial-github-path directory)))
       (pcase (plist-get partial :level)
         ('root
          ;; Empty query + authenticated: show user + orgs
-         ;; Non-empty: search users/orgs matching FILE
+         ;; Non-empty: search users/orgs matching FILE (non-blocking)
          (if (string-empty-p file)
              (when-let* ((user remoto--authenticated-user))
                (let* ((orgs (remoto--fetch-user-orgs user))
                       (all (cons (propertize user 'remoto-acct-type "User") orgs)))
                  (mapcar (lambda (u) (concat u "/")) all)))
-           (let ((result (while-no-input (remoto--search-users file))))
-             (when (listp result)
-               (let ((filtered (thread-last result
-                                 (seq-filter (lambda (u) (string-prefix-p file u))))))
-                 ;; Pre-fetch repos for the top match so the cache is
-                 ;; warm by the time the user types "/"
-                 (when-let* ((top (car filtered)))
-                   (remoto--prefetch-owner-repos top))
-                 (mapcar (lambda (u) (concat u "/")) filtered))))))
+           (when-let* ((result (remoto--search-users file)))
+             (let ((filtered (seq-filter (lambda (u) (string-prefix-p file u))
+                                         result)))
+               ;; Pre-fetch repos for the top match so the cache is
+               ;; warm by the time the user types "/"
+               (when-let* ((top (car filtered)))
+                 (remoto--prefetch-owner-repos top))
+               (mapcar (lambda (u) (concat u "/")) filtered)))))
         ('owner
-         ;; Repo completion at /github:OWNER/
-         (let* ((owner (plist-get partial :owner))
-                (result (while-no-input
-                          (if (string-empty-p file)
-                              (remoto--recent-owner-repos owner)
-                            (remoto--search-owner-repos owner file)))))
-           (when (listp result) result)))
+         ;; Repo completion at /github:OWNER/ (non-blocking)
+         (let ((owner (plist-get partial :owner)))
+           (if (string-empty-p file)
+               (remoto--recent-owner-repos owner)
+             (remoto--search-owner-repos owner file))))
         ('repo
          ;; Branch + tag completion at /github:OWNER/REPO@
          (if (string-suffix-p ":" file)
@@ -743,8 +740,10 @@ instead of blocking Emacs."
          ;; recursive tree fetch for fast initial display.
          (let* ((owner (plist-get partial :owner))
                 (repo (plist-get partial :repo))
-                (branch (while-no-input
-                          (remoto--default-branch owner repo))))
+                (branch (condition-case nil
+                            (while-no-input
+                              (remoto--default-branch owner repo))
+                          (user-error nil))))
            (when (and (stringp branch) (not (equal branch t)))
              ;; Extract subpath from directory after owner/repo/
              (let* ((repo-end (string-match
@@ -824,7 +823,7 @@ instead of blocking Emacs."
                          (cond
                           ((and a-pr (not b-pr)) t)
                           ((and (not a-pr) b-pr) nil)
-                          (t (> (string-to-number a) (string-to-number b))))))))))))
+                          (t (< (string-to-number b) (string-to-number a))))))))))))
     ;; Full canonical path - existing behavior
     (when-let* ((parsed (remoto--parse-path directory)))
       (let* ((owner (remoto-path-owner parsed))
@@ -1401,23 +1400,114 @@ Set to 0 to disable caching."
   :type 'integer
   :group 'remoto)
 
-(defun remoto--search-cache-get (key)
+(defcustom remoto-debounce-delay 0.3
+  "Seconds of idle time before firing an async search request.
+Lower values feel more responsive but generate more API calls."
+  :type 'number
+  :group 'remoto)
+
+(defcustom remoto-min-search-chars 3
+  "Minimum characters before searching users or repos.
+Prevents premature API requests while typing short prefixes."
+  :type 'integer
+  :group 'remoto)
+
+(defcustom remoto-repo-cache-ttl 1800
+  "Seconds before repo list cache entries expire.
+Repo lists change infrequently, so a longer TTL (default 30 min)
+avoids repeated fetches during a session."
+  :type 'integer
+  :group 'remoto)
+
+(defvar remoto--debounce-timer nil
+  "Active idle timer for debounced async searches.")
+
+(defvar remoto--debounce-key nil
+  "Key identifying the currently pending debounce.
+When a new debounce request arrives with the same key, the
+existing timer is kept rather than cancelled and rescheduled.
+This prevents completion frameworks (vertico, icomplete) from
+starving the async fetch by re-calling the completion function
+on every `post-command-hook' cycle.")
+
+(defvar remoto--async-generation 0
+  "Monotonic counter for invalidating stale async callbacks.
+Incremented on each new debounce schedule; callbacks whose
+captured generation doesn't match the current value are stale
+and skip UI refresh (but still cache their results).")
+
+(defun remoto--search-cache-get (key &optional ttl)
   "Return cached results for KEY if not expired.
+TTL overrides `remoto-search-cache-ttl' when provided.
 Returns two values via list: (HIT-P RESULTS).  HIT-P is non-nil
 when KEY was found and not expired.  RESULTS may be nil for
 queries that returned zero results."
-  (if-let* ((entry (gethash key remoto--search-cache))
-            (timestamp (car entry))
-            (fresh-p (or (zerop remoto-search-cache-ttl)
-                         (< (- (float-time) timestamp) remoto-search-cache-ttl))))
-      (list t (cdr entry))
-    (when entry (remhash key remoto--search-cache))
-    '(nil nil)))
+  (let ((cache-ttl (or ttl remoto-search-cache-ttl)))
+    (if-let* ((entry (gethash key remoto--search-cache))
+              (timestamp (car entry))
+              (fresh-p (or (zerop cache-ttl)
+                           (< (- (float-time) timestamp) cache-ttl))))
+        (list t (cdr entry))
+      (when entry (remhash key remoto--search-cache))
+      '(nil nil))))
 
 (defun remoto--search-cache-put (key results)
   "Store RESULTS for KEY with current timestamp."
   (puthash key (cons (float-time) results) remoto--search-cache)
   results)
+
+(defun remoto--api-async (endpoint callback)
+  "Call GitHub REST API ENDPOINT asynchronously via ghub.
+CALLBACK receives the parsed JSON response. Errors are silently
+dropped since async callers can't meaningfully handle them in the
+completion context. Auth mirrors `remoto--api': nil lets ghub use
+its default token, `none' skips auth entirely."
+  (let* ((resource (concat "/" endpoint))
+         (auth (if remoto--auth-failed 'none remoto-github-auth)))
+    (condition-case nil
+        (let ((inhibit-message t))
+          (ghub-get resource nil
+                    :auth auth
+                    :reader #'remoto--json-reader
+                    :callback callback
+                    :errorback (lambda (_err _headers _status _req)
+                                 nil)))
+      (error nil))))
+
+(defun remoto--debounce (key fn)
+  "Schedule FN after `remoto-debounce-delay' seconds of idle time.
+KEY identifies this request; if a timer is already pending for
+the same KEY, it is kept as-is (no cancel/reschedule).  A
+different KEY cancels the old timer and schedules a new one."
+  (unless (and remoto--debounce-timer
+               (equal key remoto--debounce-key))
+    (when remoto--debounce-timer
+      (cancel-timer remoto--debounce-timer))
+    (setq remoto--debounce-key key)
+    (cl-incf remoto--async-generation)
+    (let ((gen remoto--async-generation))
+      (setq remoto--debounce-timer
+            (run-with-idle-timer
+             remoto-debounce-delay nil
+             (lambda ()
+               (setq remoto--debounce-timer nil
+                     remoto--debounce-key nil)
+               (when (= gen remoto--async-generation)
+                 (funcall fn))))))))
+
+(defun remoto--refresh-minibuffer-completions ()
+  "Refresh the active minibuffer's completion display.
+Called from async callbacks after updating the cache. Invalidates
+the sorted-completions cache and re-triggers the completion
+framework's display hook (works with vertico, icomplete, default)."
+  (run-at-time
+   0 nil
+   (lambda ()
+     (when-let* ((win (active-minibuffer-window)))
+       (with-selected-window win
+         (when (boundp 'completion-all-sorted-completions)
+           (setq completion-all-sorted-completions nil))
+         (run-hooks 'post-command-hook))))))
 
 (defun remoto--search-query (input)
   "Build a GitHub search query string from INPUT.
@@ -1565,130 +1655,190 @@ Returns propertized login strings with type and description."
 
 
 (defun remoto--search-users (prefix)
-  "Search GitHub users/orgs matching PREFIX, cached with TTL.
-Returns a list of login strings. Requires at least 2 characters.
-Uses client-side narrowing when a parent query is cached."
-  (when (<= 2 (length prefix))
-    (let ((prefix-down (downcase prefix)))
-      ;; Check exact cache hit
-      (pcase-let ((`(,hit ,results) (remoto--search-cache-get
-                                      (concat "\0users:" prefix-down))))
-        (if hit results
-          ;; Try narrowing from a shorter cached query
-          (let ((narrowed
-                 (cl-loop for key being the hash-keys of remoto--users-cache
-                          for entry = (gethash key remoto--users-cache)
-                          when (and entry
-                                    (string-prefix-p key prefix-down)
-                                    (< (length key) (length prefix-down))
-                                    (or (zerop remoto-search-cache-ttl)
-                                        (< (- (float-time) (car entry))
-                                           remoto-search-cache-ttl)))
-                          return (seq-filter
-                                  (lambda (u)
-                                    (string-prefix-p prefix-down (downcase u)))
-                                  (cdr entry)))))
-            (if narrowed
-                (progn
-                  (puthash (concat "\0users:" prefix-down)
-                           (cons (float-time) narrowed)
-                           remoto--search-cache)
-                  narrowed)
-              ;; Fetch from API
-              (condition-case nil
-                  (let* ((endpoint (format "search/users?q=%s&per_page=30"
-                                           (url-hexify-string prefix)))
-                         (items (alist-get 'items (remoto--api endpoint)))
+  "Search GitHub users/orgs matching PREFIX, never blocking.
+Returns cached or locally-narrowed results immediately. On cache
+miss, schedules a debounced async fetch and returns nil; the
+completion UI refreshes when results arrive.
+Requires at least `remoto-min-search-chars' characters."
+  (when-let* (((<= remoto-min-search-chars (length prefix)))
+              (prefix-down (downcase prefix)))
+    ;; Check exact cache hit
+    (pcase-let ((`(,hit ,results) (remoto--search-cache-get
+                                    (concat "\0users:" prefix-down))))
+      (if hit results
+        ;; Try narrowing from a shorter cached query
+        (let ((narrowed
+               (cl-loop for key being the hash-keys of remoto--users-cache
+                        for entry = (gethash key remoto--users-cache)
+                        when (and entry
+                                  (string-prefix-p key prefix-down)
+                                  (< (length key) (length prefix-down))
+                                  (or (zerop remoto-search-cache-ttl)
+                                      (< (- (float-time) (car entry))
+                                         remoto-search-cache-ttl)))
+                        return (seq-filter
+                                (lambda (u)
+                                  (string-prefix-p prefix-down (downcase u)))
+                                (cdr entry)))))
+          (if narrowed
+              (progn
+                (puthash (concat "\0users:" prefix-down)
+                         (cons (float-time) narrowed)
+                         remoto--search-cache)
+                narrowed)
+            ;; Schedule async fetch instead of blocking
+            (remoto--debounce
+             (concat "\0users:" prefix-down)
+             (lambda ()
+               (remoto--api-async
+                (format "search/users?q=%s&per_page=30"
+                        (url-hexify-string prefix))
+                (lambda (data)
+                  (let* ((items (alist-get 'items data))
                          (results (mapcar (lambda (item)
-                                            (propertize
-                                             (alist-get 'login item)
-                                             'remoto-acct-type
-                                             (or (alist-get 'type item) "")))
-                                          items)))
+                                           (propertize
+                                            (alist-get 'login item)
+                                            'remoto-acct-type
+                                            (or (alist-get 'type item) "")))
+                                         items)))
                     (puthash prefix-down (cons (float-time) results)
                              remoto--users-cache)
                     (puthash (concat "\0users:" prefix-down)
                              (cons (float-time) results)
                              remoto--search-cache)
-                    results)
-                (user-error nil)))))))))
+                    (remoto--refresh-minibuffer-completions))))))
+            nil))))))
 
 (defvar remoto--prefetch-timer nil
   "Idle timer for speculative repo pre-fetching.")
 
 (defun remoto--prefetch-owner-repos (owner)
-  "Pre-fetch recent repos for OWNER on idle, warming the cache.
-Cancels any previously scheduled pre-fetch."
+  "Pre-fetch recent repos for OWNER asynchronously.
+Cancels any previously scheduled pre-fetch. Uses the async API
+so it never blocks typing."
   (when remoto--prefetch-timer
     (cancel-timer remoto--prefetch-timer))
-  (setq remoto--prefetch-timer
-        (run-with-idle-timer
-         0.001 nil
-         (lambda ()
-           (setq remoto--prefetch-timer nil)
-           ;; Wrap in while-no-input so typing interrupts the
-           ;; synchronous HTTP call instead of blocking Emacs.
-           (while-no-input
-             (remoto--recent-owner-repos owner))))))
+  (let ((cache-key (format "\0repos-recent:%s" (downcase owner))))
+    (setq remoto--prefetch-timer
+          (run-with-idle-timer
+           0.001 nil
+           (lambda ()
+             (setq remoto--prefetch-timer nil)
+             (let ((q (url-hexify-string (format "user:%s" owner))))
+               (remoto--api-async
+                (format "search/repositories?q=%s&sort=updated&per_page=30" q)
+                (lambda (data)
+                  (let ((repos (mapcar
+                                (lambda (item)
+                                  (propertize (alist-get 'name item)
+                                              'remoto-repo-desc
+                                              (or (alist-get 'description item) "")))
+                                (alist-get 'items data))))
+                    (remoto--search-cache-put cache-key repos))))))))))
 
 (defun remoto--recent-owner-repos (owner)
-  "Fetch recently-updated repos for OWNER, cached with TTL.
-Returns up to 30 repo name strings (propertized with description),
-sorted by last push."
+  "Return cached recent repos for OWNER, scheduling async refresh.
+Uses `remoto-repo-cache-ttl' for longer caching. Returns cached
+results immediately (may be nil on first access); an async fetch
+updates the cache and refreshes the completion UI."
   (let* ((cache-key (format "\0repos-recent:%s" (downcase owner))))
-    (pcase-let ((`(,hit ,results) (remoto--search-cache-get cache-key)))
-      (if hit results
-        (condition-case nil
-            (let* ((q (url-hexify-string (format "user:%s" owner)))
-                   (endpoint (format "search/repositories?q=%s&sort=updated&per_page=30" q))
-                   (items (alist-get 'items (remoto--api endpoint)))
-                   (repos (mapcar (lambda (item)
-                                    (propertize (alist-get 'name item)
-                                                'remoto-repo-desc
-                                                (or (alist-get 'description item) "")))
-                                  items)))
-              (remoto--search-cache-put cache-key repos))
-          (user-error nil))))))
+    (pcase-let ((`(,hit ,results) (remoto--search-cache-get
+                                    cache-key remoto-repo-cache-ttl)))
+      (if hit
+          ;; Cache hit - return immediately, schedule background refresh
+          ;; if cache is older than the short TTL (stale but usable)
+          (let ((entry (gethash cache-key remoto--search-cache)))
+            (when (and entry
+                       (< remoto-search-cache-ttl (- (float-time) (car entry))))
+              (remoto--async-refresh-recent-repos owner cache-key))
+            results)
+        ;; Cache miss - schedule async fetch, return nil
+        (remoto--async-refresh-recent-repos owner cache-key)
+        nil))))
+
+(defun remoto--async-refresh-recent-repos (owner cache-key)
+  "Fire async fetch of OWNER's recent repos, updating CACHE-KEY."
+  (remoto--debounce
+   cache-key
+   (lambda ()
+     (let ((q (url-hexify-string (format "user:%s" owner))))
+       (remoto--api-async
+        (format "search/repositories?q=%s&sort=updated&per_page=30" q)
+        (lambda (data)
+          (let ((repos (mapcar (lambda (item)
+                                 (propertize (alist-get 'name item)
+                                             'remoto-repo-desc
+                                             (or (alist-get 'description item) "")))
+                               (alist-get 'items data))))
+            (remoto--search-cache-put cache-key repos)
+            (remoto--refresh-minibuffer-completions))))))))
 
 (defun remoto--search-owner-repos (owner query)
-  "Search OWNER's repos matching QUERY via GitHub search API.
-Returns repo names. Requires at least 2 characters in QUERY.
-Uses client-side narrowing when a parent query is cached."
-  (when (<= 2 (length query))
+  "Search OWNER's repos matching QUERY, never blocking.
+Returns cached or locally-narrowed results immediately. On cache
+miss, schedules a debounced async fetch and returns nil.
+Requires at least `remoto-min-search-chars' characters in QUERY.
+Also narrows from the recent-repos cache when available."
+  (if (< (length query) remoto-min-search-chars)
+      ;; Below threshold: try narrowing from the recent-repos cache
+      (when-let* ((recent-key (format "\0repos-recent:%s" (downcase owner)))
+                  (entry (gethash recent-key remoto--search-cache))
+                  ((or (zerop remoto-repo-cache-ttl)
+                       (< (- (float-time) (car entry)) remoto-repo-cache-ttl))))
+        (seq-filter (lambda (r) (string-search (downcase query) (downcase r)))
+                    (cdr entry)))
     (let* ((owner-down (downcase owner))
-           (query-down (downcase query))
-           (cache-key (format "\0repos:%s/%s" owner-down query-down)))
-      (pcase-let ((`(,hit ,results) (remoto--search-cache-get cache-key)))
-        (if hit results
-          ;; Try narrowing from a shorter cached query for same owner
-          (let ((narrowed
-                 (cl-loop for len from (1- (length query-down)) downto 2
-                          for prefix = (substring query-down 0 len)
-                          for pk = (format "\0repos:%s/%s" owner-down prefix)
-                          for entry = (gethash pk remoto--search-cache)
-                          when (and entry
-                                    (or (zerop remoto-search-cache-ttl)
-                                        (< (- (float-time) (car entry))
-                                           remoto-search-cache-ttl)))
-                          return (seq-filter
-                                  (lambda (r)
-                                    (string-search query-down (downcase r)))
-                                  (cdr entry)))))
-            (if narrowed
-                (remoto--search-cache-put cache-key narrowed)
-              ;; Fetch from API
-              (condition-case nil
-                  (let* ((q (url-hexify-string
-                            (format "%s in:name user:%s" query owner)))
-                         (endpoint (format "search/repositories?q=%s&per_page=100" q))
-                         (items (alist-get 'items (remoto--api endpoint)))
-                         (repos (mapcar (lambda (item)
-                                          (propertize (alist-get 'name item)
-                                                      'remoto-repo-desc
-                                                      (or (alist-get 'description item) "")))
-                                        items)))
-                    (remoto--search-cache-put cache-key repos))
-                (user-error nil)))))))))
+         (query-down (downcase query))
+         (cache-key (format "\0repos:%s/%s" owner-down query-down)))
+    (pcase-let ((`(,hit ,results) (remoto--search-cache-get cache-key)))
+      (if hit results
+        ;; Try narrowing from a shorter search query cache (reliable)
+        (let ((search-narrowed
+               (cl-loop for len from (1- (length query-down)) downto 1
+                        for prefix = (substring query-down 0 len)
+                        for pk = (format "\0repos:%s/%s" owner-down prefix)
+                        for entry = (gethash pk remoto--search-cache)
+                        when (and entry
+                                  (or (zerop remoto-search-cache-ttl)
+                                      (< (- (float-time) (car entry))
+                                         remoto-search-cache-ttl)))
+                        return (seq-filter
+                                (lambda (r)
+                                  (string-search query-down (downcase r)))
+                                (cdr entry)))))
+          (if search-narrowed
+              ;; Narrowed from a real search result - reliable, cache it
+              (remoto--search-cache-put cache-key search-narrowed)
+            ;; No search cache to narrow from. Show preview from
+            ;; recent-repos (if any) but always schedule the real
+            ;; search since recent-repos is only 30 items.
+            (let ((preview
+                   (when-let* ((recent-key (format "\0repos-recent:%s" owner-down))
+                               (entry (gethash recent-key remoto--search-cache))
+                               ((or (zerop remoto-repo-cache-ttl)
+                                    (< (- (float-time) (car entry))
+                                       remoto-repo-cache-ttl))))
+                     (seq-filter (lambda (r)
+                                   (string-search query-down (downcase r)))
+                                 (cdr entry)))))
+              ;; Always schedule async search for full results
+              (remoto--debounce
+               cache-key
+               (lambda ()
+                 (let ((q (url-hexify-string
+                           (format "%s in:name user:%s" query owner))))
+                   (remoto--api-async
+                    (format "search/repositories?q=%s&per_page=100" q)
+                    (lambda (data)
+                      (let ((repos (mapcar (lambda (item)
+                                            (propertize (alist-get 'name item)
+                                                        'remoto-repo-desc
+                                                        (or (alist-get 'description item) "")))
+                                          (alist-get 'items data))))
+                        (remoto--search-cache-put cache-key repos)
+                        (remoto--refresh-minibuffer-completions)))))))
+              ;; Return preview immediately (may be nil)
+              preview))))))))
 
 (defun remoto--get-authenticated-user ()
   "Return the GitHub login of the authenticated user, or nil.
@@ -1720,32 +1870,39 @@ Returns owner/repo@branch candidates matching the prefix after @."
           (mapcar (lambda (b) (format "%s@%s" repo-part b))))))))
 
 (defun remoto--search-repos-fetch (query)
-  "Fetch or retrieve cached repo search results for QUERY.
-Returns a list of owner/repo strings, or nil."
+  "Return cached repo search results for QUERY, never blocking.
+On cache miss, schedules a debounced async fetch and returns nil.
+Requires at least 3 characters."
   (when (<= 3 (length query))
     (if-let* ((cached (remoto--search-cache-get query))
               ((car cached)))
         (cadr cached)
       (if-let* ((parent (remoto--search-repos-from-parent query)))
           (cdr parent)
-        (condition-case nil
-            (let* ((endpoint (format "search/repositories?q=%s&per_page=30"
-                                     (url-hexify-string
-                                      (remoto--search-query query))))
-                   (items (alist-get 'items (remoto--api endpoint)))
-                   (results (mapcar (lambda (item)
-                                     (propertize (alist-get 'full_name item)
-                                                 'remoto-repo-desc
-                                                 (or (alist-get 'description item) "")))
-                                    items)))
-              (remoto--search-cache-put query results))
-          (user-error nil))))))
+        ;; Schedule async fetch instead of blocking
+        (remoto--debounce
+         (concat "\0browse:" query)
+         (lambda ()
+           (remoto--api-async
+            (format "search/repositories?q=%s&per_page=30"
+                    (url-hexify-string (remoto--search-query query)))
+            (lambda (data)
+              (let ((results (mapcar (lambda (item)
+                                      (propertize (alist-get 'full_name item)
+                                                  'remoto-repo-desc
+                                                  (or (alist-get 'description item) "")))
+                                    (alist-get 'items data))))
+                (remoto--search-cache-put query results)
+                (remoto--refresh-minibuffer-completions))))))
+        nil))))
 
 (defun remoto--search-repos-from-parent (query)
   "Try narrowing a cached parent query to answer QUERY.
 Returns (HIT-P . FILTERED-RESULTS) when a parent cache entry
-exists, nil otherwise."
+exists, nil otherwise.  Uses substring matching on the repo
+part (after the slash) to match GitHub's search behavior."
   (when-let* ((slash-pos (string-search "/" query))
+              (repo-part (substring query (1+ slash-pos)))
               (parent-results
                (cl-loop for key being the hash-keys of remoto--search-cache
                         for entry = (remoto--search-cache-get key)
@@ -1754,7 +1911,10 @@ exists, nil otherwise."
                                   (<= slash-pos (length key))
                                   (< (length key) (length query)))
                         return (cadr entry))))
-    (cons t (seq-filter (lambda (name) (string-prefix-p query name))
+    (cons t (seq-filter (lambda (name)
+                          (and (string-prefix-p (substring query 0 (1+ slash-pos)) name)
+                               (or (string-empty-p repo-part)
+                                   (string-search repo-part name))))
                         parent-results))))
 
 (defun remoto--search-repos (query &optional callback)
