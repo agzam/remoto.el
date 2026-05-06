@@ -1934,17 +1934,30 @@ Handles candidates with prefix prepended by completion framework."
           (get-text-property (1- len) prop candidate)
           (get-text-property 0 prop candidate)))))
 
-(defun remoto--align-affixations (items)
-  "Align ITEMS for affixation display.
-ITEMS is a list of (candidate prefix suffix). Pads each candidate
-with spaces so suffixes start at the same column."
-  (let ((max-len (apply #'max 0 (mapcar (lambda (x) (length (car x))) items))))
+(defface remoto-annotation
+  '((t :inherit completions-annotations))
+  "Face for remoto completion annotations.")
+
+(defvar remoto-annotation-width-step 10
+  "Round annotation alignment width up to this step size.")
+
+(defun remoto--affixate (items)
+  "Format ITEMS as affixation triples with aligned suffixes.
+ITEMS is a list of (candidate prefix suffix).
+Uses display property for alignment (works in any completion UI)."
+  (let* ((max-len (apply #'max 0 (mapcar (lambda (x) (length (car x))) items)))
+         (align-to (* (ceiling (/ (float (+ max-len 4))
+                                  remoto-annotation-width-step))
+                      remoto-annotation-width-step)))
     (mapcar (lambda (x)
               (let* ((c (nth 0 x))
                      (prefix (nth 1 x))
-                     (suffix (nth 2 x))
-                     (pad (make-string (+ 2 (- max-len (length c))) ?\s)))
-                (list c prefix (concat pad suffix))))
+                     (suffix (nth 2 x)))
+                (list c prefix
+                      (if (string-empty-p suffix) ""
+                        (concat (propertize " " 'display
+                                            `(space :align-to ,align-to))
+                                (propertize suffix 'face 'remoto-annotation))))))
             items)))
 
 (defun remoto--completion-metadata (directory)
@@ -1960,7 +1973,7 @@ Provides group-function and affixation-function for @ and # modes."
                             "Pull Request"
                           "Issue"))))
           (affix-fn (lambda (candidates)
-                      (remoto--align-affixations
+                      (remoto--affixate
                        (mapcar (lambda (c)
                                  (let ((title (or (remoto--get-prop c 'remoto-issue-title) ""))
                                        (state (or (remoto--get-prop c 'remoto-issue-state) ""))
@@ -1986,7 +1999,7 @@ Provides group-function and affixation-function for @ and # modes."
                           (+ (not (any "/:@#"))) "/" (* nonl) eos)
                       directory))
     (let ((affix-fn (lambda (candidates)
-                      (remoto--align-affixations
+                      (remoto--affixate
                        (mapcar (lambda (c)
                                  (let ((msg (or (remoto--get-prop c 'remoto-file-commit) "")))
                                    (list c "" msg)))
@@ -1995,7 +2008,7 @@ Provides group-function and affixation-function for @ and # modes."
    ;; Owner mode: /github:OWNER/ - repo descriptions
    ((string-match (rx "/github:" (+ (not (any "/:@#"))) "/" eos) directory)
     (let ((affix-fn (lambda (candidates)
-                      (remoto--align-affixations
+                      (remoto--affixate
                        (mapcar (lambda (c)
                                  (let ((desc (or (remoto--get-prop c 'remoto-repo-desc) "")))
                                    (list c "" desc)))
@@ -2004,7 +2017,7 @@ Provides group-function and affixation-function for @ and # modes."
    ;; Root mode: /github: - user/org type
    ((equal directory "/github:")
     (let ((affix-fn (lambda (candidates)
-                      (remoto--align-affixations
+                      (remoto--affixate
                        (mapcar (lambda (c)
                                  (let* ((acct-type (or (remoto--get-prop c 'remoto-acct-type) ""))
                                         (desc (or (remoto--get-prop c 'remoto-acct-desc) ""))

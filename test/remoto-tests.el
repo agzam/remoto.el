@@ -1920,18 +1920,21 @@ Returns the full path after completion, or INPUT if no completion."
       ;; that completion-metadata returns our custom metadata
       (expect (remoto--completion-metadata directory) :not :to-be nil))))
 
-;;; ---- remoto--align-affixations ----
+;;; ---- remoto--affixate ----
 
 (describe "annotation alignment"
-  (it "pads suffixes to align at same column"
+  (it "uses display property for alignment"
     (let ((items '(("short" "" "desc1")
                    ("a-much-longer-name" "" "desc2"))))
-      (let ((result (remoto--align-affixations items)))
-        ;; Both suffixes should start at same position relative to candidate end
-        ;; The short one should have more padding
-        (expect (length (nth 2 (car result)))
-                :to-be-greater-than
-                (length (nth 2 (cadr result))))))))
+      (let ((result (remoto--affixate items)))
+        ;; Both suffixes use (space :align-to N) display property
+        (expect (get-text-property 0 'display (nth 2 (car result)))
+                :to-be-truthy)
+        (expect (get-text-property 0 'display (nth 2 (cadr result)))
+                :to-be-truthy)
+        ;; Suffix text has face applied
+        (expect (get-text-property 1 'face (nth 2 (car result)))
+                :to-equal 'remoto-annotation)))))
 
 ;;; ---- PR ordering in issue completion ----
 
