@@ -426,8 +426,8 @@ Pass remaining ARGS to the resolved handler."
 
 (defun remoto--handle-file-exists-p (filename)
   "Return t if FILENAME exists or is openable.
-Returns nil for paths that are mid-completion (no selection made yet),
-which triggers Emacs's `confirm-nonexistent-file-or-buffer' on RET."
+Returns nil for mid-completion paths (no selection made yet),
+triggering variable `confirm-nonexistent-file-or-buffer' on RET."
   (cond
    ;; /github: and /github:owner/ - directory-like, exist for navigation
    ((string-match (rx bos "/github:" (? "/") eos) filename) t)
