@@ -1836,6 +1836,125 @@ Returns the full path after completion, or INPUT if no completion."
     (let ((remoto--issues-cache (make-hash-table :test 'equal)))
       (expect (remoto--fetch-issues "foo" "nonexistent") :to-be nil))))
 
+;;; ---- find-file-noselect intercepts #NUM paths ----
+
+(describe "find-file-noselect intercepts #NUM paths"
+  (it "routes /github:owner/repo#NUM to remoto-issue-display"
+    (spy-on 'remoto-issue-display :and-return-value (generate-new-buffer "*test*"))
+    (spy-on 'remoto--require-issue)
+    (find-file-noselect "/github:testowner/testrepo#42")
+    (expect 'remoto-issue-display :to-have-been-called-with "42" "/github:testowner/testrepo")
+    (kill-buffer "*test*"))
+
+  (it "does NOT intercept paths without #NUM (passes to orig)"
+    (spy-on 'remoto-issue-display)
+    (spy-on 'remoto--maybe-rewrite :and-return-value "/github:testowner/testrepo@main:/README.md")
+    ;; This would error in real use but we just check issue-display wasn't called
+    (ignore-errors (find-file-noselect "/github:testowner/testrepo@main:/README.md"))
+    (expect 'remoto-issue-display :not :to-have-been-called)))
+
+;;; ---- parse-partial-canonical rejects #NUM paths ----
+
+(describe "parse-partial-canonical rejects # delimiter"
+  (it "returns nil for /github:owner/repo#123"
+    (expect (remoto--parse-partial-canonical "/github:agzam/spacehammer#193") :to-be nil))
+  (it "still parses /github:owner/repo without #"
+    (expect (remoto--parse-partial-canonical "/github:agzam/spacehammer") :not :to-be nil)))
+
+;;; ---- maybe-rewrite preserves #NUM paths ----
+
+(describe "maybe-rewrite preserves #NUM paths"
+  (it "returns /github:owner/repo#NUM unchanged"
+    (expect (remoto--maybe-rewrite "/github:foo/bar#42")
+            :to-equal "/github:foo/bar#42"))
+  (it "returns /github:owner/repo#999 unchanged"
+    (expect (remoto--maybe-rewrite "/github:foo/bar#999")
+            :to-equal "/github:foo/bar#999")))
+
+;;; ---- Completion annotations (affixation-function) ----
+
+(describe "completion annotations"
+  (it "provides repo descriptions at owner level"
+    (let* ((meta (remoto--completion-metadata "/github:testowner/"))
+           (affix-fn (alist-get 'affixation-function meta))
+           (candidate (propertize "myrepo" 'remoto-repo-desc "A cool repo")))
+      (expect affix-fn :not :to-be nil)
+      (let ((result (funcall affix-fn (list candidate))))
+        ;; Should have non-empty suffix
+        (expect (string-match-p "A cool repo" (nth 2 (car result))) :to-be-truthy))))
+
+  (it "provides issue/PR titles at issues level"
+    (let* ((meta (remoto--completion-metadata "/github:foo/bar#"))
+           (affix-fn (alist-get 'affixation-function meta))
+           (candidate (propertize "42" 'remoto-issue-title "Fix bug"
+                                      'remoto-issue-state "open"
+                                      'remoto-issue-pr nil)))
+      (expect affix-fn :not :to-be nil)
+      (let ((result (funcall affix-fn (list candidate))))
+        (expect (string-match-p "Fix bug" (nth 2 (car result))) :to-be-truthy)
+        (expect (string-match-p "open" (nth 2 (car result))) :to-be-truthy))))
+
+  (it "provides group-function for branches/tags"
+    (let* ((meta (remoto--completion-metadata "/github:foo/bar@"))
+           (group-fn (alist-get 'group-function meta))
+           (branch (propertize "main:" 'remoto-ref-type "branch"))
+           (tag (propertize "v1.0:" 'remoto-ref-type "tag")))
+      (expect group-fn :not :to-be nil)
+      (expect (funcall group-fn branch nil) :to-equal "Branch")
+      (expect (funcall group-fn tag nil) :to-equal "Tag")))
+
+  (it "provides user/org type at root level"
+    (let* ((meta (remoto--completion-metadata "/github:"))
+           (affix-fn (alist-get 'affixation-function meta))
+           (user (propertize "agzam/" 'remoto-acct-type "User"))
+           (org (propertize "myorg/" 'remoto-acct-type "Organization")))
+      (expect affix-fn :not :to-be nil)
+      (let ((result (funcall affix-fn (list user org))))
+        (expect (string-match-p "User" (nth 2 (car result))) :to-be-truthy)
+        (expect (string-match-p "Organization" (nth 2 (cadr result))) :to-be-truthy))))
+
+  (it "uses remoto category to avoid marginalia override"
+    (let* ((directory "/github:testowner/"))
+      ;; When metadata is injected, category should be 'remoto
+      ;; This is tested via read-file-name-internal but we can check
+      ;; that completion-metadata returns our custom metadata
+      (expect (remoto--completion-metadata directory) :not :to-be nil))))
+
+;;; ---- remoto--align-affixations ----
+
+(describe "annotation alignment"
+  (it "pads suffixes to align at same column"
+    (let ((items '(("short" "" "desc1")
+                   ("a-much-longer-name" "" "desc2"))))
+      (let ((result (remoto--align-affixations items)))
+        ;; Both suffixes should start at same position relative to candidate end
+        ;; The short one should have more padding
+        (expect (length (nth 2 (car result)))
+                :to-be-greater-than
+                (length (nth 2 (cadr result))))))))
+
+;;; ---- PR ordering in issue completion ----
+
+(describe "PR ordering in issue completion"
+  (it "sorts PRs before issues"
+    (spy-on 'remoto--fetch-issues
+            :and-return-value '(((number . 10) (title . "Bug") (state . "open"))
+                                ((number . 20) (title . "Feature PR") (state . "open")
+                                 (pull_request (url . "http://...")))
+                                ((number . 5) (title . "Another issue") (state . "open"))))
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      (let ((result (remoto--handle-file-name-all-completions "" "/github:foo/bar#")))
+        ;; First should be the PR (number 20)
+        (expect (car result) :to-equal "20")))))
+
+;;; ---- remoto--fetch-user-orgs uses authenticated endpoint ----
+
+(describe "fetch-user-orgs"
+  (it "calls user/orgs endpoint (authenticated)"
+    (spy-on 'remoto--api :and-return-value '(((login . "org1")) ((login . "org2"))))
+    (remoto--fetch-user-orgs "anyone")
+    (expect 'remoto--api :to-have-been-called-with "user/orgs?per_page=100")))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:

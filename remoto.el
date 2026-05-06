@@ -1723,9 +1723,9 @@ to search GitHub repositories."
 Returns a `remoto-path' struct or nil."
   (cond
    ((string-match (rx bos "/github:"
-                      (group (+ (not (any "/:@"))))
+                      (group (+ (not (any "/:@#"))))
                       "/"
-                      (group (+ (not (any "/:@"))))
+                      (group (+ (not (any "/:@#"))))
                       (? "@" (group (+ (not (any "/:")))))
                       eos)
                   input)
@@ -1736,9 +1736,9 @@ Returns a `remoto-path' struct or nil."
      :path "/"))
    ;; Also handle with trailing /
    ((string-match (rx bos "/github:"
-                      (group (+ (not (any "/:@"))))
+                      (group (+ (not (any "/:@#"))))
                       "/"
-                      (group (+ (not (any "/:@"))))
+                      (group (+ (not (any "/:@#"))))
                       (? "@" (group (+ (not (any "/:")))))
                       "/" eos)
                   input)
@@ -1815,14 +1815,16 @@ Call ORIG-FN with DIR-OR-LIST and ARGS after any rewrite."
   "Rewrite GitHub URLs to canonical remoto paths for `find-file'.
 Intercepts #NUM patterns to display issues instead of file operations.
 Call ORIG-FN with FILENAME and ARGS after any rewrite."
-  (let ((rewritten (remoto--maybe-rewrite filename)))
-    (if (string-match (rx "#" (group (+ digit)) eos) rewritten)
-        (progn
-          (remoto--require-issue)
-          (remoto-issue-display
-           (match-string 1 rewritten)
-           (substring rewritten 0 (match-beginning 0))))
-      (apply orig-fn rewritten args))))
+  ;; Check for #NUM BEFORE rewrite (rewrite would mangle the # delimiter)
+  (if (string-match (rx "/github:" (+ (not (any "/@#"))) "/" (+ (not (any "/@#")))
+                        (group "#") (group (+ digit)) eos)
+                    filename)
+      (progn
+        (remoto--require-issue)
+        (remoto-issue-display
+         (match-string 2 filename)
+         (substring filename 0 (match-beginning 1))))
+    (apply orig-fn (remoto--maybe-rewrite filename) args)))
 
 (unless (advice-member-p #'remoto--dired-around-a 'dired)
   (advice-add 'dired :around #'remoto--dired-around-a))
