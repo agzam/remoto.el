@@ -1868,6 +1868,19 @@ Handles candidates with prefix prepended by completion framework."
           (get-text-property (1- len) prop candidate)
           (get-text-property 0 prop candidate)))))
 
+(defun remoto--align-affixations (items)
+  "Align ITEMS for affixation display.
+ITEMS is a list of (candidate prefix suffix). Pads each candidate
+with spaces so suffixes start at the same column."
+  (let ((max-len (apply #'max 0 (mapcar (lambda (x) (length (car x))) items))))
+    (mapcar (lambda (x)
+              (let* ((c (nth 0 x))
+                     (prefix (nth 1 x))
+                     (suffix (nth 2 x))
+                     (pad (make-string (+ 2 (- max-len (length c))) ?\s)))
+                (list c prefix (concat pad suffix))))
+            items)))
+
 (defun remoto--completion-metadata (directory)
   "Return completion metadata alist for DIRECTORY, or nil.
 Provides group-function and affixation-function for @ and # modes."
@@ -1881,14 +1894,15 @@ Provides group-function and affixation-function for @ and # modes."
                             "Pull Request"
                           "Issue"))))
           (affix-fn (lambda (candidates)
-                      (mapcar (lambda (c)
-                                (let ((title (or (remoto--get-prop c 'remoto-issue-title) ""))
-                                      (state (or (remoto--get-prop c 'remoto-issue-state) ""))
-                                      (is-pr (remoto--get-prop c 'remoto-issue-pr)))
-                                  (list c
-                                        (if is-pr "PR " "   ")
-                                        (format " %s [%s]" title state))))
-                              candidates))))
+                      (remoto--align-affixations
+                       (mapcar (lambda (c)
+                                 (let ((title (or (remoto--get-prop c 'remoto-issue-title) ""))
+                                       (state (or (remoto--get-prop c 'remoto-issue-state) ""))
+                                       (is-pr (remoto--get-prop c 'remoto-issue-pr)))
+                                   (list c
+                                         (if is-pr "PR " "   ")
+                                         (format "%s [%s]" title state))))
+                               candidates)))))
       `((group-function . ,group-fn)
         (affixation-function . ,affix-fn))))
    ;; Branches/tags mode: /github:OWNER/REPO@
@@ -1903,26 +1917,25 @@ Provides group-function and affixation-function for @ and # modes."
    ;; Owner mode: /github:OWNER/ - repo descriptions
    ((string-match (rx "/github:" (+ (not (any "/:@#"))) "/" eos) directory)
     (let ((affix-fn (lambda (candidates)
-                      (mapcar (lambda (c)
-                                (let ((desc (or (remoto--get-prop c 'remoto-repo-desc) "")))
-                                  (list c "" (if (string-empty-p desc) ""
-                                               (concat "  " desc)))))
-                              candidates))))
+                      (remoto--align-affixations
+                       (mapcar (lambda (c)
+                                 (let ((desc (or (remoto--get-prop c 'remoto-repo-desc) "")))
+                                   (list c "" desc)))
+                               candidates)))))
       `((affixation-function . ,affix-fn))))
    ;; Root mode: /github: - user/org type
    ((equal directory "/github:")
     (let ((affix-fn (lambda (candidates)
-                      (mapcar (lambda (c)
-                                (let* ((acct-type (or (remoto--get-prop c 'remoto-acct-type) ""))
-                                       (desc (or (remoto--get-prop c 'remoto-acct-desc) ""))
-                                       (suffix (cond
-                                                ((not (string-empty-p desc))
-                                                 (format "  %s  %s" acct-type desc))
-                                                ((not (string-empty-p acct-type))
-                                                 (concat "  " acct-type))
-                                                (t ""))))
-                                  (list c "" suffix)))
-                              candidates))))
+                      (remoto--align-affixations
+                       (mapcar (lambda (c)
+                                 (let* ((acct-type (or (remoto--get-prop c 'remoto-acct-type) ""))
+                                        (desc (or (remoto--get-prop c 'remoto-acct-desc) ""))
+                                        (suffix (cond
+                                                 ((not (string-empty-p desc))
+                                                  (format "%s  %s" acct-type desc))
+                                                 (t acct-type))))
+                                   (list c "" suffix)))
+                               candidates)))))
       `((affixation-function . ,affix-fn))))))
 
 (defun remoto--read-file-name-internal-a (orig string pred action)
