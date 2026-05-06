@@ -652,7 +652,7 @@ instead of blocking Emacs."
          (if (string-empty-p file)
              (when-let* ((user remoto--authenticated-user))
                (let* ((orgs (remoto--fetch-user-orgs user))
-                      (all (cons user orgs)))
+                      (all (cons (propertize user 'remoto-acct-type "User") orgs)))
                  (mapcar (lambda (u) (concat u "/")) all)))
            (let ((result (while-no-input (remoto--search-users file))))
              (when (listp result)
@@ -1450,10 +1450,16 @@ Returns list of comment alists, or nil on error."
 
 (defun remoto--fetch-user-orgs (_user)
   "Fetch organization memberships for the authenticated user.
-Uses /user/orgs which includes private memberships."
+Uses /user/orgs which includes private memberships.
+Returns propertized login strings with type and description."
   (condition-case nil
       (let ((data (remoto--api "user/orgs?per_page=100")))
-        (mapcar (lambda (item) (alist-get 'login item)) data))
+        (mapcar (lambda (item)
+                  (propertize (alist-get 'login item)
+                              'remoto-acct-type "Organization"
+                              'remoto-acct-desc
+                              (or (alist-get 'description item) "")))
+                data))
     (user-error nil)))
 
 
@@ -1493,7 +1499,11 @@ Uses client-side narrowing when a parent query is cached."
                   (let* ((endpoint (format "search/users?q=%s&per_page=30"
                                            (url-hexify-string prefix)))
                          (items (alist-get 'items (remoto--api endpoint)))
-                         (results (mapcar (lambda (item) (alist-get 'login item))
+                         (results (mapcar (lambda (item)
+                                            (propertize
+                                             (alist-get 'login item)
+                                             'remoto-acct-type
+                                             (or (alist-get 'type item) "")))
                                           items)))
                     (puthash prefix-down (cons (float-time) results)
                              remoto--users-cache)
@@ -1842,12 +1852,20 @@ repo listings."
   (push (cons remoto--handler-regexp #'remoto-file-name-handler)
         file-name-handler-alist))
 
+;; Register completion styles for our category so filtering works
+;; like file-name completion (partial-completion understands path separators).
+(add-to-list 'completion-category-defaults
+             '(remoto (styles partial-completion basic)))
+
 (defun remoto--get-prop (candidate prop)
-  "Get text property PROP from CANDIDATE, searching from end.
+  "Get text property PROP from CANDIDATE.
+Searches from the end backwards, skipping trailing delimiters.
 Handles candidates with prefix prepended by completion framework."
   (let ((len (length candidate)))
     (when (< 0 len)
-      (or (get-text-property (1- len) prop candidate)
+      ;; Try near end (skip trailing / : characters which lack props)
+      (or (and (< 1 len) (get-text-property (- len 2) prop candidate))
+          (get-text-property (1- len) prop candidate)
           (get-text-property 0 prop candidate)))))
 
 (defun remoto--completion-metadata (directory)
@@ -1889,6 +1907,21 @@ Provides group-function and affixation-function for @ and # modes."
                                 (let ((desc (or (remoto--get-prop c 'remoto-repo-desc) "")))
                                   (list c "" (if (string-empty-p desc) ""
                                                (concat "  " desc)))))
+                              candidates))))
+      `((affixation-function . ,affix-fn))))
+   ;; Root mode: /github: - user/org type
+   ((equal directory "/github:")
+    (let ((affix-fn (lambda (candidates)
+                      (mapcar (lambda (c)
+                                (let* ((acct-type (or (remoto--get-prop c 'remoto-acct-type) ""))
+                                       (desc (or (remoto--get-prop c 'remoto-acct-desc) ""))
+                                       (suffix (cond
+                                                ((not (string-empty-p desc))
+                                                 (format "  %s  %s" acct-type desc))
+                                                ((not (string-empty-p acct-type))
+                                                 (concat "  " acct-type))
+                                                (t ""))))
+                                  (list c "" suffix)))
                               candidates))))
       `((affixation-function . ,affix-fn))))))
 
