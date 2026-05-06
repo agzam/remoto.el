@@ -67,7 +67,7 @@ The ~/github:~ prefix enables multi-level completion directly in ~find-file~ (~C
 /github:torvalds/linux/        -> files on default branch (with last commit messages)
 /github:torvalds/linux@        -> branches + tags (grouped)
 /github:torvalds/linux@master: -> file-level completion
-/github:torvalds/linux#        -> issues + PRs (with titles, PRs first)
+/github:torvalds/linux#        -> issues + PRs
 #+end_example
 
 Each level shows annotations: repo descriptions, issue/PR titles and state, file commit messages, user/org type. Works with vanilla completion, Vertico, Corfu, etc.

@@ -36,7 +36,11 @@
   (declare (indent 0))
   `(let ((remoto--tree-cache (make-hash-table :test 'equal))
          (remoto--default-branch-cache (make-hash-table :test 'equal))
-         (remoto--content-cache (make-hash-table :test 'equal)))
+         (remoto--content-cache (make-hash-table :test 'equal))
+         (remoto--dir-contents-cache (make-hash-table :test 'equal))
+         (remoto--file-commits-cache (make-hash-table :test 'equal))
+         (remoto--auth-failed nil)
+         (remoto--authenticated-user nil))
      ,@body))
 
 ;;; Low-level API
