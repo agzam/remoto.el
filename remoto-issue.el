@@ -226,9 +226,13 @@ Returns PR alist with merge status, diff stats, review state."
                    latest))
         (insert "\n")))))
 
+(defun remoto-issue--normalize-text (text)
+  "Strip carriage returns from TEXT."
+  (string-replace "\r" "" text))
+
 (defun remoto-issue--render-body (data)
   "Render the body section from DATA."
-  (let ((body (or (alist-get 'body data) "")))
+  (let ((body (remoto-issue--normalize-text (or (alist-get 'body data) ""))))
     (insert "\n")
     (remoto-issue--separator)
     (insert "\n")
@@ -247,7 +251,7 @@ Returns PR alist with merge status, diff stats, review state."
       (let* ((user (alist-get 'user comment))
              (author (or (and user (alist-get 'login user)) "unknown"))
              (date (remoto-issue--format-date (alist-get 'created_at comment)))
-             (body (or (alist-get 'body comment) "")))
+             (body (remoto-issue--normalize-text (or (alist-get 'body comment) ""))))
         (insert (propertize (format "%s - %s" author date)
                             'face 'remoto-issue-comment-header))
         (insert "\n")
