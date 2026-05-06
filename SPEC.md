@@ -375,6 +375,10 @@ Faces: `remoto-topic-title`, `remoto-topic-state-open`, `remoto-topic-state-clos
 
 `remoto-unload-function` removes the handler-alist entry and all advice, clears all caches (tree, default-branch, branches, tags, issues, users, search, content, file-commits).
 
+## Known Technical Debt
+
+- `remoto-browse` and `find-file` completion have parallel dispatch/formatting code. The fetch logic is shared (`remoto--fetch-dir-children-light`, `remoto--fetch-branches`, `remoto--fetch-issues`, etc.), but the mode parsing (`remoto--browse-parse-input` vs `remoto--parse-partial-github-path`) and candidate formatting (full paths vs bare names) are duplicated. A shared dispatcher returning raw candidates per mode, with each UI layer applying its prefix, would eliminate this. Non-trivial because `file-name-all-completions` splits input into `(file directory)` while `completing-read` uses a single string.
+
 ## Limitations
 
 - Read-only. No commits, no pushes, no file modifications.

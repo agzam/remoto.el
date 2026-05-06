@@ -39,6 +39,9 @@
          (remoto--branches-cache (make-hash-table :test 'equal))
          (remoto--search-cache (make-hash-table :test 'equal))
          (remoto--users-cache (make-hash-table :test 'equal))
+         (remoto--dir-contents-cache (make-hash-table :test 'equal))
+         (remoto--file-commits-cache (make-hash-table :test 'equal))
+         (remoto--auth-failed nil)
          (remoto--authenticated-user nil))
      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
      (remoto-test--install-mock-tree)
@@ -707,9 +710,185 @@
     (let ((result (remoto--repo-completion-table "torvalds" nil t)))
       (expect result :to-equal '("torvalds/linux" "torvalds/subsurface"))))
 
-  (it "returns metadata"
-    (expect (remoto--repo-completion-table "" nil 'metadata)
-            :to-equal '(metadata (category . remoto-repo)))))
+  (it "returns metadata with category for plain search"
+    (let ((meta (remoto--repo-completion-table "" nil 'metadata)))
+      (expect (alist-get 'category (cdr meta)) :to-equal 'remoto-browse)))
+
+  (it "returns issue metadata for # mode"
+    (let ((meta (remoto--repo-completion-table "foo/bar#" nil 'metadata)))
+      (expect (alist-get 'group-function (cdr meta)) :to-be-truthy)
+      (expect (alist-get 'affixation-function (cdr meta)) :to-be-truthy)))
+
+  (it "returns branch metadata for @ mode"
+    (let ((meta (remoto--repo-completion-table "foo/bar@" nil 'metadata)))
+      (expect (alist-get 'group-function (cdr meta)) :to-be-truthy)))
+
+  (it "returns issue completions for # delimiter"
+    (spy-on 'remoto--fetch-issues :and-return-value
+            '(((number . 42) (title . "Fix bug") (state . "open"))))
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      (let ((result (remoto--repo-completion-table "foo/bar#" nil t)))
+        (expect (length result) :to-equal 1)
+        (expect (car result) :to-match "#42"))))
+
+  (it "returns branch completions for @ delimiter"
+    (spy-on 'remoto--fetch-branches :and-return-value '("main" "develop"))
+    (spy-on 'remoto--fetch-tags :and-return-value '("v1.0"))
+    (let ((result (remoto--repo-completion-table "foo/bar@" nil t)))
+      (expect (length result) :to-equal 3)
+      (expect (seq-some (lambda (r) (string-match-p "@main" r)) result) :to-be-truthy)
+      (expect (seq-some (lambda (r) (string-match-p "@v1.0" r)) result) :to-be-truthy)))
+
+  (it "filters branches by prefix after @"
+    (spy-on 'remoto--fetch-branches :and-return-value '("main" "develop"))
+    (spy-on 'remoto--fetch-tags :and-return-value nil)
+    (let ((result (remoto--repo-completion-table "foo/bar@dev" nil t)))
+      (expect (length result) :to-equal 1)
+      (expect (car result) :to-match "@develop")))
+
+  (it "issue completions carry text properties"
+    (spy-on 'remoto--fetch-issues :and-return-value
+            '(((number . 99) (title . "Important PR") (state . "open")
+               (pull_request (url . "http://...")))))
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      (let* ((result (remoto--repo-completion-table "foo/bar#" nil t))
+             (c (car result)))
+        (expect (get-text-property 0 'remoto-topic-pr c) :to-be-truthy)
+        (expect (get-text-property 0 'remoto-topic-title c) :to-equal "Important PR"))))
+
+  (it "returns file completions for / delimiter"
+    (spy-on 'remoto--default-branch :and-return-value "main")
+    (spy-on 'remoto--fetch-dir-children-light :and-return-value
+            '(("README.md" . ((type . "blob") (size . 500)))
+              ("src" . ((type . "tree") (size . 0)))))
+    (let ((result (remoto--repo-completion-table "foo/bar/" nil t)))
+      (expect (length result) :to-equal 2)
+      (expect (seq-some (lambda (r) (string-suffix-p "README.md" r)) result)
+              :to-be-truthy)
+      (expect (seq-some (lambda (r) (string-suffix-p "src/" r)) result)
+              :to-be-truthy)))
+
+  (it "search results carry repo descriptions"
+    (spy-on 'remoto--api :and-return-value
+            '((items . (((full_name . "torvalds/linux")
+                         (description . "Linux kernel"))))))
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      (let ((result (remoto--repo-completion-table "torvalds" nil t)))
+        (expect (car result) :to-equal "torvalds/linux")
+        (expect (get-text-property 0 'remoto-repo-desc (car result))
+                :to-equal "Linux kernel")))))
+
+(describe "remoto--browse-parse-input"
+  (it "parses plain search"
+    (pcase-let ((`(,mode ,owner ,repo ,query)
+                 (remoto--browse-parse-input "torvalds")))
+      (expect mode :to-equal 'search)
+      (expect owner :to-be nil)
+      (expect query :to-equal "torvalds")))
+
+  (it "parses @ mode"
+    (pcase-let ((`(,mode ,owner ,repo ,query)
+                 (remoto--browse-parse-input "foo/bar@main")))
+      (expect mode :to-equal 'branches)
+      (expect owner :to-equal "foo")
+      (expect repo :to-equal "bar")
+      (expect query :to-equal "main")))
+
+  (it "parses # mode"
+    (pcase-let ((`(,mode ,owner ,repo ,query)
+                 (remoto--browse-parse-input "foo/bar#42")))
+      (expect mode :to-equal 'issues)
+      (expect owner :to-equal "foo")
+      (expect repo :to-equal "bar")
+      (expect query :to-equal "42")))
+
+  (it "parses empty # query"
+    (pcase-let ((`(,mode ,_o ,_r ,query)
+                 (remoto--browse-parse-input "foo/bar#")))
+      (expect mode :to-equal 'issues)
+      (expect query :to-equal "")))
+
+  (it "parses empty @ query"
+    (pcase-let ((`(,mode ,_o ,_r ,query)
+                 (remoto--browse-parse-input "foo/bar@")))
+      (expect mode :to-equal 'branches)
+      (expect query :to-equal "")))
+
+  (it "parses / mode"
+    (pcase-let ((`(,mode ,owner ,repo ,query)
+                 (remoto--browse-parse-input "foo/bar/")))
+      (expect mode :to-equal 'files)
+      (expect owner :to-equal "foo")
+      (expect repo :to-equal "bar")
+      (expect query :to-equal "")))
+
+  (it "parses / mode with subpath"
+    (pcase-let ((`(,mode ,owner ,repo ,query)
+                 (remoto--browse-parse-input "foo/bar/src/main.el")))
+      (expect mode :to-equal 'files)
+      (expect owner :to-equal "foo")
+      (expect repo :to-equal "bar")
+      (expect query :to-equal "src/main.el")))
+
+  (it "handles repo with dots in # mode"
+    (pcase-let ((`(,mode ,owner ,repo ,query)
+                 (remoto--browse-parse-input "agzam/remoto.el#")))
+      (expect mode :to-equal 'issues)
+      (expect repo :to-equal "remoto.el"))))
+
+(describe "remoto--require-topic"
+  (it "loads remoto-topic from the package directory"
+    (let ((loaded nil))
+      (spy-on 'require :and-call-fake
+              (lambda (feature &rest _) (when (eq feature 'remoto-topic) (setq loaded t))))
+      (let ((featurep-orig (symbol-function 'featurep)))
+        (cl-letf (((symbol-function 'featurep)
+                   (lambda (f &rest r)
+                     (if (eq f 'remoto-topic) nil
+                       (apply featurep-orig f r)))))
+          (remoto--require-topic)
+          (expect loaded :to-be t))))))
+
+(describe "remoto-browse issue dispatch"
+  (it "calls remoto-topic-display for #NUM input"
+    (spy-on 'remoto-topic-display :and-return-value (generate-new-buffer "*test*"))
+    (spy-on 'remoto--require-topic)
+    (remoto-browse "foo/bar#42")
+    (expect 'remoto-topic-display :to-have-been-called-with
+            "42" "/github:foo/bar")
+    (kill-buffer "*test*"))
+
+  (it "opens dired for plain owner/repo"
+    (let ((remoto--default-branch-cache (make-hash-table :test 'equal))
+          (remoto--tree-cache (make-hash-table :test 'equal)))
+      (puthash "torvalds/linux" "master" remoto--default-branch-cache)
+      (spy-on 'remoto--fetch-tree :and-return-value (make-hash-table :test 'equal))
+      (spy-on 'dired)
+      (spy-on 'remoto--tree-entry :and-return-value '((type . "tree")))
+      (remoto-browse "torvalds/linux")
+      (expect 'dired :to-have-been-called)))
+
+  (it "opens dired for owner/repo@ref"
+    (spy-on 'dired)
+    (spy-on 'remoto--tree-entry :and-return-value '((type . "tree")))
+    (remoto-browse "torvalds/linux@v6.5")
+    (expect 'dired :to-have-been-called))
+
+  (it "opens dired for owner/repo/ files mode"
+    (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
+      (spy-on 'dired)
+      (spy-on 'remoto--tree-entry :and-return-value '((type . "tree")))
+      (remoto-browse "testowner/testrepo/")
+      (expect 'dired :to-have-been-called)))
+
+  (it "opens file for owner/repo/path/file.el"
+    (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
+      (spy-on 'find-file)
+      (spy-on 'remoto--tree-entry :and-return-value '((type . "blob")))
+      (remoto-browse "testowner/testrepo/src/main.el")
+      (expect 'find-file :to-have-been-called))))
 
 (describe "remoto--read-repo"
   (it "returns completing-read result directly"
@@ -722,7 +901,37 @@
 
   (it "allows owner/repo@ref as direct input"
     (spy-on 'completing-read :and-return-value "agzam/remoto.el@dont-use-gh")
-    (expect (remoto--read-repo) :to-equal "agzam/remoto.el@dont-use-gh")))
+    (expect (remoto--read-repo) :to-equal "agzam/remoto.el@dont-use-gh"))
+
+  (it "allows owner/repo#NUM as direct input"
+    (spy-on 'completing-read :and-return-value "agzam/remoto.el#42")
+    (expect (remoto--read-repo) :to-equal "agzam/remoto.el#42")))
+
+(describe "remoto--browse-metadata"
+  (it "provides affixation for search mode with repo descriptions"
+    (let ((meta (remoto--browse-metadata "torvalds")))
+      (expect (alist-get 'category (cdr meta)) :to-equal 'remoto-browse)
+      (expect (alist-get 'affixation-function (cdr meta)) :to-be-truthy)))
+
+  (it "affixation shows repo descriptions in search mode"
+    (let* ((meta (remoto--browse-metadata "torvalds"))
+           (affix-fn (alist-get 'affixation-function (cdr meta)))
+           (candidates (list (propertize "torvalds/linux"
+                                         'remoto-repo-desc "Unix-like OS kernel")))
+           (result (funcall affix-fn candidates)))
+      (expect (length result) :to-equal 1)
+      (expect (car (car result)) :to-equal "torvalds/linux")
+      ;; suffix should contain the description
+      (expect (nth 2 (car result)) :to-match "Unix-like OS kernel")))
+
+  (it "provides affixation for issues mode"
+    (let ((meta (remoto--browse-metadata "foo/bar#")))
+      (expect (alist-get 'affixation-function (cdr meta)) :to-be-truthy)
+      (expect (alist-get 'group-function (cdr meta)) :to-be-truthy)))
+
+  (it "provides grouping for branches mode"
+    (let ((meta (remoto--browse-metadata "foo/bar@")))
+      (expect (alist-get 'group-function (cdr meta)) :to-be-truthy))))
 
 ;;; Auth fallback
 
@@ -1446,29 +1655,103 @@ Returns the full path after completion, or INPUT if no completion."
     (expect (remoto--handle-file-exists-p "/github:foobar/zapato#42")
             :to-be t)))
 
+;;; ---- Lightweight directory fetch ----
+
+(describe "remoto--fetch-dir-children-light"
+  (it "fetches top-level directory contents"
+    (spy-on 'remoto--api :and-return-value
+            '(((name . "README.md") (type . "file") (size . 500) (sha . "aaa"))
+              ((name . "src") (type . "dir") (size . 0) (sha . "bbb"))
+              ((name . "Makefile") (type . "file") (size . 200) (sha . "ccc"))))
+    (let ((remoto--dir-contents-cache (make-hash-table :test 'equal)))
+      (let ((children (remoto--fetch-dir-children-light "owner" "repo" "main" "")))
+        (expect (length children) :to-equal 3)
+        (expect (assoc "README.md" children) :to-be-truthy)
+        (expect (assoc "src" children) :to-be-truthy)
+        (expect (equal "tree" (alist-get 'type (cdr (assoc "src" children))))
+                :to-be t))))
+
+  (it "caps results at 20 entries"
+    (let ((many-entries (cl-loop for i from 1 to 30
+                                 collect `((name . ,(format "file%d.el" i))
+                                           (type . "file") (size . 100) (sha . "x")))))
+      (spy-on 'remoto--api :and-return-value many-entries)
+      (let ((remoto--dir-contents-cache (make-hash-table :test 'equal)))
+        (let ((children (remoto--fetch-dir-children-light "owner" "repo" "main" "")))
+          (expect (length children) :to-equal 20)))))
+
+  (it "caches results"
+    (let ((remoto--dir-contents-cache (make-hash-table :test 'equal))
+          (call-count 0))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_endpoint)
+                (setq call-count (1+ call-count))
+                '(((name . "a.el") (type . "file") (size . 10) (sha . "x")))))
+      (remoto--fetch-dir-children-light "owner" "repo" "main" "")
+      (remoto--fetch-dir-children-light "owner" "repo" "main" "")
+      (expect call-count :to-equal 1)))
+
+  (it "returns nil on API error"
+    (spy-on 'remoto--api :and-call-fake
+            (lambda (_) (user-error "not found")))
+    (let ((remoto--dir-contents-cache (make-hash-table :test 'equal)))
+      (expect (remoto--fetch-dir-children-light "owner" "repo" "main" "")
+              :to-be nil)))
+
+  (it "fetches subdirectory contents"
+    (spy-on 'remoto--api :and-return-value
+            '(((name . "main.el") (type . "file") (size . 1000) (sha . "aa"))
+              ((name . "utils.el") (type . "file") (size . 500) (sha . "bb"))))
+    (let ((remoto--dir-contents-cache (make-hash-table :test 'equal)))
+      (let ((children (remoto--fetch-dir-children-light "owner" "repo" "main" "src")))
+        (expect (length children) :to-equal 2)
+        (expect (assoc "main.el" children) :to-be-truthy)))))
+
 ;;; ---- Completion: files-default level ----
 
 (describe "completion at files-default level"
   (it "lists root files for /github:owner/repo/"
     (remoto-test-with-cache
       (spy-on 'remoto--default-branch :and-return-value "main")
+      (spy-on 'remoto--fetch-dir-children-light :and-return-value
+              '(("README.md" (type . "blob") (size . 500))
+                ("src" (type . "tree") (size . 0))
+                ("bin" (type . "tree") (size . 0))))
       (let ((completions (remoto--handle-file-name-all-completions
                           "" "/github:testowner/testrepo/")))
         (expect (member "README.md" completions) :to-be-truthy)
         (expect (member "src/" completions) :to-be-truthy)
         (expect (member "bin/" completions) :to-be-truthy))))
 
-  (it "filters root files by prefix"
+  (it "filters root files by substring match"
     (remoto-test-with-cache
       (spy-on 'remoto--default-branch :and-return-value "main")
+      (spy-on 'remoto--fetch-dir-children-light :and-return-value
+              '(("README.md" (type . "blob") (size . 500))
+                ("src" (type . "tree") (size . 0))
+                ("bin" (type . "tree") (size . 0))))
       (let ((completions (remoto--handle-file-name-all-completions
-                          "s" "/github:testowner/testrepo/")))
+                          "src" "/github:testowner/testrepo/")))
         (expect (member "src/" completions) :to-be-truthy)
         (expect (member "README.md" completions) :not :to-be-truthy))))
+
+  (it "uses substring matching, not prefix"
+    (remoto-test-with-cache
+      (spy-on 'remoto--default-branch :and-return-value "main")
+      (spy-on 'remoto--fetch-dir-children-light :and-return-value
+              '(("README.md" (type . "blob") (size . 500))
+                ("CONTRIBUTING.md" (type . "blob") (size . 200))))
+      (let ((completions (remoto--handle-file-name-all-completions
+                          "ME" "/github:testowner/testrepo/")))
+        ;; Both contain "ME"
+        (expect (member "README.md" completions) :to-be-truthy))))
 
   (it "lists subdirectory files"
     (remoto-test-with-cache
       (spy-on 'remoto--default-branch :and-return-value "main")
+      (spy-on 'remoto--fetch-dir-children-light :and-return-value
+              '(("main.el" (type . "blob") (size . 1000))
+                ("utils.el" (type . "blob") (size . 500))))
       (let ((completions (remoto--handle-file-name-all-completions
                           "" "/github:testowner/testrepo/src/")))
         (expect (member "main.el" completions) :to-be-truthy)
@@ -1477,6 +1760,7 @@ Returns the full path after completion, or INPUT if no completion."
   (it "returns empty for nonexistent subdirectory"
     (remoto-test-with-cache
       (spy-on 'remoto--default-branch :and-return-value "main")
+      (spy-on 'remoto--fetch-dir-children-light :and-return-value nil)
       (let ((completions (remoto--handle-file-name-all-completions
                           "" "/github:testowner/testrepo/nope/")))
         (expect completions :to-be nil))))
@@ -1486,7 +1770,16 @@ Returns the full path after completion, or INPUT if no completion."
       (spy-on 'remoto--default-branch :and-return-value nil)
       (let ((completions (remoto--handle-file-name-all-completions
                           "" "/github:testowner/testrepo/")))
-        (expect completions :to-be nil)))))
+        (expect completions :to-be nil))))
+
+  (it "does not call remoto--ensure-tree (no recursive fetch)"
+    (remoto-test-with-cache
+      (spy-on 'remoto--default-branch :and-return-value "main")
+      (spy-on 'remoto--fetch-dir-children-light :and-return-value
+              '(("a.el" (type . "blob") (size . 10))))
+      (spy-on 'remoto--ensure-tree)
+      (remoto--handle-file-name-all-completions "" "/github:testowner/testrepo/")
+      (expect 'remoto--ensure-tree :not :to-have-been-called))))
 
 ;;; ---- Completion: issues level ----
 
@@ -1576,8 +1869,11 @@ Returns the full path after completion, or INPUT if no completion."
       (expect (remoto-test--complete "/github:testowner/")
               :to-equal '("testrepo"))
 
-      ;; Step 3: list files on default branch
+      ;; Step 3: list files on default branch (uses lightweight Contents API)
       (spy-on 'remoto--default-branch :and-return-value "main")
+      (spy-on 'remoto--fetch-dir-children-light :and-return-value
+              '(("README.md" . ((type . "blob") (size . 500)))
+                ("src" . ((type . "tree") (size . 0)))))
       (let ((completions (remoto-test--complete "/github:testowner/testrepo/")))
         (expect (member "README.md" completions) :to-be-truthy)
         (expect (member "src/" completions) :to-be-truthy))))
@@ -2012,7 +2308,14 @@ Returns the full path after completion, or INPUT if no completion."
                 '(((commit (message . "cached msg"))))))
       (remoto--fetch-file-commits "o" "r" "main" "" '("f.el"))
       (remoto--fetch-file-commits "o" "r" "main" "" '("f.el"))
-      (expect call-count :to-equal 1))))
+      (expect call-count :to-equal 1)))
+
+  (it "catches generic errors from API (not just user-error)"
+    (let ((remoto--file-commits-cache (make-hash-table :test 'equal)))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_endpoint) (error "Connection refused")))
+      (expect (remoto--fetch-file-commits "o" "r" "main" "" '("f.el"))
+              :to-be nil))))
 
 (provide 'remoto-tests)
 
