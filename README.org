@@ -58,17 +58,21 @@ C-x C-f https://github.com/torvalds/linux/blob/master/README RET
 
 *** find-file completion
 
-The ~/github:~ prefix enables multi-level completion directly in ~find-file~ (~C-x C-f~). Type ~/github:~ and then narrow through users, repos, branches, and files:
+The ~/github:~ prefix enables multi-level completion directly in ~find-file~ (~C-x C-f~). Three delimiters after ~owner/repo~ control the mode: ~/~ for files, ~@~ for branches/tags, ~#~ for issues/PRs.
 
 #+begin_example
-/github:tor         -> users/orgs matching "tor" (torvalds/, torgeirhelge/, ...)
-/github:torvalds/   -> repos (linux, subsurface, ...)
-/github:torvalds/lin -> filters repos starting with "lin"
-/github:torvalds/linux@        -> branches (master, ...)
-/github:torvalds/linux@master: -> file-level completion within the repo
+/github:              -> your user + orgs (when authenticated)
+/github:tor           -> users/orgs matching "tor"
+/github:torvalds/     -> repos (with descriptions)
+/github:torvalds/linux/        -> files on default branch (with last commit messages)
+/github:torvalds/linux@        -> branches + tags (grouped)
+/github:torvalds/linux@master: -> file-level completion
+/github:torvalds/linux#        -> issues + PRs (with titles, PRs first)
 #+end_example
 
-Hitting RET on ~/github:owner/repo~ (without ~@branch~) opens the repo with its default branch. User search requires at least 2 characters.
+Each level shows annotations: repo descriptions, issue/PR titles and state, file commit messages, user/org type. Works with vanilla completion, Vertico, Corfu, etc.
+
+Hitting RET on ~/github:owner/repo~ opens the default branch. ~/github:owner/repo#42~ opens an issue/PR display buffer.
 
 *** Canonical paths
 
@@ -79,6 +83,12 @@ The virtual filesystem uses paths of the form:
 #+end_example
 
 ~REF~ is optional - omitting it uses the repo's default branch.
+
+*** Issue/PR display
+
+Opening ~/github:owner/repo#42~ shows a dedicated buffer with the issue or PR content. For PRs: diff stats, branch info, merge status, and review summary. For both: body + comments.
+
+Keybindings in the display buffer: ~b~ (open in browser), ~g~ (refresh).
 
 *** Commands
 
@@ -125,7 +135,7 @@ We can only imagine a world where git's transport layer gives you a browsable fi
 - Timestamps in dired are synthetic (the tree API has no timestamps).
 - Very large repos (100k+ files) use slower per-directory fetching.
 - Rate limit: 5,000 requests/hour (normal browsing stays well within this).
-- Repo completion at ~/github:owner/~ shows the 30 most recently updated repos on empty input. Typing narrows via the GitHub search API.
+- Per-file commit annotations make up to 20 API calls on first directory listing (cached after).
 
 * Changelog
 
