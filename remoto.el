@@ -1911,7 +1911,10 @@ Args: ORIG, STRING, PRED, ACTION."
              (base (funcall orig string pred action))
              (base-alist (and (consp base) (eq (car base) 'metadata) (cdr base))))
         (if extra
-            (cons 'metadata (append extra base-alist))
+            ;; Replace category so Marginalia doesn't override our annotations
+            (cons 'metadata (append extra
+                                    `((category . remoto))
+                                    (assq-delete-all 'category (copy-alist base-alist))))
           (or base (cons 'metadata nil)))))
      ;; Non-standard action (boundaries, etc.) - pass through.
      ((not (memq action '(nil t lambda)))
