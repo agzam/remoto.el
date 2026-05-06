@@ -771,9 +771,9 @@ instead of blocking Emacs."
                                       (title (or (alist-get 'title i) ""))
                                       (state (or (alist-get 'state i) "")))
                                  (propertize num
-                                             'remoto-issue-pr is-pr
-                                             'remoto-issue-title title
-                                             'remoto-issue-state state)))
+                                             'remoto-topic-pr is-pr
+                                             'remoto-topic-title title
+                                             'remoto-topic-state state)))
                              issues))
                     (filtered
                      (if (or (string-empty-p file)
@@ -783,8 +783,8 @@ instead of blocking Emacs."
                ;; Sort: PRs first, then issues; within each group by number descending
                (sort filtered
                      (lambda (a b)
-                       (let ((a-pr (get-text-property 0 'remoto-issue-pr a))
-                             (b-pr (get-text-property 0 'remoto-issue-pr b)))
+                       (let ((a-pr (get-text-property 0 'remoto-topic-pr a))
+                             (b-pr (get-text-property 0 'remoto-topic-pr b)))
                          (cond
                           ((and a-pr (not b-pr)) t)
                           ((and (not a-pr) b-pr) nil)
@@ -1884,8 +1884,8 @@ Call ORIG-FN with FILENAME and ARGS after any rewrite."
                         (group "#") (group (+ digit)) eos)
                     filename)
       (progn
-        (remoto--require-issue)
-        (remoto-issue-display
+        (remoto--require-topic)
+        (remoto-topic-display
          (match-string 2 filename)
          (substring filename 0 (match-beginning 1))))
     (apply orig-fn (remoto--maybe-rewrite filename) args)))
@@ -1969,15 +1969,15 @@ Provides group-function and affixation-function for @ and # modes."
                   directory)
     (let ((group-fn (lambda (candidate transform)
                       (if transform candidate
-                        (if (remoto--get-prop candidate 'remoto-issue-pr)
+                        (if (remoto--get-prop candidate 'remoto-topic-pr)
                             "Pull Request"
                           "Issue"))))
           (affix-fn (lambda (candidates)
                       (remoto--affixate
                        (mapcar (lambda (c)
-                                 (let ((title (or (remoto--get-prop c 'remoto-issue-title) ""))
-                                       (state (or (remoto--get-prop c 'remoto-issue-state) ""))
-                                       (is-pr (remoto--get-prop c 'remoto-issue-pr)))
+                                 (let ((title (or (remoto--get-prop c 'remoto-topic-title) ""))
+                                       (state (or (remoto--get-prop c 'remoto-topic-state) ""))
+                                       (is-pr (remoto--get-prop c 'remoto-topic-pr)))
                                    (list c
                                          (if is-pr "PR " "   ")
                                          (format "%s [%s]" title state))))
@@ -2078,13 +2078,13 @@ Args: ORIG, STRING, PRED, ACTION."
 (advice-add 'read-file-name-internal :around
             #'remoto--read-file-name-internal-a)
 
-;;;; Issue display (see remoto-issue.el for full implementation)
+;;;; Issue display (see remoto-topic.el for full implementation)
 
-(declare-function remoto-issue-display "remoto-issue" (number repo-path))
+(declare-function remoto-topic-display "remoto-topic" (number repo-path))
 
-(defun remoto--require-issue ()
-  "Load remoto-issue if not already loaded."
-  (require 'remoto-issue nil t))
+(defun remoto--require-topic ()
+  "Load remoto-topic if not already loaded."
+  (require 'remoto-topic nil t))
 
 ;;;; Unload
 

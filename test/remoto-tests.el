@@ -1788,16 +1788,16 @@ Returns the full path after completion, or INPUT if no completion."
   (it "detects #NUM pattern in find-file-noselect advice"
     ;; When /github:owner/repo#42 is passed to find-file-noselect,
     ;; it should NOT try to open as a regular file.
-    ;; Instead it should call remoto-issue-display.
-    (spy-on 'remoto-issue-display)
+    ;; Instead it should call remoto-topic-display.
+    (spy-on 'remoto-topic-display)
     (spy-on 'remoto--maybe-rewrite :and-return-value "/github:foo/bar#42")
     ;; Simulate what the advice does
     (let ((filename "/github:foo/bar#42"))
       (when (string-match (rx "#" (group (+ digit)) eos) filename)
-        (remoto-issue-display
+        (remoto-topic-display
          (match-string 1 filename)
          (substring filename 0 (match-beginning 0)))))
-    (expect 'remoto-issue-display :to-have-been-called)))
+    (expect 'remoto-topic-display :to-have-been-called)))
 
 ;;; ---- Root completion enhancement ----
 
@@ -1839,19 +1839,19 @@ Returns the full path after completion, or INPUT if no completion."
 ;;; ---- find-file-noselect intercepts #NUM paths ----
 
 (describe "find-file-noselect intercepts #NUM paths"
-  (it "routes /github:owner/repo#NUM to remoto-issue-display"
-    (spy-on 'remoto-issue-display :and-return-value (generate-new-buffer "*test*"))
-    (spy-on 'remoto--require-issue)
+  (it "routes /github:owner/repo#NUM to remoto-topic-display"
+    (spy-on 'remoto-topic-display :and-return-value (generate-new-buffer "*test*"))
+    (spy-on 'remoto--require-topic)
     (find-file-noselect "/github:testowner/testrepo#42")
-    (expect 'remoto-issue-display :to-have-been-called-with "42" "/github:testowner/testrepo")
+    (expect 'remoto-topic-display :to-have-been-called-with "42" "/github:testowner/testrepo")
     (kill-buffer "*test*"))
 
   (it "does NOT intercept paths without #NUM (passes to orig)"
-    (spy-on 'remoto-issue-display)
+    (spy-on 'remoto-topic-display)
     (spy-on 'remoto--maybe-rewrite :and-return-value "/github:testowner/testrepo@main:/README.md")
-    ;; This would error in real use but we just check issue-display wasn't called
+    ;; This would error in real use but we just check topic-display wasn't called
     (ignore-errors (find-file-noselect "/github:testowner/testrepo@main:/README.md"))
-    (expect 'remoto-issue-display :not :to-have-been-called)))
+    (expect 'remoto-topic-display :not :to-have-been-called)))
 
 ;;; ---- parse-partial-canonical rejects #NUM paths ----
 
@@ -1886,9 +1886,9 @@ Returns the full path after completion, or INPUT if no completion."
   (it "provides issue/PR titles at issues level"
     (let* ((meta (remoto--completion-metadata "/github:foo/bar#"))
            (affix-fn (alist-get 'affixation-function meta))
-           (candidate (propertize "42" 'remoto-issue-title "Fix bug"
-                                      'remoto-issue-state "open"
-                                      'remoto-issue-pr nil)))
+           (candidate (propertize "42" 'remoto-topic-title "Fix bug"
+                                      'remoto-topic-state "open"
+                                      'remoto-topic-pr nil)))
       (expect affix-fn :not :to-be nil)
       (let ((result (funcall affix-fn (list candidate))))
         (expect (string-match-p "Fix bug" (nth 2 (car result))) :to-be-truthy)
