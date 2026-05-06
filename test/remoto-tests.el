@@ -1917,12 +1917,15 @@ Returns the full path after completion, or INPUT if no completion."
 (describe "E2E completion: edge cases"
   ;; Delimiter without repo
   (it "returns nil for /github:foo#"
+    (spy-on 'remoto--search-users :and-return-value nil)
     (expect (remoto-test--complete "/github:foo#") :to-be nil))
 
   (it "returns nil for /github:foo@"
+    (spy-on 'remoto--search-users :and-return-value nil)
     (expect (remoto-test--complete "/github:foo@") :to-be nil))
 
   (it "returns nil for /github:foo#42"
+    (spy-on 'remoto--search-users :and-return-value nil)
     (expect (remoto-test--complete "/github:foo#42") :to-be nil))
 
   ;; Nonexistent resources

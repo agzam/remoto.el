@@ -18,6 +18,37 @@
 (require 'buttercup)
 (require 'remoto)
 
+;; Use API token from environment when available (CI).
+;; Bypasses ghub's auth-source lookup entirely.
+(if-let* ((tok (getenv "REMOTO_TEST_TOKEN")))
+    (progn
+      (setq remoto-github-auth tok)
+      (message "remoto-itest: token loaded (%d chars, prefix: %s)"
+               (length tok) (substring tok 0 (min 4 (length tok)))))
+  (message "remoto-itest: NO TOKEN - REMOTO_TEST_TOKEN not set"))
+
+;; Stop on first failure - mark remaining specs as pending.
+;; Advise the suite runner to check after each spec.
+(defvar remoto-itest--stop nil)
+
+(advice-add 'buttercup--run-suite :around
+            (lambda (fn suite)
+              (cl-letf* ((orig-run-spec (symbol-function 'buttercup--run-spec))
+                         ((symbol-function 'buttercup--run-spec)
+                          (lambda (spec)
+                            (if remoto-itest--stop
+                                (progn
+                                  (setf (buttercup-spec-status spec) 'pending
+                                        (buttercup-spec-failure-description spec)
+                                        "SKIPPED")
+                                  (funcall buttercup-reporter 'spec-started spec)
+                                  (funcall buttercup-reporter 'spec-done spec))
+                              (funcall orig-run-spec spec)
+                              (when (eq (buttercup-spec-status spec) 'failed)
+                                (setq remoto-itest--stop t))))))
+                (funcall fn suite)))
+            '((name . remoto-itest-fail-fast)))
+
 (defconst remoto-itest-owner "emacs-mirror"
   "Test repo owner.")
 

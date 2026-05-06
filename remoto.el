@@ -5,7 +5,7 @@
 ;; Author: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: April 24, 2026
-;; Version: 1.3.0
+;; Version: 1.5.0
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
 ;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
@@ -130,19 +130,20 @@ Cleared by `remoto-reset-auth'.")
 
 (defun remoto--json-reader (_status)
   "Parse JSON response with list-type arrays for remoto compatibility.
-Handles both header-present and header-stripped response buffers."
+Finds the JSON body by scanning for the first `{' or `[',
+handling both header-present and header-stripped response buffers
+across different ghub and url.el versions."
   (goto-char (point-min))
-  ;; Skip HTTP headers if present; if no blank line found, the
-  ;; buffer is already just the body (varies by Emacs/url.el version).
-  (re-search-forward "^\r?\n" nil t)
-  (let ((body (buffer-substring-no-properties (point) (point-max))))
-    (unless (string-empty-p body)
-      (json-parse-string
-       (decode-coding-string body 'utf-8)
-       :object-type 'alist
-       :array-type 'list
-       :null-object nil
-       :false-object nil))))
+  (when (re-search-forward "[{[]" nil t)
+    (backward-char 1)
+    (let ((body (buffer-substring-no-properties (point) (point-max))))
+      (unless (string-empty-p body)
+        (json-parse-string
+         (decode-coding-string body 'utf-8)
+         :object-type 'alist
+         :array-type 'list
+         :null-object nil
+         :false-object nil)))))
 
 (defun remoto--ghub-get (resource auth endpoint)
   "Call `ghub-get' on RESOURCE with AUTH, translating errors.
