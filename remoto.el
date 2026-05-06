@@ -754,23 +754,31 @@ instead of blocking Emacs."
                    (while-no-input
                      (remoto--search-issues owner repo file))))))
            (when (listp issues)
-             (let ((candidates
-                    (mapcar (lambda (i)
-                              (let* ((num (number-to-string (alist-get 'number i)))
-                                     (is-pr (not (null (alist-get 'pull_request i))))
-                                     (title (or (alist-get 'title i) ""))
-                                     (state (or (alist-get 'state i) "")))
-                                (propertize num
-                                            'remoto-issue-pr is-pr
-                                            'remoto-issue-title title
-                                            'remoto-issue-state state)))
-                            issues)))
-               ;; Only prefix-filter for empty/numeric queries (client-side narrowing).
-               ;; Text search results are already filtered by the API.
-               (if (or (string-empty-p file)
-                       (string-match-p (rx bos (+ digit) eos) file))
-                   (seq-filter (lambda (n) (string-prefix-p file n)) candidates)
-                 candidates))))))
+             (let* ((candidates
+                     (mapcar (lambda (i)
+                               (let* ((num (number-to-string (alist-get 'number i)))
+                                      (is-pr (not (null (alist-get 'pull_request i))))
+                                      (title (or (alist-get 'title i) ""))
+                                      (state (or (alist-get 'state i) "")))
+                                 (propertize num
+                                             'remoto-issue-pr is-pr
+                                             'remoto-issue-title title
+                                             'remoto-issue-state state)))
+                             issues))
+                    (filtered
+                     (if (or (string-empty-p file)
+                             (string-match-p (rx bos (+ digit) eos) file))
+                         (seq-filter (lambda (n) (string-prefix-p file n)) candidates)
+                       candidates)))
+               ;; Sort: PRs first, then issues; within each group by number descending
+               (sort filtered
+                     (lambda (a b)
+                       (let ((a-pr (get-text-property 0 'remoto-issue-pr a))
+                             (b-pr (get-text-property 0 'remoto-issue-pr b)))
+                         (cond
+                          ((and a-pr (not b-pr)) t)
+                          ((and (not a-pr) b-pr) nil)
+                          (t (> (string-to-number a) (string-to-number b))))))))))))
     ;; Full canonical path - existing behavior
     (when-let* ((parsed (remoto--parse-path directory)))
       (thread-last (remoto--tree-children parsed)
@@ -1440,13 +1448,15 @@ Returns list of comment alists, or nil on error."
       (remoto--api (format "repos/%s/%s/issues/%s/comments" owner repo number))
     (user-error nil)))
 
-(defun remoto--fetch-user-orgs (user)
-  "Fetch organization memberships for USER."
+(defun remoto--fetch-user-orgs (_user)
+  "Fetch organization memberships for the authenticated user.
+Uses /user/orgs which includes private memberships."
   (condition-case nil
-      (let* ((endpoint (format "users/%s/orgs?per_page=100" user))
-             (data (remoto--api endpoint)))
+      (let ((data (remoto--api "user/orgs?per_page=100")))
         (mapcar (lambda (item) (alist-get 'login item)) data))
     (user-error nil)))
+
+
 
 (defun remoto--search-users (prefix)
   "Search GitHub users/orgs matching PREFIX, cached with TTL.
@@ -1503,7 +1513,7 @@ Cancels any previously scheduled pre-fetch."
     (cancel-timer remoto--prefetch-timer))
   (setq remoto--prefetch-timer
         (run-with-idle-timer
-         0.25 nil
+         0.05 nil
          (lambda ()
            (setq remoto--prefetch-timer nil)
            ;; Wrap in while-no-input so typing interrupts the
@@ -1513,7 +1523,8 @@ Cancels any previously scheduled pre-fetch."
 
 (defun remoto--recent-owner-repos (owner)
   "Fetch recently-updated repos for OWNER, cached with TTL.
-Returns up to 30 repo name strings, sorted by last push."
+Returns up to 30 repo name strings (propertized with description),
+sorted by last push."
   (let* ((cache-key (format "\0repos-recent:%s" (downcase owner))))
     (pcase-let ((`(,hit ,results) (remoto--search-cache-get cache-key)))
       (if hit results
@@ -1521,7 +1532,10 @@ Returns up to 30 repo name strings, sorted by last push."
             (let* ((q (url-hexify-string (format "user:%s" owner)))
                    (endpoint (format "search/repositories?q=%s&sort=updated&per_page=30" q))
                    (items (alist-get 'items (remoto--api endpoint)))
-                   (repos (mapcar (lambda (item) (alist-get 'name item))
+                   (repos (mapcar (lambda (item)
+                                    (propertize (alist-get 'name item)
+                                                'remoto-repo-desc
+                                                (or (alist-get 'description item) "")))
                                   items)))
               (remoto--search-cache-put cache-key repos))
           (user-error nil))))))
@@ -1558,7 +1572,10 @@ Uses client-side narrowing when a parent query is cached."
                             (format "%s in:name user:%s" query owner)))
                          (endpoint (format "search/repositories?q=%s&per_page=100" q))
                          (items (alist-get 'items (remoto--api endpoint)))
-                         (repos (mapcar (lambda (item) (alist-get 'name item))
+                         (repos (mapcar (lambda (item)
+                                          (propertize (alist-get 'name item)
+                                                      'remoto-repo-desc
+                                                      (or (alist-get 'description item) "")))
                                         items)))
                     (remoto--search-cache-put cache-key repos))
                 (user-error nil)))))))))
@@ -1790,9 +1807,11 @@ Intercepts #NUM patterns to display issues instead of file operations.
 Call ORIG-FN with FILENAME and ARGS after any rewrite."
   (let ((rewritten (remoto--maybe-rewrite filename)))
     (if (string-match (rx "#" (group (+ digit)) eos) rewritten)
-        (remoto-issue-display
-         (match-string 1 rewritten)
-         (substring rewritten 0 (match-beginning 0)))
+        (progn
+          (remoto--require-issue)
+          (remoto-issue-display
+           (match-string 1 rewritten)
+           (substring rewritten 0 (match-beginning 0))))
       (apply orig-fn rewritten args))))
 
 (unless (advice-member-p #'remoto--dired-around-a 'dired)
@@ -1854,7 +1873,16 @@ Provides group-function and affixation-function for @ and # modes."
                         (if (equal "tag" (get-text-property 0 'remoto-ref-type candidate))
                             "Tag"
                           "Branch")))))
-      `((group-function . ,group-fn))))))
+      `((group-function . ,group-fn))))
+   ;; Owner mode: /github:OWNER/ - repo descriptions
+   ((string-match (rx "/github:" (+ (not (any "/:@#"))) "/" eos) directory)
+    (let ((affix-fn (lambda (candidates)
+                      (mapcar (lambda (c)
+                                (let ((desc (or (get-text-property 0 'remoto-repo-desc c) "")))
+                                  (list c "" (if (string-empty-p desc) ""
+                                               (concat "  " desc)))))
+                              candidates))))
+      `((affixation-function . ,affix-fn))))))
 
 (defun remoto--read-file-name-internal-a (orig string pred action)
   "Fix completion for /github: paths inside `read-file-name'.
@@ -1902,104 +1930,13 @@ Args: ORIG, STRING, PRED, ACTION."
 (advice-add 'read-file-name-internal :around
             #'remoto--read-file-name-internal-a)
 
-;;;; Issue display
+;;;; Issue display (see remoto-issue.el for full implementation)
 
-(defvar-local remoto-issue--number nil
-  "Issue number displayed in this buffer.")
+(declare-function remoto-issue-display "remoto-issue" (number repo-path))
 
-(defvar-local remoto-issue--repo-path nil
-  "Repo path (e.g. \"/github:owner/repo\") for this issue buffer.")
-
-(defvar remoto-issue-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map "b" #'remoto-issue-browse)
-    (define-key map "g" #'remoto-issue-refresh)
-    map)
-  "Keymap for `remoto-issue-mode'.")
-
-(define-derived-mode remoto-issue-mode special-mode "Remoto-Issue"
-  "Major mode for viewing GitHub issues and pull requests."
-  :group 'remoto)
-
-(defun remoto-issue-browse ()
-  "Open the current issue in a web browser."
-  (interactive)
-  (when-let* ((number remoto-issue--number)
-              (path remoto-issue--repo-path)
-              (_ (string-match (rx "/github:" (group (+ nonl))) path))
-              (repo-slug (match-string 1 path)))
-    (browse-url (format "https://github.com/%s/issues/%s" repo-slug number))))
-
-(defun remoto-issue-refresh ()
-  "Re-fetch and redisplay the current issue."
-  (interactive)
-  (when (and remoto-issue--number remoto-issue--repo-path)
-    (remoto-issue-display remoto-issue--number remoto-issue--repo-path)))
-
-(defun remoto-issue--format-date (date-str)
-  "Format DATE-STR (ISO 8601) to YYYY-MM-DD."
-  (if (and date-str (string-match (rx bos (group (= 4 digit) "-" (= 2 digit) "-" (= 2 digit))) date-str))
-      (match-string 1 date-str)
-    (or date-str "")))
-
-(defun remoto-issue--render (issue comments)
-  "Render ISSUE and COMMENTS into the current buffer."
-  (let* ((number (alist-get 'number issue))
-         (title (or (alist-get 'title issue) ""))
-         (state (or (alist-get 'state issue) "unknown"))
-         (user (alist-get 'user issue))
-         (author (or (and user (alist-get 'login user)) "unknown"))
-         (labels (alist-get 'labels issue))
-         (label-names (mapcar (lambda (l) (alist-get 'name l)) labels))
-         (created (remoto-issue--format-date (alist-get 'created_at issue)))
-         (body (or (alist-get 'body issue) "")))
-    (insert (format "#%s %s" number title))
-    (insert (format "%40s" (format "[%s]" state)))
-    (insert "\n")
-    (insert (format "Author: %s" author))
-    (when label-names
-      (insert (format " | Labels: %s" (string-join label-names ", "))))
-    (insert (format " | %s" created))
-    (insert "\n\n---\n")
-    (insert body)
-    (insert "\n")
-    (when comments
-      (insert "\n---\n## Comments\n")
-      (dolist (comment comments)
-        (let* ((c-user (alist-get 'user comment))
-               (c-author (or (and c-user (alist-get 'login c-user)) "unknown"))
-               (c-date (remoto-issue--format-date (alist-get 'created_at comment)))
-               (c-body (or (alist-get 'body comment) "")))
-          (insert (format "\n### %s - %s\n" c-author c-date))
-          (insert c-body)
-          (insert "\n"))))))
-
-(defun remoto-issue-display (number repo-path)
-  "Fetch and display issue NUMBER for the repo at REPO-PATH.
-REPO-PATH is like \"/github:owner/repo\".
-Creates buffer *remoto: owner/repo#NUMBER*."
-  (unless (string-match (rx "/github:" (group (+ (not (any "/@#"))))
-                            "/" (group (+ (not (any "/@#")))))
-                        repo-path)
-    (user-error "Remoto: invalid repo path: %s" repo-path))
-  (let* ((owner (match-string 1 repo-path))
-         (repo (match-string 2 repo-path))
-         (issue (remoto--fetch-issue owner repo number)))
-    (unless issue
-      (user-error "Remoto: not found: %s/%s#%s" owner repo number))
-    (let* ((comments (remoto--fetch-issue-comments owner repo number))
-           (buf-name (format "*remoto: %s/%s#%s*" owner repo number))
-           (buf (get-buffer-create buf-name)))
-      (with-current-buffer buf
-        (let ((inhibit-read-only t))
-          (erase-buffer)
-          (remoto-issue--render issue comments))
-        (goto-char (point-min))
-        (remoto-issue-mode)
-        (setq remoto-issue--number number)
-        (setq remoto-issue--repo-path repo-path))
-      (pop-to-buffer buf)
-      buf)))
+(defun remoto--require-issue ()
+  "Load remoto-issue if not already loaded."
+  (require 'remoto-issue nil t))
 
 ;;;; Unload
 
