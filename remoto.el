@@ -1,11 +1,11 @@
 ;;; remoto.el --- Browse GitHub repos without cloning -*- lexical-binding: t; -*-
 ;;
-;; Copyright (C) 2025 Ag Ibragimov
+;; Copyright (C) 2026 Ag Ibragimov
 ;;
 ;; Author: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: April 24, 2026
-;; Version: 1.5.0
+;; Version: 1.5.1
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
 ;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
@@ -108,12 +108,12 @@ See ghub documentation for auth-source setup."
                  (string :tag "Literal token"))
   :group 'remoto)
 
-(defcustom remoto-auth-timeout 2
+(defcustom remoto-auth-timeout 10
   "Seconds to wait for auth-source token lookup before giving up.
 When ghub's token lookup (which may trigger GPG decryption of
 authinfo) exceeds this limit, remoto falls back to unauthenticated
-access and caches the failure for the rest of the session.  Use
-`remoto-reset-auth' to retry after adding a token."
+access for that request.  Use `remoto-reset-auth' to retry after
+adding a token."
   :type 'number
   :group 'remoto)
 
@@ -122,6 +122,11 @@ access and caches the failure for the rest of the session.  Use
 Set on actual auth errors (missing token, 401), NOT on timeouts.
 Causes `remoto--api' to skip token lookup and use unauthenticated
 requests.  Reset with `remoto-reset-auth'.")
+
+(defvar remoto--effective-auth nil
+  "Resolved auth value that actually works, or nil if not yet probed.
+Set by `remoto--warm-auth' after trying `remoto-github-auth' and
+falling back to `forge' if available.  Cleared by `remoto-reset-auth'.")
 
 (defvar remoto--authenticated-user nil
   "Cached GitHub login of the authenticated user, or nil if unknown.
@@ -147,12 +152,17 @@ across different ghub and url.el versions."
 
 (defun remoto--ghub-get (resource auth endpoint)
   "Call `ghub-get' on RESOURCE with AUTH, translating errors.
-ENDPOINT is used in error messages for context."
+ENDPOINT is used in error messages for context.  When AUTH is a
+literal token string, `:host' must be specified explicitly because
+ghub's default host resolution sends to github.com (HTML) instead
+of api.github.com (JSON API)."
   (condition-case err
       (let ((inhibit-message (not ghub-debug)))
-        (ghub-get resource nil
-                  :auth auth
-                  :reader #'remoto--json-reader))
+        (apply #'ghub-get resource nil
+               :auth auth
+               :reader #'remoto--json-reader
+               (when (stringp auth)
+                 (list :host "api.github.com"))))
     (ghub-404
      (user-error "Remoto: not found: %s" endpoint))
     (ghub-403
@@ -160,7 +170,9 @@ ENDPOINT is used in error messages for context."
     (ghub-401
      (user-error "Remoto: authentication failed; configure ghub token in auth-source"))
     (ghub-http-error
-     (user-error "Remoto: API error: %s" (error-message-string err)))))
+     (user-error "Remoto: API error: %s" (error-message-string err)))
+    (json-error
+     (user-error "Remoto: could not parse API response for %s" endpoint))))
 
 (defun remoto--api (endpoint)
   "Call GitHub REST API ENDPOINT via ghub, return parsed JSON.
@@ -170,7 +182,9 @@ token is found in auth-source, retries unauthenticated - public
 repos work without any setup.  Signals `user-error' on HTTP
 failures."
   (let* ((resource (concat "/" endpoint))
-         (auth (if remoto--auth-failed 'none remoto-github-auth)))
+         (auth (cond (remoto--auth-failed 'none)
+                     (remoto--effective-auth remoto--effective-auth)
+                     (t remoto-github-auth))))
     (if (eq auth 'none)
         (remoto--ghub-get resource 'none endpoint)
       (condition-case err
@@ -207,8 +221,9 @@ failures."
   "Clear the auth failure cache, retrying token lookup on next API call.
 Use after adding a GitHub token to auth-source."
   (interactive)
-  (setq remoto--auth-failed nil)
-  (setq remoto--authenticated-user nil)
+  (setq remoto--auth-failed nil
+        remoto--effective-auth nil
+        remoto--authenticated-user nil)
   (message "Remoto: auth cache cleared; will retry token lookup on next request"))
 
 (defun remoto--default-branch (owner repo)
@@ -1464,15 +1479,19 @@ dropped since async callers can't meaningfully handle them in the
 completion context. Auth mirrors `remoto--api': nil lets ghub use
 its default token, `none' skips auth entirely."
   (let* ((resource (concat "/" endpoint))
-         (auth (if remoto--auth-failed 'none remoto-github-auth)))
+         (auth (cond (remoto--auth-failed 'none)
+                     (remoto--effective-auth remoto--effective-auth)
+                     (t remoto-github-auth))))
     (condition-case nil
         (let ((inhibit-message t))
-          (ghub-get resource nil
-                    :auth auth
-                    :reader #'remoto--json-reader
-                    :callback callback
-                    :errorback (lambda (_err _headers _status _req)
-                                 nil)))
+          (apply #'ghub-get resource nil
+                 :auth auth
+                 :reader #'remoto--json-reader
+                 :callback callback
+                 :errorback (lambda (_err _headers _status _req)
+                              nil)
+                 (when (stringp auth)
+                   (list :host "api.github.com"))))
       (error nil))))
 
 (defun remoto--debounce (key fn)
@@ -2304,13 +2323,54 @@ Call ORIG-FN with FILENAME and ARGS after any rewrite."
 
 ;;;; Eager auth warm-up
 
+(defun remoto--find-github-token ()
+  "Search auth-source for a GitHub API token.
+Different ghub versions and user setups store tokens under different
+hosts (api.github.com vs github.com) and package suffixes (^forge,
+^ghub).  Try all known combinations to find a working token."
+  (when-let* ((username (condition-case nil
+                            (ghub--username "github.com" nil)
+                          (error nil))))
+    (let ((hosts '("api.github.com" "github.com"))
+          (packages '("forge" "ghub" nil)))
+      (catch 'found
+        (dolist (host hosts)
+          (dolist (pkg packages)
+            (let* ((user (if pkg (format "%s^%s" username pkg) username))
+                   (results (ignore-errors
+                              (auth-source-search :host host :user user :max 1)))
+                   (secret (plist-get (car results) :secret))
+                   (token (if (functionp secret) (funcall secret) secret)))
+              (when (and token (not (string-empty-p token)))
+                (throw 'found token)))))))))
+
 (defun remoto--warm-auth ()
   "Pre-fetch the authenticated GitHub user in the background.
 Runs on an idle timer so GPG decryption happens before the user
-types anything, avoiding timeout-induced fallback to public-only
-repo listings."
+types anything.  Bypasses ghub's own token resolution (which may
+look up the wrong auth-source host) by searching auth-source
+directly and passing the token string to ghub."
   (unless (or remoto--authenticated-user remoto--auth-failed)
-    (remoto--get-authenticated-user)))
+    (if-let* ((token (or (and (stringp remoto-github-auth) remoto-github-auth)
+                         (remoto--find-github-token))))
+        (condition-case err
+            (when-let* ((data (let ((inhibit-message t))
+                                (ghub-get "/user" nil
+                                          :auth token
+                                          :host "api.github.com"
+                                          :reader #'remoto--json-reader)))
+                        (login (alist-get 'login data)))
+              (setq remoto--authenticated-user login
+                    remoto--effective-auth token)
+              (message "Remoto: authenticated as %s" login))
+          (error
+           (setq remoto--auth-failed t)
+           (message "Remoto: token found but API call failed (%s); \
+using unauthenticated access"
+                    (error-message-string err))))
+      (setq remoto--auth-failed t)
+      (message "Remoto: no GitHub token found; only public repos available. \
+See `remoto-github-auth' or configure ghub auth-source, then M-x remoto-reset-auth"))))
 
 (run-with-idle-timer 2 nil #'remoto--warm-auth)
 

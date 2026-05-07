@@ -994,6 +994,127 @@
       (remoto--ghub-get "/repos/owner/repo" 'none "repos/owner/repo")
       (expect captured-inhibit :to-be nil))))
 
+(describe "remoto--json-reader"
+  (it "parses valid JSON"
+    (with-temp-buffer
+      (insert "{\"login\": \"agzam\"}")
+      (expect (remoto--json-reader nil)
+              :to-equal '((login . "agzam")))))
+
+  (it "returns nil for buffers with no JSON delimiters"
+    (with-temp-buffer
+      (insert "plain text no braces")
+      (expect (remoto--json-reader nil) :to-be nil)))
+
+  (it "signals json-error on malformed JSON"
+    (with-temp-buffer
+      (insert "{broken")
+      (expect (remoto--json-reader nil) :to-throw 'json-error)))
+
+  (it "signals json-error on truncated JSON"
+    (with-temp-buffer
+      (insert "{\"name\": ")
+      (expect (remoto--json-reader nil) :to-throw 'json-error))))
+
+(describe "remoto--ghub-get json-error handling"
+  (it "translates json-parse-error to user-error"
+    (spy-on 'ghub-get :and-call-fake
+            (lambda (_resource &optional _params &rest _args)
+              (signal 'json-parse-error '("unexpected character"))))
+    (expect (remoto--ghub-get "/repos/owner/repo" 'none "repos/owner/repo")
+            :to-throw 'user-error))
+
+  (it "translates json-end-of-file to user-error"
+    (spy-on 'ghub-get :and-call-fake
+            (lambda (_resource &optional _params &rest _args)
+              (signal 'json-end-of-file '("premature end"))))
+    (expect (remoto--ghub-get "/repos/owner/repo" 'none "repos/owner/repo")
+            :to-throw 'user-error)))
+
+(describe "remoto--find-github-token"
+  (it "finds token at api.github.com with ^forge suffix"
+    (spy-on 'ghub--username :and-return-value "testuser")
+    (spy-on 'auth-source-search :and-call-fake
+            (lambda (&rest args)
+              (let ((host (plist-get args :host))
+                    (user (plist-get args :user)))
+                (when (and (equal host "api.github.com")
+                           (equal user "testuser^forge"))
+                  (list (list :secret "ghp_found_token"))))))
+    (expect (remoto--find-github-token) :to-equal "ghp_found_token"))
+
+  (it "returns nil when no token found anywhere"
+    (spy-on 'ghub--username :and-return-value "testuser")
+    (spy-on 'auth-source-search :and-return-value nil)
+    (expect (remoto--find-github-token) :to-be nil))
+
+  (it "returns nil when username cannot be determined"
+    (spy-on 'ghub--username :and-call-fake
+            (lambda (&rest _) (error "Cannot determine username")))
+    (expect (remoto--find-github-token) :to-be nil)))
+
+(describe "remoto--warm-auth"
+  (it "caches authenticated user and token on success"
+    (let ((remoto--authenticated-user nil)
+          (remoto--auth-failed nil)
+          (remoto--effective-auth nil))
+      (spy-on 'remoto--find-github-token :and-return-value "ghp_fake_token")
+      (spy-on 'ghub-get :and-return-value '((login . "agzam")))
+      (spy-on 'message)
+      (remoto--warm-auth)
+      (expect remoto--authenticated-user :to-equal "agzam")
+      (expect remoto--effective-auth :to-equal "ghp_fake_token")
+      (expect remoto--auth-failed :to-be nil)))
+
+  (it "sets auth-failed when no token found"
+    (let ((remoto--authenticated-user nil)
+          (remoto--auth-failed nil)
+          (remoto--effective-auth nil)
+          (remoto-github-auth nil))
+      (spy-on 'remoto--find-github-token :and-return-value nil)
+      (spy-on 'message)
+      (remoto--warm-auth)
+      (expect remoto--auth-failed :to-be-truthy)
+      (expect remoto--authenticated-user :to-be nil)))
+
+  (it "sets auth-failed when API call fails with found token"
+    (let ((remoto--authenticated-user nil)
+          (remoto--auth-failed nil)
+          (remoto--effective-auth nil))
+      (spy-on 'remoto--find-github-token :and-return-value "ghp_bad_token")
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest _args)
+                (error "401 Unauthorized")))
+      (spy-on 'message)
+      (remoto--warm-auth)
+      (expect remoto--auth-failed :to-be-truthy)
+      (expect remoto--effective-auth :to-be nil)))
+
+  (it "skips when user already cached"
+    (let ((remoto--authenticated-user "agzam")
+          (remoto--auth-failed nil))
+      (spy-on 'remoto--find-github-token)
+      (remoto--warm-auth)
+      (expect 'remoto--find-github-token :not :to-have-been-called)))
+
+  (it "skips when auth already failed"
+    (let ((remoto--authenticated-user nil)
+          (remoto--auth-failed t))
+      (spy-on 'remoto--find-github-token)
+      (remoto--warm-auth)
+      (expect 'remoto--find-github-token :not :to-have-been-called)))
+
+  (it "uses literal remoto-github-auth string directly"
+    (let ((remoto--authenticated-user nil)
+          (remoto--auth-failed nil)
+          (remoto--effective-auth nil)
+          (remoto-github-auth "ghp_explicit_token"))
+      (spy-on 'remoto--find-github-token)
+      (spy-on 'ghub-get :and-return-value '((login . "agzam")))
+      (remoto--warm-auth)
+      (expect 'remoto--find-github-token :not :to-have-been-called)
+      (expect remoto--effective-auth :to-equal "ghp_explicit_token"))))
+
 ;;; Partial path parsing
 
 (describe "remoto--parse-partial-github-path"
