@@ -3,6 +3,20 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [1.5.1] - 2026-05-07
+
+** Fixed
+- Auth on fresh Emacs sessions. ghub's token resolution searched ~github.com~ while tokens were stored under ~api.github.com~, causing all API calls to fail with a cryptic JSON parse error. Remoto now searches auth-source directly, trying both hosts with ~^forge~, ~^ghub~, and bare username suffixes, then passes the token as a literal string with an explicit ~:host~.
+- ~remoto--warm-auth~ bypasses ~remoto--api~ timeout entirely - calls ghub directly so GPG passphrase entry can complete naturally (like forge does).
+- ~remoto--ghub-get~ catches ~json-error~ and translates it to a readable ~user-error~ instead of letting it propagate as a raw process filter crash.
+
+** Changed
+- ~remoto-auth-timeout~ default raised from 2 to 10 seconds - 2s was too aggressive for first-time GPG decryption.
+
+** Added
+- ~remoto--find-github-token~ - searches auth-source across host and package-suffix combinations, finding the first available token regardless of how it was stored.
+- ~remoto--effective-auth~ - caches the resolved token so subsequent API calls skip the probe. Cleared by ~remoto-reset-auth~.
+
 * [1.5.0] - 2026-05-06
 
 ** Changed

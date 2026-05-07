@@ -1,6 +1,6 @@
 ;;; remoto-topic.el --- Issue and PR display for remoto -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2024 Ag Ibragimov
+;; Copyright (C) 2026 Ag Ibragimov
 ;; Author: Ag Ibragimov
 
 ;; This file is NOT part of GNU Emacs.
