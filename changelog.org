@@ -3,6 +3,33 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [1.5.0] - 2026-05-06
+
+** Changed
+- Completion for user/org search, repo search, and browse-repos is now fully non-blocking. HTTP requests are debounced and fired asynchronously via ~ghub~ callbacks; cached results are returned immediately while fresh data loads in the background.
+- Minimum search character threshold raised from 2 to 3 (configurable via ~remoto-min-search-chars~).
+- Repo list cache uses a separate longer TTL (~remoto-repo-cache-ttl~, default 30 min) since repo lists rarely change.
+- ~remoto--prefetch-owner-repos~ now uses truly async HTTP instead of ~while-no-input~ wrapper.
+- Repo search below the minimum character threshold narrows from the recent-repos cache instead of returning nil.
+- ~remoto--search-repos-from-parent~ uses substring matching instead of prefix-only when filtering repo names.
+- ~remoto--json-reader~ scans for ~{~ or ~[~ instead of relying on blank-line header heuristic, fixing compatibility across ghub/Emacs versions.
+
+** Added
+- ~remoto-debounce-delay~ - configurable idle time (default 0.3s) before firing search requests.
+- ~remoto-min-search-chars~ - configurable minimum characters before searching users/repos (default 3).
+- ~remoto-repo-cache-ttl~ - longer cache TTL for repo lists (default 1800s).
+- ~remoto--api-async~ - async GitHub API calls via ~ghub-get~ with ~:callback~.
+- ~remoto--debounce~ - key-aware idle timer that prevents completion frameworks from starving the async fetch.
+- ~remoto--refresh-minibuffer-completions~ - framework-agnostic minibuffer refresh after async cache updates.
+- ~remoto--search-cache-get~ now accepts an optional TTL parameter for per-key TTL overrides.
+- Fail-fast for integration tests (stop after first failure, skip remaining).
+- CI: split unit and integration test jobs, nix/elpa caching, ~workflow_dispatch~ trigger, PAT-based authenticated integration tests.
+
+** Fixed
+- ~files-default~ handler catches 404 from non-existent repos instead of crashing vertico.
+- ~remoto--api-async~ auth: pass nil (not ~'none~) to ghub for default token resolution.
+- Suppress ~auth-source-search~ echo messages during async completion.
+
 * [1.4.0] - 2026-05-06
 
 ** Added

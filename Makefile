@@ -30,11 +30,13 @@ deps: $(ELPA_DIR)
 
 test: $(ELPA_DIR)
 	$(EMACS_BATCH) --directory . \
+	--eval "(setq buttercup-stack-frame-style 'omit)" \
 	-l test/remoto-tests.el \
 	--funcall buttercup-run
 
 test-integration: $(ELPA_DIR)
 	$(EMACS_BATCH) --directory . \
+	--eval "(setq buttercup-stack-frame-style 'omit)" \
 	-l test/remoto-integration-tests.el \
 	--funcall buttercup-run
 
