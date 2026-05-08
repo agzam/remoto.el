@@ -9,10 +9,13 @@ Changes to the project, following Keep a Changelog conventions.
 - Always pass ~:host "api.github.com"~ to ~ghub-get~ in all call sites (~remoto--ghub-get~, ~remoto--api-async~). The conditional guard only sent it for string auth tokens, so unauthenticated calls (~auth = 'none~) hit ~github.com~ instead of the API, returning HTML that crashed the JSON parser.
 - ~remoto--json-reader~ returns nil instead of signaling on malformed JSON, preventing unhandled errors in async contexts where no ~condition-case~ protects the reader callback.
 - ~remoto--warm-auth~ no longer permanently disables auth when the idle-timer token lookup fails. Previously, a transient failure (GPG agent not ready, ghub not loaded) set ~remoto--auth-failed~ to t, locking out private repos for the entire session.
+- ~remoto--api~ and ~remoto--api-async~ now try ~remoto--find-github-token~ directly when no cached token or user config exists, instead of relying solely on ghub's built-in auth-source lookup (which uses different host/user patterns and often fails on fresh sessions). Found tokens are cached in ~remoto--effective-auth~.
+- Auth failures now signal ~user-error~ with a clear message instead of silently falling back to unauthenticated access. Previously, private repos would quietly show empty results with only a message in ~*Messages*~ that was easily missed.
 
 ** Added
 - Full pipeline tests asserting every segment (API, default-branch, fetch-tree, tree-entry, tree-children, file-exists-p, file-directory-p, file-regular-p, directory-files, file-attributes, insert-directory) returns non-nil data.
 - Auth forwarding tests verifying the token reaches ghub-get and that auth=none is used when auth-failed is set.
+- Fresh-session auth resolution tests: fallback to ~remoto--find-github-token~ when ghub fails, loud ~user-error~ when no token exists anywhere.
 - JSON reader unit tests covering headers, HTML error pages, empty buffers.
 
 * [1.5.1] - 2026-05-07

@@ -178,14 +178,21 @@ JSON API endpoint."
 (defun remoto--api (endpoint)
   "Call GitHub REST API ENDPOINT via ghub, return parsed JSON.
 ENDPOINT should not have a leading slash - one is prepended
-automatically.  When `remoto-github-auth' is nil (default) and no
-token is found in auth-source, retries unauthenticated - public
-repos work without any setup.  Signals `user-error' on HTTP
-failures."
+automatically.  Auth resolution order: `remoto--effective-auth',
+`remoto-github-auth', ghub's built-in auth-source lookup,
+`remoto--find-github-token' (last resort).  When every avenue
+fails, signals `user-error'.  Public repos work without any
+setup via unauthenticated fallback."
   (let* ((resource (concat "/" endpoint))
          (auth (cond (remoto--auth-failed 'none)
                      (remoto--effective-auth remoto--effective-auth)
-                     (t remoto-github-auth))))
+                     ((stringp remoto-github-auth) remoto-github-auth)
+                     ;; Try our own auth-source search before ghub's
+                     ;; resolution, which uses different host/user
+                     ;; patterns and often fails on fresh sessions.
+                     (t (when-let* ((token (remoto--find-github-token)))
+                          (setq remoto--effective-auth token)
+                          token)))))
     (if (eq auth 'none)
         (remoto--ghub-get resource 'none endpoint)
       (condition-case err
@@ -202,21 +209,23 @@ failures."
                 (setq result (remoto--ghub-get resource 'none endpoint)))
               result))
         ;; Re-raise API errors (404, 403, etc.) from remoto--ghub-get;
-        ;; these are not auth failures.  Other user-errors (e.g. ghub's
-        ;; "Cannot determine username") are auth config issues - fall
-        ;; through to unauthenticated access.
+        ;; these are not auth failures.
         (user-error
          (if (string-prefix-p "Remoto:" (cadr err))
              (signal (car err) (cdr err))
+           ;; ghub auth config error (e.g. "Cannot determine
+           ;; username").  Every avenue exhausted - fail loudly.
            (setq remoto--auth-failed t)
-           (message "Remoto: auth unavailable (%s); using unauthenticated access"
-                    (error-message-string err))
-           (remoto--ghub-get resource 'none endpoint)))
+           (user-error "Remoto: authentication failed for %s; \
+configure a GitHub token in auth-source, then M-x remoto-reset-auth"
+                       endpoint)))
         (error
+         ;; ghub could not resolve auth at all.  Fail loudly so the
+         ;; user knows auth is the problem, not a missing repo.
          (setq remoto--auth-failed t)
-         (message "Remoto: auth unavailable (%s); using unauthenticated access"
-                  (error-message-string err))
-         (remoto--ghub-get resource 'none endpoint))))))
+         (user-error "Remoto: authentication failed for %s (%s); \
+configure a GitHub token in auth-source, then M-x remoto-reset-auth"
+                     endpoint (error-message-string err)))))))
 
 (defun remoto-reset-auth ()
   "Clear the auth failure cache, retrying token lookup on next API call.
@@ -1482,7 +1491,10 @@ explicitly to avoid ghub resolving to the HTML site."
   (let* ((resource (concat "/" endpoint))
          (auth (cond (remoto--auth-failed 'none)
                      (remoto--effective-auth remoto--effective-auth)
-                     (t remoto-github-auth))))
+                     ((stringp remoto-github-auth) remoto-github-auth)
+                     (t (when-let* ((token (remoto--find-github-token)))
+                          (setq remoto--effective-auth token)
+                          token)))))
     (condition-case nil
         (let ((inhibit-message t))
           (ghub-get resource nil

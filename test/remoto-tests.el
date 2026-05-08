@@ -964,17 +964,17 @@
       (expect (remoto--api "repos/owner/repo") :to-equal '((name . "test-repo")))
       (expect remoto--auth-failed :to-be nil)))
 
-  (it "falls back to unauthenticated on auth error"
-    (let ((remoto--auth-failed nil)
-          (remoto-github-auth nil)
-          (remoto-auth-timeout 5))
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (_resource &optional _params &rest args)
-                (if (eq (plist-get args :auth) 'none)
-                    '((name . "test-repo"))
-                  (error "Package ghub requires a Github API token"))))
-      (expect (remoto--api "repos/owner/repo") :to-equal '((name . "test-repo")))
-      (expect remoto--auth-failed :to-be-truthy)))
+    (it "signals user-error on auth error instead of silent fallback"
+      (let ((remoto--auth-failed nil)
+            (remoto--effective-auth nil)
+            (remoto-github-auth nil)
+            (remoto-auth-timeout 5))
+        (spy-on 'ghub-get :and-call-fake
+                (lambda (_resource &optional _params &rest _args)
+                  (error "Package ghub requires a Github API token")))
+        (spy-on 'remoto--find-github-token :and-return-value nil)
+        (expect (remoto--api "repos/owner/repo")
+                :to-throw 'user-error)))
 
   (it "skips auth when failure is cached"
     (let ((remoto--auth-failed t)
@@ -2561,11 +2561,13 @@ Returns the full path after completion, or INPUT if no completion."
       (let ((args (spy-calls-args-for 'ghub-get 0)))
         (expect (plist-get (cddr args) :auth) :to-equal 'none))))
 
-  (it "passes nil auth for default ghub token when authenticated"
+  (it "passes nil auth for default ghub token when no token found"
     (spy-on 'ghub-get)
+    (spy-on 'remoto--find-github-token :and-return-value nil)
     (let ((remoto--auth-failed nil)
           (remoto-github-auth nil)
-          (remoto--authenticated-user "testuser"))
+          (remoto--authenticated-user "testuser")
+          (remoto--effective-auth nil))
       (remoto--api-async "user/orgs" #'ignore)
       (let ((args (spy-calls-args-for 'ghub-get 0)))
         ;; nil auth lets ghub use its default token mechanism
@@ -2908,6 +2910,109 @@ Returns the full path after completion, or INPUT if no completion."
               (lambda (_resource _auth endpoint)
                 (user-error "Remoto: not found: %s" endpoint)))
       (expect (remoto--api "repos/acme/private-repo")
+              :to-throw 'user-error))))
+
+;;; Fresh session: try every auth avenue, fail loudly when none work
+
+(describe "pipeline: fresh session auth resolution"
+  ;; Simulate fresh Emacs: warm-auth hasn't run, all auth state is nil.
+  ;; ghub's own auth-source lookup fails (different host/user patterns).
+  ;; remoto--api should try remoto--find-github-token as a last resort.
+
+  (it "falls back to remoto--find-github-token when ghub auth fails"
+    (let ((remoto--auth-failed nil)
+          (remoto--effective-auth nil)
+          (remoto--authenticated-user nil)
+          (remoto-github-auth nil)
+          (call-count 0))
+      ;; ghub fails with nil auth, succeeds with a real token
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (cl-incf call-count)
+                (let ((auth (plist-get args :auth)))
+                  (if (stringp auth)
+                      '((default_branch . "main"))
+                    (error "Required Github token does not exist")))))
+      (spy-on 'remoto--find-github-token :and-return-value "ghp_fallback_token")
+      (let ((data (remoto--api "repos/acme/widgets")))
+        (expect data :to-be-truthy)
+        (expect (alist-get 'default_branch data) :to-equal "main")
+        ;; Should have cached the token for subsequent calls
+        (expect remoto--effective-auth :to-equal "ghp_fallback_token"))))
+
+  (it "does not set auth-failed when fallback token works"
+    (let ((remoto--auth-failed nil)
+          (remoto--effective-auth nil)
+          (remoto--authenticated-user nil)
+          (remoto-github-auth nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (let ((auth (plist-get args :auth)))
+                  (if (stringp auth)
+                      '((full_name . "acme/widgets"))
+                    (error "Required Github token does not exist")))))
+      (spy-on 'remoto--find-github-token :and-return-value "ghp_found")
+      (remoto--api "repos/acme/widgets")
+      (expect remoto--auth-failed :to-be nil))))
+
+(describe "pipeline: no auth token anywhere - fail loudly"
+  ;; No token exists: ghub fails, remoto--find-github-token returns
+  ;; nil.  Every avenue exhausted.  The user must see a clear error,
+  ;; not silent empty results.
+
+  (it "remoto--api signals user-error when all auth avenues fail"
+    (let ((remoto--auth-failed nil)
+          (remoto--effective-auth nil)
+          (remoto--authenticated-user nil)
+          (remoto-github-auth nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest _args)
+                (error "Required Github token does not exist")))
+      (spy-on 'remoto--find-github-token :and-return-value nil)
+      (expect (remoto--api "repos/acme/private-repo")
+              :to-throw 'user-error)))
+
+  (it "directory-files signals rather than returning silent empty list"
+    (let ((remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal))
+          (remoto--auth-failed nil)
+          (remoto--effective-auth nil)
+          (remoto--authenticated-user nil)
+          (remoto-github-auth nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest _args)
+                (error "Required Github token does not exist")))
+      (spy-on 'remoto--find-github-token :and-return-value nil)
+      (expect (directory-files "/github:acme/private@main:/")
+              :to-throw 'user-error)))
+
+  (it "file-exists-p signals rather than returning nil for auth failure"
+    (let ((remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal))
+          (remoto--auth-failed nil)
+          (remoto--effective-auth nil)
+          (remoto--authenticated-user nil)
+          (remoto-github-auth nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest _args)
+                (error "Required Github token does not exist")))
+      (spy-on 'remoto--find-github-token :and-return-value nil)
+      (expect (file-exists-p "/github:acme/private@main:/README.md")
+              :to-throw 'user-error)))
+
+  (it "insert-directory signals rather than inserting nothing"
+    (let ((remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal))
+          (remoto--auth-failed nil)
+          (remoto--effective-auth nil)
+          (remoto--authenticated-user nil)
+          (remoto-github-auth nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest _args)
+                (error "Required Github token does not exist")))
+      (spy-on 'remoto--find-github-token :and-return-value nil)
+      (expect (with-temp-buffer
+                (insert-directory "/github:acme/private@main:/" "-la"))
               :to-throw 'user-error))))
 
 (provide 'remoto-tests)
