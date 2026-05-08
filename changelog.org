@@ -3,6 +3,18 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [1.5.2] - 2026-05-08
+
+** Fixed
+- Always pass ~:host "api.github.com"~ to ~ghub-get~ in all call sites (~remoto--ghub-get~, ~remoto--api-async~). The conditional guard only sent it for string auth tokens, so unauthenticated calls (~auth = 'none~) hit ~github.com~ instead of the API, returning HTML that crashed the JSON parser.
+- ~remoto--json-reader~ returns nil instead of signaling on malformed JSON, preventing unhandled errors in async contexts where no ~condition-case~ protects the reader callback.
+- ~remoto--warm-auth~ no longer permanently disables auth when the idle-timer token lookup fails. Previously, a transient failure (GPG agent not ready, ghub not loaded) set ~remoto--auth-failed~ to t, locking out private repos for the entire session.
+
+** Added
+- Full pipeline tests asserting every segment (API, default-branch, fetch-tree, tree-entry, tree-children, file-exists-p, file-directory-p, file-regular-p, directory-files, file-attributes, insert-directory) returns non-nil data.
+- Auth forwarding tests verifying the token reaches ghub-get and that auth=none is used when auth-failed is set.
+- JSON reader unit tests covering headers, HTML error pages, empty buffers.
+
 * [1.5.1] - 2026-05-07
 
 ** Fixed

@@ -143,26 +143,27 @@ across different ghub and url.el versions."
     (backward-char 1)
     (let ((body (buffer-substring-no-properties (point) (point-max))))
       (unless (string-empty-p body)
-        (json-parse-string
-         (decode-coding-string body 'utf-8)
-         :object-type 'alist
-         :array-type 'list
-         :null-object nil
-         :false-object nil)))))
+        (condition-case nil
+            (json-parse-string
+             (decode-coding-string body 'utf-8)
+             :object-type 'alist
+             :array-type 'list
+             :null-object nil
+             :false-object nil)
+          (json-error nil))))))
 
 (defun remoto--ghub-get (resource auth endpoint)
   "Call `ghub-get' on RESOURCE with AUTH, translating errors.
-ENDPOINT is used in error messages for context.  When AUTH is a
-literal token string, `:host' must be specified explicitly because
-ghub's default host resolution sends to github.com (HTML) instead
-of api.github.com (JSON API)."
+ENDPOINT is used in error messages for context.  Always passes
+`:host \"api.github.com\"' explicitly - ghub's default host
+resolution can resolve to github.com (HTML) instead of the
+JSON API endpoint."
   (condition-case err
       (let ((inhibit-message (not ghub-debug)))
-        (apply #'ghub-get resource nil
-               :auth auth
-               :reader #'remoto--json-reader
-               (when (stringp auth)
-                 (list :host "api.github.com"))))
+        (ghub-get resource nil
+                 :auth auth
+                 :reader #'remoto--json-reader
+                 :host "api.github.com"))
     (ghub-404
      (user-error "Remoto: not found: %s" endpoint))
     (ghub-403
@@ -1474,24 +1475,23 @@ queries that returned zero results."
 
 (defun remoto--api-async (endpoint callback)
   "Call GitHub REST API ENDPOINT asynchronously via ghub.
-CALLBACK receives the parsed JSON response. Errors are silently
-dropped since async callers can't meaningfully handle them in the
-completion context. Auth mirrors `remoto--api': nil lets ghub use
-its default token, `none' skips auth entirely."
+CALLBACK receives the parsed JSON response.  Errors are silently
+dropped since async callers cannot meaningfully handle them in the
+completion context.  Always passes `:host \"api.github.com\"'
+explicitly to avoid ghub resolving to the HTML site."
   (let* ((resource (concat "/" endpoint))
          (auth (cond (remoto--auth-failed 'none)
                      (remoto--effective-auth remoto--effective-auth)
                      (t remoto-github-auth))))
     (condition-case nil
         (let ((inhibit-message t))
-          (apply #'ghub-get resource nil
-                 :auth auth
-                 :reader #'remoto--json-reader
-                 :callback callback
-                 :errorback (lambda (_err _headers _status _req)
-                              nil)
-                 (when (stringp auth)
-                   (list :host "api.github.com"))))
+          (ghub-get resource nil
+                    :auth auth
+                    :reader #'remoto--json-reader
+                    :host "api.github.com"
+                    :callback callback
+                    :errorback (lambda (_err _headers _status _req)
+                                 nil)))
       (error nil))))
 
 (defun remoto--debounce (key fn)
@@ -2368,9 +2368,12 @@ directly and passing the token string to ghub."
            (message "Remoto: token found but API call failed (%s); \
 using unauthenticated access"
                     (error-message-string err))))
-      (setq remoto--auth-failed t)
-      (message "Remoto: no GitHub token found; only public repos available. \
-See `remoto-github-auth' or configure ghub auth-source, then M-x remoto-reset-auth"))))
+      ;; No token found yet - don't set auth-failed so remoto--api
+      ;; can still try ghub's own auth-source resolution on demand.
+      ;; The warm-up is opportunistic; failing here should not lock
+      ;; out the session permanently.
+      (message "Remoto: no token found during warm-up; \
+will try ghub auth on first API call"))))
 
 (run-with-idle-timer 2 nil #'remoto--warm-auth)
 
