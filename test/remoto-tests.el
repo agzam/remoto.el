@@ -47,6 +47,36 @@
      (remoto-test--install-mock-tree)
      ,@body))
 
+;;; JSON reader
+
+(describe "remoto--json-reader"
+  (it "parses a valid JSON object"
+    (with-temp-buffer
+      (insert "{\"foo\": 42}")
+      (let ((result (remoto--json-reader nil)))
+        (expect (alist-get 'foo result) :to-equal 42))))
+
+  (it "skips HTTP headers before JSON body"
+    (with-temp-buffer
+      (insert "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\": true}")
+      (let ((result (remoto--json-reader nil)))
+        (expect (alist-get 'ok result) :to-equal t)
+        (expect result :to-be-truthy))))
+
+  (it "returns nil for HTML error pages instead of signaling"
+    (with-temp-buffer
+      (insert "<!DOCTYPE html><html><body>{not json at all</body></html>")
+      (expect (remoto--json-reader nil) :to-be nil)))
+
+  (it "returns nil for empty buffer"
+    (with-temp-buffer
+      (expect (remoto--json-reader nil) :to-be nil)))
+
+  (it "returns arrays as lists"
+    (with-temp-buffer
+      (insert "[1, 2, 3]")
+      (expect (remoto--json-reader nil) :to-equal '(1 2 3)))))
+
 ;;; Path parsing
 
 (describe "remoto--parse-path"
@@ -934,17 +964,17 @@
       (expect (remoto--api "repos/owner/repo") :to-equal '((name . "test-repo")))
       (expect remoto--auth-failed :to-be nil)))
 
-  (it "falls back to unauthenticated on auth error"
-    (let ((remoto--auth-failed nil)
-          (remoto-github-auth nil)
-          (remoto-auth-timeout 5))
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (_resource &optional _params &rest args)
-                (if (eq (plist-get args :auth) 'none)
-                    '((name . "test-repo"))
-                  (error "Package ghub requires a Github API token"))))
-      (expect (remoto--api "repos/owner/repo") :to-equal '((name . "test-repo")))
-      (expect remoto--auth-failed :to-be-truthy)))
+    (it "signals user-error on auth error instead of silent fallback"
+      (let ((remoto--auth-failed nil)
+            (remoto--effective-auth nil)
+            (remoto-github-auth nil)
+            (remoto-auth-timeout 5))
+        (spy-on 'ghub-get :and-call-fake
+                (lambda (_resource &optional _params &rest _args)
+                  (error "Package ghub requires a Github API token")))
+        (spy-on 'remoto--find-github-token :and-return-value nil)
+        (expect (remoto--api "repos/owner/repo")
+                :to-throw 'user-error)))
 
   (it "skips auth when failure is cached"
     (let ((remoto--auth-failed t)
@@ -1006,15 +1036,15 @@
       (insert "plain text no braces")
       (expect (remoto--json-reader nil) :to-be nil)))
 
-  (it "signals json-error on malformed JSON"
+  (it "returns nil on malformed JSON"
     (with-temp-buffer
       (insert "{broken")
-      (expect (remoto--json-reader nil) :to-throw 'json-error)))
+      (expect (remoto--json-reader nil) :to-be nil)))
 
-  (it "signals json-error on truncated JSON"
+  (it "returns nil on truncated JSON"
     (with-temp-buffer
       (insert "{\"name\": ")
-      (expect (remoto--json-reader nil) :to-throw 'json-error))))
+      (expect (remoto--json-reader nil) :to-be nil))))
 
 (describe "remoto--ghub-get json-error handling"
   (it "translates json-parse-error to user-error"
@@ -1066,7 +1096,7 @@
       (expect remoto--effective-auth :to-equal "ghp_fake_token")
       (expect remoto--auth-failed :to-be nil)))
 
-  (it "sets auth-failed when no token found"
+  (it "does not set auth-failed when no token found"
     (let ((remoto--authenticated-user nil)
           (remoto--auth-failed nil)
           (remoto--effective-auth nil)
@@ -1074,7 +1104,9 @@
       (spy-on 'remoto--find-github-token :and-return-value nil)
       (spy-on 'message)
       (remoto--warm-auth)
-      (expect remoto--auth-failed :to-be-truthy)
+      ;; warm-auth is opportunistic; missing token should NOT lock out
+      ;; auth permanently - remoto--api will try ghub's own resolution.
+      (expect remoto--auth-failed :to-be nil)
       (expect remoto--authenticated-user :to-be nil)))
 
   (it "sets auth-failed when API call fails with found token"
@@ -2529,11 +2561,13 @@ Returns the full path after completion, or INPUT if no completion."
       (let ((args (spy-calls-args-for 'ghub-get 0)))
         (expect (plist-get (cddr args) :auth) :to-equal 'none))))
 
-  (it "passes nil auth for default ghub token when authenticated"
+  (it "passes nil auth for default ghub token when no token found"
     (spy-on 'ghub-get)
+    (spy-on 'remoto--find-github-token :and-return-value nil)
     (let ((remoto--auth-failed nil)
           (remoto-github-auth nil)
-          (remoto--authenticated-user "testuser"))
+          (remoto--authenticated-user "testuser")
+          (remoto--effective-auth nil))
       (remoto--api-async "user/orgs" #'ignore)
       (let ((args (spy-calls-args-for 'ghub-get 0)))
         ;; nil auth lets ghub use its default token mechanism
@@ -2586,6 +2620,400 @@ Returns the full path after completion, or INPUT if no completion."
         (expect result :to-equal '("linux" "uemacs"))
         ;; But also schedules background refresh
         (expect 'remoto--debounce :to-have-been-called)))))
+
+;;; Full pipeline: every segment must yield data
+
+;; Mock API responses for a realistic repo.  remoto--api is the single
+;; network boundary - everything above it is pure data transformation.
+;; These tests verify that data flows through every segment without
+;; being silently swallowed.
+
+(defconst remoto-test--pipe-prefix "/github:acme/widgets@main:"
+  "Canonical path prefix for pipeline tests.")
+
+(defconst remoto-test--pipe-repo-meta
+  '((full_name . "acme/widgets")
+    (default_branch . "main")
+    (private . t))
+  "Mock repos/:owner/:repo response.")
+
+(defconst remoto-test--pipe-tree-response
+  `((sha . "abc123")
+    (truncated . :false)
+    (tree . (((path . "README.md")
+              (type . "blob") (size . 800) (sha . "aaa") (mode . "100644"))
+             ((path . "src")
+              (type . "tree") (size . 0) (sha . "bbb") (mode . "040000"))
+             ((path . "src/app.py")
+              (type . "blob") (size . 2400) (sha . "ccc") (mode . "100644"))
+             ((path . "src/utils.py")
+              (type . "blob") (size . 650) (sha . "ddd") (mode . "100644"))
+             ((path . "docs")
+              (type . "tree") (size . 0) (sha . "eee") (mode . "040000"))
+             ((path . "docs/guide.md")
+              (type . "blob") (size . 3100) (sha . "fff") (mode . "100644")))))
+  "Mock git/trees/:ref?recursive=1 response.")
+
+(defun remoto-test--pipe-api-fake (endpoint)
+  "Mock API dispatcher for pipeline tests."
+  (cond
+   ((string-match-p "repos/acme/widgets$" endpoint)
+    remoto-test--pipe-repo-meta)
+   ((string-match-p "git/trees/" endpoint)
+    remoto-test--pipe-tree-response)
+   (t (user-error "Remoto: not found: %s" endpoint))))
+
+(defmacro remoto-test-with-pipeline (&rest body)
+  "Run BODY with mock API wired through the full pipeline."
+  (declare (indent 0))
+  `(let ((remoto--tree-cache (make-hash-table :test 'equal))
+         (remoto--default-branch-cache (make-hash-table :test 'equal))
+         (remoto--content-cache (make-hash-table :test 'equal))
+         (remoto--dir-contents-cache (make-hash-table :test 'equal))
+         (remoto--file-commits-cache (make-hash-table :test 'equal))
+         (remoto--auth-failed nil)
+         (remoto--effective-auth "ghp_mock_token")
+         (remoto--authenticated-user "mockuser"))
+     (spy-on 'remoto--api :and-call-fake #'remoto-test--pipe-api-fake)
+     ,@body))
+
+(describe "pipeline: every segment yields data"
+  ;; Segment 1: API returns repo metadata
+  (it "remoto--api returns repo metadata"
+    (remoto-test-with-pipeline
+      (let ((data (remoto--api "repos/acme/widgets")))
+        (expect data :to-be-truthy)
+        (expect (alist-get 'full_name data) :to-equal "acme/widgets")
+        (expect (alist-get 'default_branch data) :to-equal "main"))))
+
+  ;; Segment 2: default branch extraction
+  (it "remoto--default-branch returns a non-empty string"
+    (remoto-test-with-pipeline
+      (let ((branch (remoto--default-branch "acme" "widgets")))
+        (expect branch :to-be-truthy)
+        (expect (stringp branch) :to-be-truthy)
+        (expect (string-empty-p branch) :not :to-be-truthy))))
+
+  ;; Segment 3: tree fetch builds a populated hash table
+  (it "remoto--fetch-tree returns a hash table with entries"
+    (remoto-test-with-pipeline
+      (let ((tree (remoto--fetch-tree "acme" "widgets" "main")))
+        (expect tree :to-be-truthy)
+        (expect (hash-table-p tree) :to-be-truthy)
+        ;; Must have more than just root entries
+        (expect (hash-table-count tree) :to-be-greater-than 2)
+        ;; Root entry must exist
+        (expect (gethash "" tree) :to-be-truthy))))
+
+  ;; Segment 4: ensure-tree caches and returns the tree
+  (it "remoto--ensure-tree caches and returns populated tree"
+    (remoto-test-with-pipeline
+      (let* ((parsed (remoto--parse-path
+                      (concat remoto-test--pipe-prefix "/")))
+             (tree (remoto--ensure-tree parsed)))
+        (expect tree :to-be-truthy)
+        (expect (hash-table-p tree) :to-be-truthy)
+        (expect (hash-table-count tree) :to-be-greater-than 2)
+        ;; Second call should return cached (spy not called again)
+        (let ((call-count (spy-calls-count 'remoto--api)))
+          (remoto--ensure-tree parsed)
+          (expect (spy-calls-count 'remoto--api) :to-equal call-count)))))
+
+  ;; Segment 5: tree-entry finds root, directories, and files
+  (it "remoto--tree-entry finds root directory"
+    (remoto-test-with-pipeline
+      (let ((entry (remoto--tree-entry
+                    (remoto--parse-path
+                     (concat remoto-test--pipe-prefix "/")))))
+        (expect entry :to-be-truthy)
+        (expect (alist-get 'type entry) :to-equal "tree"))))
+
+  (it "remoto--tree-entry finds a subdirectory"
+    (remoto-test-with-pipeline
+      (let ((entry (remoto--tree-entry
+                    (remoto--parse-path
+                     (concat remoto-test--pipe-prefix "/src")))))
+        (expect entry :to-be-truthy)
+        (expect (alist-get 'type entry) :to-equal "tree"))))
+
+  (it "remoto--tree-entry finds a file"
+    (remoto-test-with-pipeline
+      (let ((entry (remoto--tree-entry
+                    (remoto--parse-path
+                     (concat remoto-test--pipe-prefix "/README.md")))))
+        (expect entry :to-be-truthy)
+        (expect (alist-get 'type entry) :to-equal "blob")
+        (expect (alist-get 'size entry) :to-be-greater-than 0))))
+
+  (it "remoto--tree-entry finds a nested file"
+    (remoto-test-with-pipeline
+      (let ((entry (remoto--tree-entry
+                    (remoto--parse-path
+                     (concat remoto-test--pipe-prefix "/src/app.py")))))
+        (expect entry :to-be-truthy)
+        (expect (alist-get 'type entry) :to-equal "blob")
+        (expect (alist-get 'sha entry) :to-be-truthy))))
+
+  (it "remoto--tree-entry returns nil for nonexistent path"
+    (remoto-test-with-pipeline
+      (expect (remoto--tree-entry
+               (remoto--parse-path
+                (concat remoto-test--pipe-prefix "/no/such/file.txt")))
+              :to-be nil)))
+
+  ;; Segment 6: tree-children returns non-empty lists
+  (it "remoto--tree-children lists root children"
+    (remoto-test-with-pipeline
+      (let* ((children (remoto--tree-children
+                        (remoto--parse-path
+                         (concat remoto-test--pipe-prefix "/")))))
+        (expect children :to-be-truthy)
+        (expect (length children) :to-be-greater-than 0)
+        (let ((names (mapcar #'car children)))
+          (expect (member "README.md" names) :to-be-truthy)
+          (expect (member "src" names) :to-be-truthy)
+          (expect (member "docs" names) :to-be-truthy)))))
+
+  (it "remoto--tree-children lists subdirectory children"
+    (remoto-test-with-pipeline
+      (let* ((children (remoto--tree-children
+                        (remoto--parse-path
+                         (concat remoto-test--pipe-prefix "/src/")))))
+        (expect children :to-be-truthy)
+        (expect (length children) :to-equal 2)
+        (let ((names (mapcar #'car children)))
+          (expect (member "app.py" names) :to-be-truthy)
+          (expect (member "utils.py" names) :to-be-truthy)))))
+
+  ;; Segment 7: file-exists-p
+  (it "file-exists-p returns t for known file"
+    (remoto-test-with-pipeline
+      (expect (file-exists-p (concat remoto-test--pipe-prefix "/README.md"))
+              :to-be-truthy)))
+
+  (it "file-exists-p returns t for directory"
+    (remoto-test-with-pipeline
+      (expect (file-exists-p (concat remoto-test--pipe-prefix "/src"))
+              :to-be-truthy)))
+
+  (it "file-exists-p returns nil for missing path"
+    (remoto-test-with-pipeline
+      (expect (file-exists-p (concat remoto-test--pipe-prefix "/nope.txt"))
+              :not :to-be-truthy)))
+
+  ;; Segment 8: file-directory-p / file-regular-p
+  (it "file-directory-p returns t for directories"
+    (remoto-test-with-pipeline
+      (expect (file-directory-p (concat remoto-test--pipe-prefix "/src"))
+              :to-be-truthy)
+      (expect (file-directory-p (concat remoto-test--pipe-prefix "/"))
+              :to-be-truthy)))
+
+  (it "file-directory-p returns nil for files"
+    (remoto-test-with-pipeline
+      (expect (file-directory-p (concat remoto-test--pipe-prefix "/README.md"))
+              :not :to-be-truthy)))
+
+  (it "file-regular-p returns t for files"
+    (remoto-test-with-pipeline
+      (expect (file-regular-p (concat remoto-test--pipe-prefix "/README.md"))
+              :to-be-truthy)
+      (expect (file-regular-p (concat remoto-test--pipe-prefix "/src/app.py"))
+              :to-be-truthy)))
+
+  (it "file-regular-p returns nil for directories"
+    (remoto-test-with-pipeline
+      (expect (file-regular-p (concat remoto-test--pipe-prefix "/src"))
+              :not :to-be-truthy)))
+
+  ;; Segment 9: directory-files
+  (it "directory-files lists root with . and .."
+    (remoto-test-with-pipeline
+      (let ((files (directory-files (concat remoto-test--pipe-prefix "/"))))
+        (expect files :to-be-truthy)
+        (expect (member "." files) :to-be-truthy)
+        (expect (member ".." files) :to-be-truthy)
+        (expect (member "README.md" files) :to-be-truthy)
+        (expect (member "src" files) :to-be-truthy))))
+
+  (it "directory-files lists subdirectory contents"
+    (remoto-test-with-pipeline
+      (let ((files (directory-files (concat remoto-test--pipe-prefix "/src/"))))
+        (expect files :to-be-truthy)
+        (expect (length files) :to-be-greater-than 2) ;; . and .. plus entries
+        (expect (member "app.py" files) :to-be-truthy))))
+
+  ;; Segment 10: file-attributes
+  (it "file-attributes returns non-nil for file with plausible size"
+    (remoto-test-with-pipeline
+      (let ((attrs (file-attributes
+                    (concat remoto-test--pipe-prefix "/README.md"))))
+        (expect attrs :to-be-truthy)
+        (expect (file-attribute-size attrs) :to-be-greater-than 0))))
+
+  (it "file-attributes returns non-nil for directory"
+    (remoto-test-with-pipeline
+      (let ((attrs (file-attributes
+                    (concat remoto-test--pipe-prefix "/src"))))
+        (expect attrs :to-be-truthy)
+        ;; directory attribute: t for dirs
+        (expect (file-attribute-type attrs) :to-equal t))))
+
+  ;; Segment 11: insert-directory produces output
+  (it "insert-directory generates dired-style listing"
+    (remoto-test-with-pipeline
+      (with-temp-buffer
+        (insert-directory (concat remoto-test--pipe-prefix "/") "-la")
+        (let ((content (buffer-string)))
+          (expect (length content) :to-be-greater-than 0)
+          (expect content :to-match "README\\.md")
+          (expect content :to-match "src"))))))
+
+;;; Pipeline: auth forwarding
+
+(describe "pipeline: auth is forwarded to API calls"
+  (it "passes effective-auth token to remoto--ghub-get"
+    (let ((remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal))
+          (remoto--auth-failed nil)
+          (remoto--effective-auth "ghp_private_token")
+          (remoto--authenticated-user "testuser")
+          (captured-auth nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (setq captured-auth (plist-get args :auth))
+                '((default_branch . "main"))))
+      (remoto--default-branch "acme" "widgets")
+      (expect captured-auth :to-equal "ghp_private_token")))
+
+  (it "uses auth=none when auth-failed is t"
+    (let ((remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal))
+          (remoto--auth-failed t)
+          (remoto--effective-auth nil)
+          (remoto--authenticated-user nil)
+          (captured-auth nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (setq captured-auth (plist-get args :auth))
+                '((default_branch . "main"))))
+      (remoto--default-branch "acme" "widgets")
+      (expect captured-auth :to-equal 'none)))
+
+  (it "signals user-error for private repo with auth=none (404)"
+    (let ((remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal))
+          (remoto--auth-failed t)
+          (remoto--effective-auth nil)
+          (remoto--authenticated-user nil))
+      (spy-on 'remoto--ghub-get :and-call-fake
+              (lambda (_resource _auth endpoint)
+                (user-error "Remoto: not found: %s" endpoint)))
+      (expect (remoto--api "repos/acme/private-repo")
+              :to-throw 'user-error))))
+
+;;; Fresh session: try every auth avenue, fail loudly when none work
+
+(describe "pipeline: fresh session auth resolution"
+  ;; Simulate fresh Emacs: warm-auth hasn't run, all auth state is nil.
+  ;; ghub's own auth-source lookup fails (different host/user patterns).
+  ;; remoto--api should try remoto--find-github-token as a last resort.
+
+  (it "falls back to remoto--find-github-token when ghub auth fails"
+    (let ((remoto--auth-failed nil)
+          (remoto--effective-auth nil)
+          (remoto--authenticated-user nil)
+          (remoto-github-auth nil)
+          (call-count 0))
+      ;; ghub fails with nil auth, succeeds with a real token
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (cl-incf call-count)
+                (let ((auth (plist-get args :auth)))
+                  (if (stringp auth)
+                      '((default_branch . "main"))
+                    (error "Required Github token does not exist")))))
+      (spy-on 'remoto--find-github-token :and-return-value "ghp_fallback_token")
+      (let ((data (remoto--api "repos/acme/widgets")))
+        (expect data :to-be-truthy)
+        (expect (alist-get 'default_branch data) :to-equal "main")
+        ;; Should have cached the token for subsequent calls
+        (expect remoto--effective-auth :to-equal "ghp_fallback_token"))))
+
+  (it "does not set auth-failed when fallback token works"
+    (let ((remoto--auth-failed nil)
+          (remoto--effective-auth nil)
+          (remoto--authenticated-user nil)
+          (remoto-github-auth nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (let ((auth (plist-get args :auth)))
+                  (if (stringp auth)
+                      '((full_name . "acme/widgets"))
+                    (error "Required Github token does not exist")))))
+      (spy-on 'remoto--find-github-token :and-return-value "ghp_found")
+      (remoto--api "repos/acme/widgets")
+      (expect remoto--auth-failed :to-be nil))))
+
+(describe "pipeline: no auth token anywhere - fail loudly"
+  ;; No token exists: ghub fails, remoto--find-github-token returns
+  ;; nil.  Every avenue exhausted.  The user must see a clear error,
+  ;; not silent empty results.
+
+  (it "remoto--api signals user-error when all auth avenues fail"
+    (let ((remoto--auth-failed nil)
+          (remoto--effective-auth nil)
+          (remoto--authenticated-user nil)
+          (remoto-github-auth nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest _args)
+                (error "Required Github token does not exist")))
+      (spy-on 'remoto--find-github-token :and-return-value nil)
+      (expect (remoto--api "repos/acme/private-repo")
+              :to-throw 'user-error)))
+
+  (it "directory-files signals rather than returning silent empty list"
+    (let ((remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal))
+          (remoto--auth-failed nil)
+          (remoto--effective-auth nil)
+          (remoto--authenticated-user nil)
+          (remoto-github-auth nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest _args)
+                (error "Required Github token does not exist")))
+      (spy-on 'remoto--find-github-token :and-return-value nil)
+      (expect (directory-files "/github:acme/private@main:/")
+              :to-throw 'user-error)))
+
+  (it "file-exists-p signals rather than returning nil for auth failure"
+    (let ((remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal))
+          (remoto--auth-failed nil)
+          (remoto--effective-auth nil)
+          (remoto--authenticated-user nil)
+          (remoto-github-auth nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest _args)
+                (error "Required Github token does not exist")))
+      (spy-on 'remoto--find-github-token :and-return-value nil)
+      (expect (file-exists-p "/github:acme/private@main:/README.md")
+              :to-throw 'user-error)))
+
+  (it "insert-directory signals rather than inserting nothing"
+    (let ((remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal))
+          (remoto--auth-failed nil)
+          (remoto--effective-auth nil)
+          (remoto--authenticated-user nil)
+          (remoto-github-auth nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest _args)
+                (error "Required Github token does not exist")))
+      (spy-on 'remoto--find-github-token :and-return-value nil)
+      (expect (with-temp-buffer
+                (insert-directory "/github:acme/private@main:/" "-la"))
+              :to-throw 'user-error))))
 
 (provide 'remoto-tests)
 
