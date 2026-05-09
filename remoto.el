@@ -227,6 +227,21 @@ configure a GitHub token in auth-source, then M-x remoto-reset-auth"
 configure a GitHub token in auth-source, then M-x remoto-reset-auth"
                      endpoint (error-message-string err)))))))
 
+(defun remoto--paginated-api (endpoint per-page)
+  "Wrapper for remoto--api that obtains full results from paginated api."
+  (let
+      ((page 1)
+       (full-data nil)
+       (query-endpoint (concat endpoint (if (cl-search "?" endpoint) "&" "?"))))
+    (while
+	(let*
+	    ((endpoint (format "%sper_page=%d&page=%d" query-endpoint per-page page))
+	     (page-data (remoto--api endpoint)))
+	  (setq page (+ page 1))
+	  (setq full-data (append full-data page-data))
+	  (eq (length page-data) per-page)))
+    full-data))
+
 (defun remoto-reset-auth ()
   "Clear the auth failure cache, retrying token lookup on next API call.
 Use after adding a GitHub token to auth-source."
@@ -1563,8 +1578,8 @@ Otherwise searches by repository name."
                  (< (- now (car entry)) remoto-search-cache-ttl)))
         (cdr entry)
       (condition-case nil
-          (let* ((endpoint (format "repos/%s/%s/branches?per_page=100" owner repo))
-                 (data (remoto--api endpoint))
+          (let* ((endpoint (format "repos/%s/%s/branches" owner repo))
+                 (data (remoto--paginated-api endpoint 100))
                  (branches (mapcar (lambda (item) (alist-get 'name item)) data)))
             (puthash key (cons now branches) remoto--branches-cache)
             branches)
@@ -1583,8 +1598,8 @@ Otherwise searches by repository name."
                  (< (- now (car entry)) remoto-search-cache-ttl)))
         (cdr entry)
       (condition-case nil
-          (let* ((endpoint (format "repos/%s/%s/tags?per_page=100" owner repo))
-                 (data (remoto--api endpoint))
+          (let* ((endpoint (format "repos/%s/%s/tags" owner repo))
+                 (data (remoto--paginated-api endpoint 100))
                  (tags (mapcar (lambda (item) (alist-get 'name item)) data)))
             (puthash key (cons now tags) remoto--tags-cache)
             tags)
@@ -1675,7 +1690,7 @@ Cached per `remoto-search-cache-ttl'. Capped at 20 API calls."
 Uses /user/orgs which includes private memberships.
 Returns propertized login strings with type and description."
   (condition-case nil
-      (let ((data (remoto--api "user/orgs?per_page=100")))
+      (let ((data (remoto--paginated-api "user/orgs" 100)))
         (mapcar (lambda (item)
                   (propertize (alist-get 'login item)
                               'remoto-acct-type "Organization"
