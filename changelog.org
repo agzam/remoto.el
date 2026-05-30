@@ -3,6 +3,19 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [1.6.0] - 2026-05-30
+
+** Added
+- In-flight fetch indicator: while completion data loads (for example the org repo list at ~/github:OWNER/~), a ~[fetching...]~ marker appears in the minibuffer. It is drawn as minibuffer text, so it works with any completion UI (vertico, icomplete, default). Toggle with ~remoto-show-fetch-indicator~ (default t).
+- ~remoto-show-fetch-indicator~ - customization to enable or disable the indicator.
+- ~remoto--invalidate-completion-ui~ - refreshes an in-progress minibuffer completion across front-ends after async data arrives.
+- Unit tests covering the in-flight counter (single decrement on success, error, and synchronous failure; correct behavior with overlapping fetches), the indicator overlay lifecycle, and the completion-refresh invalidation.
+
+** Fixed
+- Completion candidates now appear automatically when an async fetch completes. Previously the list stayed empty until the input was edited (for example deleting and retyping the trailing slash), because vertico skips recomputation while the typed input is unchanged. The refresh now voids vertico's input cache and the default sorted-completions cache, runs ~post-command-hook~ for icomplete/fido, and rebuilds ~*Completions*~ when it is displayed.
+- ~remoto--api-async~ decrements its in-flight counter exactly once even though ~ghub~ retries the callback with fewer arguments on an arity mismatch. Without this the indicator could clear while other fetches were still running.
+- Clean byte-compilation: ~remoto-search-cache-ttl~ was referenced (in ~remoto--fetch-dir-children-light~) before its ~defcustom~, producing a free-variable warning that failed ~make check-compile~. The defcustom is now defined ahead of its first use.
+
 * [1.5.3] - 2026-05-30
 
 ** Fixed

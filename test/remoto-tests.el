@@ -3048,6 +3048,163 @@ Returns the full path after completion, or INPUT if no completion."
                 (insert-directory "/github:acme/private@main:/" "-la"))
               :to-throw 'user-error))))
 
+;;; Fetch indicator and async completion refresh
+
+(defvar vertico--input)
+
+(describe "remoto--api-async in-flight counter"
+  (before-each
+    (spy-on 'remoto--show-status))
+
+  (it "increments while a request is pending"
+    (let ((remoto--inflight-count 0)
+          (remoto--auth-failed nil)
+          (remoto--effective-auth 'token))
+      (spy-on 'ghub-get)
+      (remoto--api-async "search/x" #'ignore)
+      (expect remoto--inflight-count :to-equal 1)))
+
+  (it "decrements once and forwards the value on success"
+    (let ((remoto--inflight-count 0)
+          (remoto--auth-failed nil)
+          (remoto--effective-auth 'token)
+          (got 'none))
+      ;; ghub calls the callback as (value headers status req); the wrapper
+      ;; must absorb the extra args and forward only the value, once.
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (funcall (plist-get args :callback) 'VALUE 'h 's 'r)))
+      (remoto--api-async "search/x" (lambda (d) (setq got d)))
+      (expect remoto--inflight-count :to-equal 0)
+      (expect got :to-be 'VALUE)))
+
+  (it "decrements once on error"
+    (let ((remoto--inflight-count 0)
+          (remoto--auth-failed nil)
+          (remoto--effective-auth 'token))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (funcall (plist-get args :errorback) 'err 'h 's 'r)))
+      (remoto--api-async "search/y" #'ignore)
+      (expect remoto--inflight-count :to-equal 0)))
+
+  (it "does not leak when ghub-get throws synchronously"
+    (let ((remoto--inflight-count 0)
+          (remoto--auth-failed nil)
+          (remoto--effective-auth 'token))
+      (spy-on 'ghub-get :and-call-fake (lambda (&rest _) (error "boom")))
+      (remoto--api-async "search/z" #'ignore)
+      (expect remoto--inflight-count :to-equal 0)))
+
+  (it "stays positive when one of two overlapping fetches finishes"
+    (let ((remoto--inflight-count 0)
+          (remoto--auth-failed nil)
+          (remoto--effective-auth 'token)
+          (callbacks '()))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (push (plist-get args :callback) callbacks)))
+      (remoto--api-async "a" #'ignore)
+      (remoto--api-async "b" #'ignore)
+      (expect remoto--inflight-count :to-equal 2)
+      (funcall (car callbacks) 'V 'h 's 'r)
+      (expect remoto--inflight-count :to-equal 1))))
+
+(describe "remoto fetch indicator overlay"
+  (it "renders the indicator at the end of the buffer"
+    (let ((remoto--status-overlay nil))
+      (with-temp-buffer
+        (insert "/github:torvalds/")
+        (remoto--render-status (current-buffer))
+        (expect (overlayp remoto--status-overlay) :to-be-truthy)
+        (expect (substring-no-properties
+                 (overlay-get remoto--status-overlay 'after-string))
+                :to-equal "  [fetching...]")
+        (remoto--clear-status)
+        (expect remoto--status-overlay :to-be nil))))
+
+  (it "reuses one overlay across repeated renders"
+    (let ((remoto--status-overlay nil))
+      (with-temp-buffer
+        (insert "/github:foo/")
+        (remoto--render-status (current-buffer))
+        (let ((first remoto--status-overlay))
+          (remoto--render-status (current-buffer))
+          (expect remoto--status-overlay :to-be first))
+        (remoto--clear-status))))
+
+  (it "clears the overlay when the counter reaches zero"
+    (let ((remoto--inflight-count 1)
+          (remoto--status-overlay nil))
+      (with-temp-buffer
+        (setq remoto--status-overlay (make-overlay (point-min) (point-min)))
+        (remoto--inflight-dec)
+        (expect remoto--inflight-count :to-equal 0)
+        (expect remoto--status-overlay :to-be nil))))
+
+  (it "keeps the overlay while requests remain"
+    (let ((remoto--inflight-count 2)
+          (remoto--status-overlay nil))
+      (with-temp-buffer
+        (setq remoto--status-overlay (make-overlay (point-min) (point-min)))
+        (remoto--inflight-dec)
+        (expect remoto--inflight-count :to-equal 1)
+        (expect (overlayp remoto--status-overlay) :to-be-truthy)
+        (remoto--clear-status))))
+
+  (it "is a no-op without an active minibuffer"
+    (let ((remoto--status-overlay nil)
+          (remoto-show-fetch-indicator t))
+      (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil)))
+        (remoto--show-status))
+      (expect remoto--status-overlay :to-be nil)))
+
+  (it "respects remoto-show-fetch-indicator set to nil"
+    (let ((remoto-show-fetch-indicator nil))
+      (spy-on 'remoto--render-status)
+      (remoto--show-status)
+      (expect 'remoto--render-status :not :to-have-been-called))))
+
+(describe "remoto--invalidate-completion-ui"
+  (it "voids the default sorted-completions cache"
+    (let ((completion-all-sorted-completions 'stale)
+          (post-command-hook nil))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) nil)))
+        (remoto--invalidate-completion-ui))
+      (expect completion-all-sorted-completions :to-be nil)))
+
+  (it "voids vertico's input cache so it recomputes"
+    (let ((completion-all-sorted-completions nil)
+          (post-command-hook nil)
+          (vertico--input '("torvalds/" . 9)))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) nil)))
+        (remoto--invalidate-completion-ui))
+      (expect vertico--input :to-be t)))
+
+  (it "runs post-command-hook for hook-driven UIs"
+    (let* ((ran nil)
+           (completion-all-sorted-completions nil)
+           (post-command-hook (list (lambda () (setq ran t)))))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) nil)))
+        (remoto--invalidate-completion-ui))
+      (expect ran :to-be-truthy)))
+
+  (it "does not rebuild *Completions* when it is hidden"
+    (let ((completion-all-sorted-completions nil)
+          (post-command-hook nil))
+      (spy-on 'minibuffer-completion-help)
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) nil)))
+        (remoto--invalidate-completion-ui))
+      (expect 'minibuffer-completion-help :not :to-have-been-called)))
+
+  (it "rebuilds *Completions* when it is displayed"
+    (let ((completion-all-sorted-completions nil)
+          (post-command-hook nil))
+      (spy-on 'minibuffer-completion-help)
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) 'win)))
+        (remoto--invalidate-completion-ui))
+      (expect 'minibuffer-completion-help :to-have-been-called))))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:

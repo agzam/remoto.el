@@ -5,7 +5,7 @@
 ;; Author: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: April 24, 2026
-;; Version: 1.5.3
+;; Version: 1.6.0
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
 ;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
@@ -115,6 +115,14 @@ authinfo) exceeds this limit, remoto falls back to unauthenticated
 access for that request.  Use `remoto-reset-auth' to retry after
 adding a token."
   :type 'number
+  :group 'remoto)
+
+(defcustom remoto-search-cache-ttl 300
+  "Seconds before cached API results expire.
+Set to 0 to disable caching.  Applies to the search, branch, and
+directory-listing caches.  Defined early so functions above the
+\"Repository search\" section can reference it at byte-compile time."
+  :type 'integer
   :group 'remoto)
 
 (defvar remoto--auth-failed nil
@@ -1433,12 +1441,6 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
   "Cache: query string -> (TIMESTAMP . RESULTS).
 Entries expire after `remoto-search-cache-ttl' seconds.")
 
-(defcustom remoto-search-cache-ttl 300
-  "Seconds before search cache entries expire.
-Set to 0 to disable caching."
-  :type 'integer
-  :group 'remoto)
-
 (defcustom remoto-debounce-delay 0.3
   "Seconds of idle time before firing an async search request.
 Lower values feel more responsive but generate more API calls."
@@ -1458,6 +1460,13 @@ avoids repeated fetches during a session."
   :type 'integer
   :group 'remoto)
 
+(defcustom remoto-show-fetch-indicator t
+  "When non-nil, show an indicator while fetching completion data.
+The indicator is drawn as minibuffer text, so it works with any
+minibuffer completion UI (vertico, icomplete, default, ...)."
+  :type 'boolean
+  :group 'remoto)
+
 (defvar remoto--debounce-timer nil
   "Active idle timer for debounced async searches.")
 
@@ -1474,6 +1483,12 @@ on every `post-command-hook' cycle.")
 Incremented on each new debounce schedule; callbacks whose
 captured generation doesn't match the current value are stale
 and skip UI refresh (but still cache their results).")
+
+(defvar remoto--inflight-count 0
+  "Number of in-flight async API requests for completion.")
+
+(defvar remoto--status-overlay nil
+  "Overlay showing the in-flight indicator in the active minibuffer.")
 
 (defun remoto--search-cache-get (key &optional ttl)
   "Return cached results for KEY if not expired.
@@ -1495,12 +1510,62 @@ queries that returned zero results."
   (puthash key (cons (float-time) results) remoto--search-cache)
   results)
 
+(defun remoto--clear-status ()
+  "Remove the in-flight fetch indicator overlay, if any."
+  (when (overlayp remoto--status-overlay)
+    (delete-overlay remoto--status-overlay))
+  (setq remoto--status-overlay nil))
+
+(defun remoto--render-status (buffer)
+  "Draw or reposition the fetch indicator overlay at the end of BUFFER."
+  (with-current-buffer buffer
+    (unless (and (overlayp remoto--status-overlay)
+                 (eq (overlay-buffer remoto--status-overlay) buffer))
+      (remoto--clear-status)
+      (setq remoto--status-overlay
+            (make-overlay (point-max) (point-max) nil t t)))
+    (move-overlay remoto--status-overlay (point-max) (point-max))
+    (overlay-put remoto--status-overlay 'priority 1000)
+    (overlay-put remoto--status-overlay 'after-string
+                 (propertize "  [fetching...]" 'face 'shadow))))
+
+(defun remoto--show-status ()
+  "Show the in-flight fetch indicator in the active remoto minibuffer.
+No-op unless `remoto-show-fetch-indicator' is non-nil and the active
+minibuffer is editing a /github: path.  Drawn as minibuffer text so
+it works with any completion UI."
+  (when remoto-show-fetch-indicator
+    (when-let* ((win (active-minibuffer-window))
+                (buf (window-buffer win)))
+      (when (with-current-buffer buf
+              (string-prefix-p "/github:" (minibuffer-contents-no-properties)))
+        (remoto--render-status buf)))))
+
+(defun remoto--inflight-inc ()
+  "Register a new in-flight async request and show the indicator."
+  (setq remoto--inflight-count (1+ remoto--inflight-count))
+  (remoto--show-status))
+
+(defun remoto--inflight-dec ()
+  "Mark one in-flight async request as finished.
+Clear the indicator once no requests remain."
+  (setq remoto--inflight-count (max 0 (1- remoto--inflight-count)))
+  (when (zerop remoto--inflight-count)
+    (remoto--clear-status)))
+
+(defun remoto--minibuffer-exit-cleanup ()
+  "Reset in-flight indicator state when a minibuffer exits."
+  (remoto--clear-status)
+  (setq remoto--inflight-count 0))
+
 (defun remoto--api-async (endpoint callback)
   "Call GitHub REST API ENDPOINT asynchronously via ghub.
 CALLBACK receives the parsed JSON response.  Errors are silently
 dropped since async callers cannot meaningfully handle them in the
 completion context.  Always passes `:host \"api.github.com\"'
-explicitly to avoid ghub resolving to the HTML site."
+explicitly to avoid ghub resolving to the HTML site.
+A shared in-flight counter drives the fetch indicator and is
+decremented on success, error, and synchronous failure."
   (let* ((resource (concat "/" endpoint))
          (auth (cond (remoto--auth-failed 'none)
                      (remoto--effective-auth remoto--effective-auth)
@@ -1510,14 +1575,22 @@ explicitly to avoid ghub resolving to the HTML site."
                           token)))))
     (condition-case nil
         (let ((inhibit-message t))
+          (remoto--inflight-inc)
+          ;; ghub calls :callback as (value headers status req) and retries
+          ;; with (value) on `wrong-number-of-arguments'.  Accept the full
+          ;; arglist so the retry never fires and the in-flight counter is
+          ;; decremented exactly once.  All callers pass a 1-arg callback.
           (ghub-get resource nil
                     :auth auth
                     :reader #'remoto--json-reader
                     :host "api.github.com"
-                    :callback callback
-                    :errorback (lambda (_err _headers _status _req)
+                    :callback (lambda (value &rest _)
+                                (remoto--inflight-dec)
+                                (funcall callback value))
+                    :errorback (lambda (&rest _)
+                                 (remoto--inflight-dec)
                                  nil)))
-      (error nil))))
+      (error (remoto--inflight-dec) nil))))
 
 (defun remoto--debounce (key fn)
   "Schedule FN after `remoto-debounce-delay' seconds of idle time.
@@ -1540,19 +1613,37 @@ different KEY cancels the old timer and schedules a new one."
                (when (= gen remoto--async-generation)
                  (funcall fn))))))))
 
+(defun remoto--invalidate-completion-ui ()
+  "Void live front-ends' recompute caches in the selected minibuffer.
+Emacs has no single API for refreshing an in-progress completion UI,
+so poke the popular front-ends explicitly and fall back to
+`post-command-hook' for anything else.  Assumes the active minibuffer
+window is selected."
+  ;; Default cycling cache.
+  (when (boundp 'completion-all-sorted-completions)
+    (setq completion-all-sorted-completions nil))
+  ;; Vertico skips recompute while the input is `equal', so a
+  ;; late-arriving fetch is ignored unless its cache is voided.
+  ;; `set' avoids a free-variable warning when vertico is absent.
+  (when (boundp 'vertico--input)
+    (set 'vertico--input t))
+  ;; Icomplete/fido and any UI that recomputes on this hook.
+  (run-hooks 'post-command-hook)
+  ;; The default *Completions* buffer is not live; rebuild it only
+  ;; when it is already on screen.
+  (when (get-buffer-window "*Completions*" 0)
+    (minibuffer-completion-help)))
+
 (defun remoto--refresh-minibuffer-completions ()
   "Refresh the active minibuffer's completion display.
-Called from async callbacks after updating the cache. Invalidates
-the sorted-completions cache and re-triggers the completion
-framework's display hook (works with vertico, icomplete, default)."
+Called from async callbacks after updating the cache, so freshly
+cached candidates appear without the user editing the input."
   (run-at-time
    0 nil
    (lambda ()
      (when-let* ((win (active-minibuffer-window)))
        (with-selected-window win
-         (when (boundp 'completion-all-sorted-completions)
-           (setq completion-all-sorted-completions nil))
-         (run-hooks 'post-command-hook))))))
+         (remoto--invalidate-completion-ui))))))
 
 (defun remoto--search-query (input)
   "Build a GitHub search query string from INPUT.
@@ -2412,6 +2503,10 @@ will try ghub auth on first API call"))))
                #'remoto-file-name-handler)
   (push (cons remoto--handler-regexp #'remoto-file-name-handler)
         file-name-handler-alist))
+
+;; Clear the fetch indicator and reset in-flight state whenever a
+;; minibuffer exits.  `add-hook' is idempotent, so reloading is safe.
+(add-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
 
 ;; Register completion styles for our category so filtering works
 ;; like file-name completion (partial-completion understands path separators).
