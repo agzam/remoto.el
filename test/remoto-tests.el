@@ -2423,7 +2423,40 @@ Returns the full path after completion, or INPUT if no completion."
   (it "calls user/orgs endpoint (authenticated)"
     (spy-on 'remoto--api :and-return-value '(((login . "org1")) ((login . "org2"))))
     (remoto--fetch-user-orgs "anyone")
-    (expect 'remoto--api :to-have-been-called-with "user/orgs?per_page=100")))
+    (expect 'remoto--api :to-have-been-called-with "user/orgs?per_page=100&page=1")))
+
+;;; ---- remoto--paginated-api ----
+
+(describe "remoto--paginated-api"
+  (it "accumulates results across pages until a short page"
+    (let ((calls nil))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (endpoint)
+                (push endpoint calls)
+                (pcase (length calls)
+                  (1 (make-list 100 '((n . 1))))
+                  (2 (make-list 100 '((n . 2))))
+                  (_ '(((n . 3)))))))
+      (let ((result (remoto--paginated-api "repos/o/r/branches" 100)))
+        (expect (length result) :to-equal 201)
+        (expect (length calls) :to-equal 3)
+        (expect (car calls) :to-equal "repos/o/r/branches?per_page=100&page=3"))))
+
+  (it "stops after a single short page"
+    (spy-on 'remoto--api :and-return-value '(((n . 1)) ((n . 2))))
+    (remoto--paginated-api "user/orgs" 100)
+    (expect 'remoto--api :to-have-been-called-times 1)
+    (expect 'remoto--api :to-have-been-called-with "user/orgs?per_page=100&page=1"))
+
+  (it "caps total requests at MAX-PAGES on huge result sets"
+    (spy-on 'remoto--api :and-return-value (make-list 100 '((n . 1))))
+    (remoto--paginated-api "repos/o/r/tags" 100 3)
+    (expect 'remoto--api :to-have-been-called-times 3))
+
+  (it "uses & as separator when the endpoint already has a query"
+    (spy-on 'remoto--api :and-return-value nil)
+    (remoto--paginated-api "search/things?q=x" 100)
+    (expect 'remoto--api :to-have-been-called-with "search/things?q=x&per_page=100&page=1")))
 
 ;;; ---- File commit annotations ----
 
