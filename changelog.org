@@ -3,6 +3,15 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [1.5.3] - 2026-05-30
+
+** Fixed
+- Branch, tag, and organization completion now return the full result set instead of only the first 100 entries. Large repositories (e.g. NixOS/nixpkgs with >100 branches) previously showed a truncated list because each fetch issued a single ~per_page=100~ request.
+
+** Added
+- ~remoto--paginated-api~ - follows pagination to fetch all pages of a GitHub endpoint, bounded by an optional ~max-pages~ cap (default 10) so very large repositories cannot trigger an unbounded run of synchronous API calls.
+- Unit tests for ~remoto--paginated-api~ covering multi-page accumulation, the page cap, and the query-string separator.
+
 * [1.5.2] - 2026-05-08
 
 ** Fixed

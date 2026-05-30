@@ -5,7 +5,7 @@
 ;; Author: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: April 24, 2026
-;; Version: 1.5.1
+;; Version: 1.5.3
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
 ;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
@@ -227,20 +227,18 @@ configure a GitHub token in auth-source, then M-x remoto-reset-auth"
 configure a GitHub token in auth-source, then M-x remoto-reset-auth"
                      endpoint (error-message-string err)))))))
 
-(defun remoto--paginated-api (endpoint per-page)
-  "Wrapper for remoto--api that obtains full results from paginated api."
-  (let
-      ((page 1)
-       (full-data nil)
-       (query-endpoint (concat endpoint (if (cl-search "?" endpoint) "&" "?"))))
-    (while
-	(let*
-	    ((endpoint (format "%sper_page=%d&page=%d" query-endpoint per-page page))
-	     (page-data (remoto--api endpoint)))
-	  (setq page (+ page 1))
-	  (setq full-data (append full-data page-data))
-	  (eq (length page-data) per-page)))
-    full-data))
+(defun remoto--paginated-api (endpoint per-page &optional max-pages)
+  "Fetch all pages of paginated GitHub API ENDPOINT via `remoto--api'.
+Request PER-PAGE items per page, following pages until a short page is
+returned or MAX-PAGES (default 10) is reached.  The cap bounds latency
+and request count on very large repositories."
+  (let ((query-endpoint (concat endpoint (if (cl-search "?" endpoint) "&" "?"))))
+    (cl-loop for page from 1 to (or max-pages 10)
+             for page-data = (remoto--api
+                              (format "%sper_page=%d&page=%d"
+                                      query-endpoint per-page page))
+             append page-data
+             until (< (length page-data) per-page))))
 
 (defun remoto-reset-auth ()
   "Clear the auth failure cache, retrying token lookup on next API call.
