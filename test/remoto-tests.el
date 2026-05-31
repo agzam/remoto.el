@@ -634,21 +634,36 @@
               :to-equal '("torvalds/linux"))
       (expect 'remoto--debounce :not :to-have-been-called)))
 
-  (it "filters cached results when query narrows past a slash"
+  (it "delegates an owner/repo-prefix query to the shared owner-repos engine"
+    (spy-on 'remoto--search-owner-repos :and-return-value
+            '("spacehammer" "spaceship"))
+    (expect (remoto--search-repos "agzam/space")
+            :to-equal '("agzam/spacehammer" "agzam/spaceship"))
+    (expect 'remoto--search-owner-repos
+            :to-have-been-called-with "agzam" "space"))
+
+  (it "delegates an owner/ query (no repo part) to recent-owner-repos"
+    (spy-on 'remoto--recent-owner-repos :and-return-value '("dotfiles"))
+    (expect (remoto--search-repos "agzam/")
+            :to-equal '("agzam/dotfiles"))
+    (expect 'remoto--recent-owner-repos :to-have-been-called-with "agzam"))
+
+  (it "performs the precise owner search even when a capped parent is cached"
+    ;; Regression: a cached owner/ listing (user:owner, capped at the page
+    ;; size) previously short-circuited and hid repos beyond the cap (e.g.
+    ;; qlik-trial/stitch-*).  Delegating to remoto--search-owner-repos, which
+    ;; always issues the precise query, makes that impossible.
+    (spy-on 'remoto--search-owner-repos :and-return-value
+            '("stitch-environments" "stitch-agent-service"))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
-      ;; Pre-populate cache
-      (puthash "agzam"
-               (cons (float-time) '("agzam/spacehammer" "agzam/dotfiles" "agzam/remoto.el"))
+      (puthash "qlik-trial/"
+               (cons (float-time) '("qlik-trial/aaa" "qlik-trial/bbb"))
                remoto--search-cache)
-      ;; Query with slash filters cached results
-      (expect (remoto--search-repos "agzam/spa")
-              :to-equal '("agzam/spacehammer"))
-      ;; Further narrowing still uses cache
-      (expect (remoto--search-repos "agzam/spaceh")
-              :to-equal '("agzam/spacehammer"))
-      ;; No match returns nil
-      (expect (remoto--search-repos "agzam/zzz")
-              :to-be nil)))
+      (expect (remoto--search-repos "qlik-trial/stitch-")
+              :to-equal '("qlik-trial/stitch-environments"
+                          "qlik-trial/stitch-agent-service"))
+      (expect 'remoto--search-owner-repos
+              :to-have-been-called-with "qlik-trial" "stitch-")))
 
   (it "schedules async for non-narrowable cache miss"
     (spy-on 'remoto--debounce)
@@ -3123,6 +3138,17 @@ Returns the full path after completion, or INPUT if no completion."
         (remoto--clear-status)
         (expect remoto--status-overlay :to-be nil))))
 
+  (it "pins the cursor before the indicator so point does not jump"
+    (let ((remoto--status-overlay nil))
+      (with-temp-buffer
+        (insert "/github:torvalds/")
+        (remoto--render-status (current-buffer))
+        (expect (get-text-property
+                 0 'cursor
+                 (overlay-get remoto--status-overlay 'after-string))
+                :to-be-truthy)
+        (remoto--clear-status))))
+
   (it "reuses one overlay across repeated renders"
     (let ((remoto--status-overlay nil))
       (with-temp-buffer
@@ -3163,7 +3189,20 @@ Returns the full path after completion, or INPUT if no completion."
     (let ((remoto-show-fetch-indicator nil))
       (spy-on 'remoto--render-status)
       (remoto--show-status)
-      (expect 'remoto--render-status :not :to-have-been-called))))
+      (expect 'remoto--render-status :not :to-have-been-called)))
+
+  (it "shows for the remoto-browse completion, not just /github: paths"
+    (let ((remoto-show-fetch-indicator t))
+      (spy-on 'remoto--render-status)
+      (with-temp-buffer
+        (setq-local minibuffer-completion-table #'remoto--repo-completion-table)
+        (let ((buf (current-buffer)))
+          (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () 'win))
+                    ((symbol-function 'window-buffer) (lambda (_w) buf))
+                    ((symbol-function 'minibuffer-contents-no-properties)
+                     (lambda () "")))
+            (remoto--show-status))))
+      (expect 'remoto--render-status :to-have-been-called))))
 
 (describe "remoto--invalidate-completion-ui"
   (it "voids the default sorted-completions cache"
@@ -3204,6 +3243,47 @@ Returns the full path after completion, or INPUT if no completion."
       (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) 'win)))
         (remoto--invalidate-completion-ui))
       (expect 'minibuffer-completion-help :to-have-been-called))))
+
+(describe "remoto--with-fetch-indicator"
+  (it "runs body and returns its value without UI when disabled"
+    (let ((remoto-show-fetch-indicator nil)
+          (ran nil))
+      (spy-on 'message)
+      (spy-on 'redisplay)
+      (expect (remoto--with-fetch-indicator (setq ran t) 99) :to-equal 99)
+      (expect ran :to-be t)
+      (expect 'message :not :to-have-been-called)
+      (expect 'redisplay :not :to-have-been-called)))
+
+  (it "shows the label, forces redisplay, then clears, when enabled"
+    (let ((remoto-show-fetch-indicator t)
+          (ran nil))
+      (spy-on 'message)
+      (spy-on 'redisplay)
+      (expect (remoto--with-fetch-indicator (setq ran t) 7) :to-equal 7)
+      (expect ran :to-be t)
+      (expect 'redisplay :to-have-been-called)
+      (expect 'message :to-have-been-called-with
+              "Remoto %s" remoto--fetch-indicator-text)
+      (expect 'message :to-have-been-called-with nil))))
+
+(describe "remoto-browse fetch indicator"
+  (it "shows the synchronous indicator around the resolve/open fetch"
+    (let ((remoto-show-fetch-indicator t))
+      (spy-on 'message)
+      (spy-on 'redisplay)
+      (spy-on 'remoto--parse-input :and-return-value 'parsed)
+      (spy-on 'remoto--resolve-ref :and-return-value 'resolved)
+      (spy-on 'remoto--canonical-path :and-return-value "/github:o/r:main:/")
+      (spy-on 'remoto--tree-entry :and-return-value '((type . "tree")))
+      (spy-on 'dired)
+      (spy-on 'find-file)
+      (remoto-browse "owner/repo")
+      (expect 'redisplay :to-have-been-called)
+      (expect 'message :to-have-been-called-with
+              "Remoto %s" remoto--fetch-indicator-text)
+      (expect 'remoto--resolve-ref :to-have-been-called)
+      (expect 'dired :to-have-been-called))))
 
 (provide 'remoto-tests)
 

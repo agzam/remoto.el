@@ -261,7 +261,7 @@ ghub signals typed conditions for HTTP errors. `remoto--api` catches these and r
 
 ## Interactive Commands
 
-- `remoto-browse` - prompt for a repo using standard `completing-read` with a programmed completion table (`remoto--repo-completion-table`), open dired at root or find-file for blob paths. Type 3+ characters to trigger GitHub search via the search API. Tab completes repo names. Append `@` to complete branch names - fetches branches via the GitHub Branches API and offers `owner/repo@branch` candidates, with prefix filtering. Works with any completion frontend (vertico, ivy, helm, vanilla Emacs). Search results are cached for `remoto-search-cache-ttl` seconds (default 300). Branch results are cached in `remoto--branches-cache` with the same TTL as search results.
+- `remoto-browse` - prompt for a repo using standard `completing-read` with a programmed completion table (`remoto--repo-completion-table`), open dired at root or find-file for blob paths. Type 3+ characters to trigger GitHub search via the search API. Tab completes repo names. Append `@` to complete branch names - fetches branches via the GitHub Branches API and offers `owner/repo@branch` candidates, with prefix filtering. Works with any completion frontend (vertico, ivy, helm, vanilla Emacs). Search results are cached for `remoto-search-cache-ttl` seconds (default 300). Branch results are cached in `remoto--branches-cache` with the same TTL as search results. Owner-scoped repo search shares the `remoto--search-owner-repos` engine with `/github:` completion (results are reformatted from bare repo names to `owner/repo`), and a `[fetching...]` indicator shows while searching and during the post-selection fetch (see Fetch indicator).
 - `remoto-refresh` - invalidate tree and branch caches for current repo, re-fetch. Reverts dired buffer if in one.
 - `remoto-copy-github-url` - for the current file/line, produce the corresponding `github.com` URL and copy to kill ring. Includes `#L<n>` suffix for files.
 
@@ -359,6 +359,10 @@ Returns nil for incomplete paths (triggers `[Confirm]` prompt):
 
 The handler recognizes partial paths (`/github:`, `/github:OWNER/`) that don't match `remoto--path-regexp`. For these: `file-exists-p` and `file-directory-p` return t, `file-name-directory`/`nondirectory` split correctly, `file-remote-p` returns `/github:` prefix. `remoto--parse-partial-canonical` handles `/github:OWNER/REPO[@REF]` (excludes `#` from repo name character class).
 
+### Fetch indicator
+
+While completion data loads asynchronously - user/repo search under `/github:`, or repo search in `remoto-browse` - a `[fetching...]` marker appears at the end of the minibuffer (an overlay `after-string` carrying a `cursor` text property so point does not jump). It is plain minibuffer text, so it works with any completion UI. An in-flight counter (`remoto--inflight-count`), incremented and decremented around each `remoto--api-async` call, drives it; the overlay clears when the count returns to zero. `remoto--show-status` gates rendering to remoto completions: a `/github:` path, or the `remoto--repo-completion-table` collection. `remoto-browse` additionally shows a `[fetching...]` echo-area message during the synchronous resolve/open that runs after a repo is selected. Controlled by `remoto-show-fetch-indicator` (default t).
+
 ## Topic Display (remoto-topic.el)
 
 Opening `/github:owner/repo#NUM` via `find-file` routes to `remoto-topic-display` instead of file operations. Detects whether the number is an issue or PR and renders accordingly.
@@ -377,7 +381,7 @@ Faces: `remoto-topic-title`, `remoto-topic-state-open`, `remoto-topic-state-clos
 
 ## Known Technical Debt
 
-- `remoto-browse` and `find-file` completion have parallel dispatch/formatting code. The fetch logic is shared (`remoto--fetch-dir-children-light`, `remoto--fetch-branches`, `remoto--fetch-issues`, etc.), but the mode parsing (`remoto--browse-parse-input` vs `remoto--parse-partial-github-path`) and candidate formatting (full paths vs bare names) are duplicated. A shared dispatcher returning raw candidates per mode, with each UI layer applying its prefix, would eliminate this. Non-trivial because `file-name-all-completions` splits input into `(file directory)` while `completing-read` uses a single string.
+- `remoto-browse` and `find-file` completion still have parallel dispatch/formatting code. The fetch logic is shared (`remoto--fetch-dir-children-light`, `remoto--fetch-branches`, `remoto--fetch-issues`, etc.) and, as of 1.6.0, so is the owner repo search: `remoto-browse` delegates to `remoto--search-owner-repos` / `remoto--recent-owner-repos` and reformats the bare repo names to `owner/repo`, instead of keeping its own copy (the divergent `remoto--search-repos-from-parent` narrowing was removed). What still differs is the mode parsing (`remoto--browse-parse-input` vs `remoto--parse-partial-github-path`) and candidate formatting (full `owner/repo` strings vs bare path segments). A shared dispatcher returning raw candidates per mode, with each UI layer applying its prefix, would eliminate the rest. Non-trivial because `file-name-all-completions` splits input into `(file directory)` while `completing-read` uses a single string.
 
 ## Limitations
 

@@ -1461,9 +1461,11 @@ avoids repeated fetches during a session."
   :group 'remoto)
 
 (defcustom remoto-show-fetch-indicator t
-  "When non-nil, show an indicator while fetching completion data.
-The indicator is drawn as minibuffer text, so it works with any
-minibuffer completion UI (vertico, icomplete, default, ...)."
+  "When non-nil, show a \"fetching\" indicator during GitHub requests.
+While completing a `/github:' path (e.g. with \\[find-file]), it is drawn
+as minibuffer text, so it works with any completion UI (vertico,
+icomplete, default, ...).  During the synchronous fetches of
+`remoto-browse' it is shown in the echo area instead."
   :type 'boolean
   :group 'remoto)
 
@@ -1489,6 +1491,12 @@ and skip UI refresh (but still cache their results).")
 
 (defvar remoto--status-overlay nil
   "Overlay showing the in-flight indicator in the active minibuffer.")
+
+(defconst remoto--fetch-indicator-text
+  (propertize "[fetching...]" 'face 'shadow)
+  "Shadowed label shown by the fetch indicator in both contexts.
+Reused by the minibuffer overlay (completion) and the echo-area
+message (`remoto-browse') so the two flows read identically.")
 
 (defun remoto--search-cache-get (key &optional ttl)
   "Return cached results for KEY if not expired.
@@ -1517,7 +1525,11 @@ queries that returned zero results."
   (setq remoto--status-overlay nil))
 
 (defun remoto--render-status (buffer)
-  "Draw or reposition the fetch indicator overlay at the end of BUFFER."
+  "Draw or reposition the fetch indicator overlay at the end of BUFFER.
+The after-string carries a `cursor' text property so the editing
+cursor stays put instead of jumping past the indicator: without it,
+an after-string at point makes Emacs draw the cursor after the
+string."
   (with-current-buffer buffer
     (unless (and (overlayp remoto--status-overlay)
                  (eq (overlay-buffer remoto--status-overlay) buffer))
@@ -1526,19 +1538,23 @@ queries that returned zero results."
             (make-overlay (point-max) (point-max) nil t t)))
     (move-overlay remoto--status-overlay (point-max) (point-max))
     (overlay-put remoto--status-overlay 'priority 1000)
-    (overlay-put remoto--status-overlay 'after-string
-                 (propertize "  [fetching...]" 'face 'shadow))))
+    (let ((indicator (concat "  " remoto--fetch-indicator-text)))
+      (put-text-property 0 1 'cursor t indicator)
+      (overlay-put remoto--status-overlay 'after-string indicator))))
 
 (defun remoto--show-status ()
   "Show the in-flight fetch indicator in the active remoto minibuffer.
 No-op unless `remoto-show-fetch-indicator' is non-nil and the active
-minibuffer is editing a /github: path.  Drawn as minibuffer text so
-it works with any completion UI."
+minibuffer is a remoto completion: either editing a /github: path
+\(file-name completion) or running `remoto-browse' (whose collection
+is `remoto--repo-completion-table').  Drawn as minibuffer text so it
+works with any completion UI."
   (when remoto-show-fetch-indicator
     (when-let* ((win (active-minibuffer-window))
                 (buf (window-buffer win)))
       (when (with-current-buffer buf
-              (string-prefix-p "/github:" (minibuffer-contents-no-properties)))
+              (or (string-prefix-p "/github:" (minibuffer-contents-no-properties))
+                  (eq minibuffer-completion-table #'remoto--repo-completion-table)))
         (remoto--render-status buf)))))
 
 (defun remoto--inflight-inc ()
@@ -1557,6 +1573,24 @@ Clear the indicator once no requests remain."
   "Reset in-flight indicator state when a minibuffer exits."
   (remoto--clear-status)
   (setq remoto--inflight-count 0))
+
+(defmacro remoto--with-fetch-indicator (&rest body)
+  "Run BODY showing a synchronous fetch indicator in the echo area.
+For commands like `remoto-browse' whose GitHub round-trips block and
+run with no active minibuffer to host the completion overlay.  Honors
+`remoto-show-fetch-indicator'; the forced redisplay paints the label
+before the blocking call, and the echo area is cleared afterwards.
+Returns BODY's value."
+  (declare (indent 0) (debug t))
+  `(if (not remoto-show-fetch-indicator)
+       (progn ,@body)
+     (let ((message-log-max nil))
+       (message "Remoto %s" remoto--fetch-indicator-text))
+     (redisplay t)
+     (unwind-protect
+         (progn ,@body)
+       (let ((message-log-max nil))
+         (message nil)))))
 
 (defun remoto--api-async (endpoint callback)
   "Call GitHub REST API ENDPOINT asynchronously via ghub.
@@ -2005,53 +2039,60 @@ Returns owner/repo@branch candidates matching the prefix after @."
                             (string-prefix-p branch-prefix b))))
           (mapcar (lambda (b) (format "%s@%s" repo-part b))))))))
 
-(defun remoto--search-repos-fetch (query)
-  "Return cached repo search results for QUERY, never blocking.
-On cache miss, schedules a debounced async fetch and returns nil.
-Requires at least 3 characters."
-  (when (<= 3 (length query))
-    (if-let* ((cached (remoto--search-cache-get query))
-              ((car cached)))
-        (cadr cached)
-      (if-let* ((parent (remoto--search-repos-from-parent query)))
-          (cdr parent)
-        ;; Schedule async fetch instead of blocking
+(defun remoto--qualify-repos (owner names)
+  "Prefix each bare repo NAME in NAMES with OWNER/, preserving properties.
+The shared owner-repo search returns bare repo names; `remoto-browse'
+presents them as OWNER/REPO while keeping the `remoto-repo-desc' text
+property used for annotations."
+  (mapcar (lambda (name)
+            (apply #'propertize (concat owner "/" name)
+                   (text-properties-at 0 name)))
+          names))
+
+(defun remoto--search-repos-by-name (query)
+  "Search repositories by name for a plain, ownerless QUERY.
+Returns owner/repo strings.  On cache miss schedules a debounced
+async fetch and returns nil; the UI refreshes when results arrive.
+Requires at least `remoto-min-search-chars' characters."
+  (when (<= remoto-min-search-chars (length query))
+    (pcase-let ((`(,hit ,results) (remoto--search-cache-get query)))
+      (if hit
+          results
         (remoto--debounce
          (concat "\0browse:" query)
          (lambda ()
            (remoto--api-async
-            (format "search/repositories?q=%s&per_page=30"
+            (format "search/repositories?q=%s&per_page=100"
                     (url-hexify-string (remoto--search-query query)))
             (lambda (data)
               (let ((results (mapcar (lambda (item)
-                                      (propertize (alist-get 'full_name item)
-                                                  'remoto-repo-desc
-                                                  (or (alist-get 'description item) "")))
-                                    (alist-get 'items data))))
+                                       (propertize (alist-get 'full_name item)
+                                                   'remoto-repo-desc
+                                                   (or (alist-get 'description item) "")))
+                                     (alist-get 'items data))))
                 (remoto--search-cache-put query results)
                 (remoto--refresh-minibuffer-completions))))))
         nil))))
 
-(defun remoto--search-repos-from-parent (query)
-  "Try narrowing a cached parent query to answer QUERY.
-Returns (HIT-P . FILTERED-RESULTS) when a parent cache entry
-exists, nil otherwise.  Uses substring matching on the repo
-part (after the slash) to match GitHub's search behavior."
-  (when-let* ((slash-pos (string-search "/" query))
-              (repo-part (substring query (1+ slash-pos)))
-              (parent-results
-               (cl-loop for key being the hash-keys of remoto--search-cache
-                        for entry = (remoto--search-cache-get key)
-                        when (and (car entry)
-                                  (string-prefix-p key query)
-                                  (<= slash-pos (length key))
-                                  (< (length key) (length query)))
-                        return (cadr entry))))
-    (cons t (seq-filter (lambda (name)
-                          (and (string-prefix-p (substring query 0 (1+ slash-pos)) name)
-                               (or (string-empty-p repo-part)
-                                   (string-search repo-part name))))
-                        parent-results))))
+(defun remoto--search-repos-fetch (query)
+  "Return repo candidates for QUERY as owner/repo strings, never blocking.
+An OWNER/REPO-prefix query is delegated to the shared
+`remoto--search-owner-repos' engine (the same code path the
+`/github:' file-name completion uses), so results stay correct and
+consistent across both entry points; its bare repo names are
+reformatted to OWNER/REPO.  An OWNER/ query (no repo part) lists the
+owner's recent repos.  A plain query searches repositories by name."
+  (let ((slash-pos (string-search "/" query)))
+    (cond
+     ((null slash-pos) (remoto--search-repos-by-name query))
+     ((zerop slash-pos) nil)
+     (t (let ((owner (substring query 0 slash-pos))
+              (repo-q (substring query (1+ slash-pos))))
+          (remoto--qualify-repos
+           owner
+           (if (string-empty-p repo-q)
+               (remoto--recent-owner-repos owner)
+             (remoto--search-owner-repos owner repo-q))))))))
 
 (defun remoto--search-repos (query &optional callback)
   "Search GitHub repositories matching QUERY.
@@ -2267,50 +2308,51 @@ specific branches/tags.
 With interactive use, provides search completion - type 3+ characters
 to search GitHub repositories."
   (interactive (list (remoto--read-repo)))
-  (cond
-   ;; Issue/PR mode: owner/repo#NUM
-   ((string-match (rx bos (group (+ (not (any "/@#"))))
-                      "/" (group (+ (not (any "/@#"))))
-                      "#" (group (+ digit)) eos)
-                  input)
-    (let ((owner (match-string 1 input))
-          (repo (match-string 2 input))
-          (number (match-string 3 input)))
-      (remoto--require-topic)
-      (remoto-topic-display number (format "/github:%s/%s" owner repo))))
-   ;; Files mode: owner/repo/[subpath]
-   ((string-match (rx bos (group (+ (not (any "/@#"))))
-                      "/" (group (+ (not (any "/@#"))))
-                      "/" (group (* anything)) eos)
-                  input)
-    (let* ((owner (match-string 1 input))
-           (repo (match-string 2 input))
-           (subpath (match-string 3 input))
-           (canonical (remoto--maybe-rewrite
-                       (format "/github:%s/%s/%s" owner repo subpath))))
-      (if (and (remoto--parse-path canonical)
-               (equal "tree"
-                      (alist-get 'type
-                                 (remoto--tree-entry
-                                  (remoto--parse-path canonical)))))
-          (dired canonical)
-        (find-file canonical))))
-   ;; Branch mode or plain repo
-   (t
-    (let* ((clean (if (string-match (rx bos (group (+ (not (any "/@#")))
-                                                   "/" (+ (not (any "/@#"))))
-                                        "@" (group (+ nonl)) eos)
-                                    input)
-                      (format "%s@%s" (match-string 1 input)
-                              (match-string 2 input))
-                    input))
-           (parsed (remoto--parse-input clean))
-           (resolved (remoto--resolve-ref parsed))
-           (canonical (remoto--canonical-path resolved)))
-      (if (equal "tree"
-                 (alist-get 'type (remoto--tree-entry resolved)))
-          (dired canonical)
-        (find-file canonical))))))
+  (remoto--with-fetch-indicator
+    (cond
+     ;; Issue/PR mode: owner/repo#NUM
+     ((string-match (rx bos (group (+ (not (any "/@#"))))
+                        "/" (group (+ (not (any "/@#"))))
+                        "#" (group (+ digit)) eos)
+                    input)
+      (let ((owner (match-string 1 input))
+            (repo (match-string 2 input))
+            (number (match-string 3 input)))
+        (remoto--require-topic)
+        (remoto-topic-display number (format "/github:%s/%s" owner repo))))
+     ;; Files mode: owner/repo/[subpath]
+     ((string-match (rx bos (group (+ (not (any "/@#"))))
+                        "/" (group (+ (not (any "/@#"))))
+                        "/" (group (* anything)) eos)
+                    input)
+      (let* ((owner (match-string 1 input))
+             (repo (match-string 2 input))
+             (subpath (match-string 3 input))
+             (canonical (remoto--maybe-rewrite
+                         (format "/github:%s/%s/%s" owner repo subpath))))
+        (if (and (remoto--parse-path canonical)
+                 (equal "tree"
+                        (alist-get 'type
+                                   (remoto--tree-entry
+                                    (remoto--parse-path canonical)))))
+            (dired canonical)
+          (find-file canonical))))
+     ;; Branch mode or plain repo
+     (t
+      (let* ((clean (if (string-match (rx bos (group (+ (not (any "/@#")))
+                                                     "/" (+ (not (any "/@#"))))
+                                          "@" (group (+ nonl)) eos)
+                                      input)
+                        (format "%s@%s" (match-string 1 input)
+                                (match-string 2 input))
+                      input))
+             (parsed (remoto--parse-input clean))
+             (resolved (remoto--resolve-ref parsed))
+             (canonical (remoto--canonical-path resolved)))
+        (if (equal "tree"
+                   (alist-get 'type (remoto--tree-entry resolved)))
+            (dired canonical)
+          (find-file canonical)))))))
 
 ;;;; GitHub input detection
 

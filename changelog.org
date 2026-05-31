@@ -6,12 +6,15 @@ Changes to the project, following Keep a Changelog conventions.
 * [1.6.0] - 2026-05-30
 
 ** Added
-- In-flight fetch indicator: while completion data loads (for example the org repo list at ~/github:OWNER/~), a ~[fetching...]~ marker appears in the minibuffer. It is drawn as minibuffer text, so it works with any completion UI (vertico, icomplete, default). Toggle with ~remoto-show-fetch-indicator~ (default t).
-- ~remoto-show-fetch-indicator~ - customization to enable or disable the indicator.
+- In-flight fetch indicator: while completion data loads (for example the org repo list at ~/github:OWNER/~, or while ~remoto-browse~ searches GitHub), a ~[fetching...]~ marker appears in the minibuffer. It is drawn as minibuffer text, so it works with any completion UI (vertico, icomplete, default). Toggle with ~remoto-show-fetch-indicator~ (default t).
+- ~remoto-browse~ shows the indicator in the echo area during the synchronous resolve/open that runs after a repo is selected, so the blocking GitHub round-trips are no longer silent.
+- ~remoto-show-fetch-indicator~ - customization to enable or disable the indicator (now governs both the completion overlay and the ~remoto-browse~ echo-area indicator).
 - ~remoto--invalidate-completion-ui~ - refreshes an in-progress minibuffer completion across front-ends after async data arrives.
-- Unit tests covering the in-flight counter (single decrement on success, error, and synchronous failure; correct behavior with overlapping fetches), the indicator overlay lifecycle, and the completion-refresh invalidation.
+- Unit tests covering the in-flight counter (single decrement on success, error, and synchronous failure; correct behavior with overlapping fetches), the indicator overlay lifecycle and its cursor-preserving text property, the indicator appearing for ~remoto-browse~ (both completion and the synchronous fetch), the completion-refresh invalidation, and the consolidated repo search delegating to the shared owner-repos engine.
 
 ** Fixed
+- Minibuffer cursor no longer jumps when the indicator renders: the ~[fetching...]~ after-string carries a ~cursor~ text property, so point stays at the end of the typed input instead of being drawn past the marker.
+- ~remoto-browse~ now finds all of an organization's matching repositories instead of only those in the first page of the owner listing. Its repo search previously derived results from a capped ~user:OWNER~ listing (via ~remoto--search-repos-from-parent~) and never issued the precise ~QUERY in:name user:OWNER~ query, so repos beyond the first page (for example ~qlik-trial/stitch-*~) never appeared. It now delegates to the same ~remoto--search-owner-repos~ engine the ~/github:~ completion uses.
 - Completion candidates now appear automatically when an async fetch completes. Previously the list stayed empty until the input was edited (for example deleting and retyping the trailing slash), because vertico skips recomputation while the typed input is unchanged. The refresh now voids vertico's input cache and the default sorted-completions cache, runs ~post-command-hook~ for icomplete/fido, and rebuilds ~*Completions*~ when it is displayed.
 - ~remoto--api-async~ decrements its in-flight counter exactly once even though ~ghub~ retries the callback with fewer arguments on an arity mismatch. Without this the indicator could clear while other fetches were still running.
 - Clean byte-compilation: ~remoto-search-cache-ttl~ was referenced (in ~remoto--fetch-dir-children-light~) before its ~defcustom~, producing a free-variable warning that failed ~make check-compile~. The defcustom is now defined ahead of its first use.

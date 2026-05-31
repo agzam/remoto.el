@@ -5,10 +5,11 @@
 [[https://github.com/agzam/remoto.el/actions/workflows/run-tests.yml][https://github.com/agzam/remoto.el/actions/workflows/run-tests.yml/badge.svg]]
 
 #+begin_quote
-El Remoto - browse any GitHub repository in Emacs without cloning it.
+El Remoto - browse any GitHub repository in Emacs just like any local - without cloning.
 #+end_quote
 
 * What
+Wouldn't it be nice to be able to ~C-x C-f~ and just browse any GitHub repo?
 
 [[./test/demo.gif]]
 
@@ -98,7 +99,7 @@ Keybindings in the display buffer: ~b~ (open in browser), ~g~ (refresh).
 | ~remoto-refresh~         | Clear tree cache for current repo, re-fetch            |
 | ~remoto-copy-github-url~ | Copy ~github.com~ URL for current file/line to kill ring |
 
-** How it works
+** How does it work
 
 1. On first access to any file in a repo, the full directory tree is fetched via the Git Trees API (one HTTP call).
 2. Directory listings, ~file-exists-p~, completions - all served from the cached tree in memory.
