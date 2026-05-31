@@ -1264,6 +1264,55 @@
     (expect (remoto--handle-file-name-nondirectory "/github:foobar/zapzop@main")
             :to-equal "main")))
 
+;;; /gh: shorthand alias
+
+(describe "/gh: shorthand alias"
+  (it "normalizes a /gh: prefix to canonical /github:"
+    (expect (remoto--normalize-shorthand "/gh:foobar/zapzop@main:/f.el")
+            :to-equal "/github:foobar/zapzop@main:/f.el"))
+
+  (it "leaves canonical /github: paths unchanged"
+    (expect (remoto--normalize-shorthand "/github:foobar/")
+            :to-equal "/github:foobar/"))
+
+  (it "leaves unrelated strings unchanged"
+    (expect (remoto--normalize-shorthand "/etc/passwd") :to-equal "/etc/passwd"))
+
+  (it "passes non-string arguments through untouched"
+    (expect (remoto--normalize-shorthand 42) :to-equal 42))
+
+  (it "handler regexp matches /gh: at the start"
+    (expect (string-match-p remoto--handler-regexp "/gh:foobar/") :to-be 0))
+
+  (it "handler regexp still matches canonical /github:"
+    (expect (string-match-p remoto--handler-regexp "/github:foobar/") :to-be 0))
+
+  (it "handler regexp does not match lookalike prefixes"
+    (expect (string-match-p remoto--handler-regexp "/ghostly:x") :to-be nil))
+
+  (it "dispatches file-directory-p for /gh: like /github:"
+    (expect (remoto-file-name-handler 'file-directory-p "/gh:") :to-be t))
+
+  (it "dispatches file-exists-p for /gh:owner/ like /github:owner/"
+    (expect (remoto-file-name-handler 'file-exists-p "/gh:foobar/") :to-be t))
+
+  (it "file-remote-p on /gh: returns the canonical /github: prefix"
+    (expect (remoto-file-name-handler 'file-remote-p "/gh:foobar/")
+            :to-equal "/github:"))
+
+  (it "file-remote-p method on /gh: is github"
+    (expect (remoto-file-name-handler 'file-remote-p "/gh:foobar/" 'method)
+            :to-equal "github"))
+
+  (it "file-name-directory normalizes /gh: to /github:"
+    (expect (remoto-file-name-handler 'file-name-directory "/gh:foobar/zapzop")
+            :to-equal "/github:foobar/"))
+
+  (it "routes /gh: through the public file API like /github:"
+    (expect (file-remote-p "/gh:foobar/" 'method) :to-equal "github")
+    (expect (file-remote-p "/gh:foobar/")
+            :to-equal (file-remote-p "/github:foobar/"))))
+
 ;;; User search
 
 (describe "remoto--search-users"

@@ -5,7 +5,7 @@
 ;; Author: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: April 24, 2026
-;; Version: 1.6.0
+;; Version: 1.7.0
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
 ;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
@@ -494,20 +494,34 @@ For truncated trees, fetches the directory on demand."
 
 ;;;; File-name handler
 
+(defconst remoto--shorthand-prefix "/gh:"
+  "Shorthand alias for the canonical /github: prefix.")
+
+(defun remoto--normalize-shorthand (arg)
+  "Rewrite a leading /gh: shorthand in ARG to the canonical /github:.
+A non-string ARG, or a string lacking the shorthand prefix, is returned
+unchanged so downstream handlers only ever see canonical paths."
+  (if (and (stringp arg)
+           (string-prefix-p remoto--shorthand-prefix arg))
+      (concat "/github:" (substring arg (length remoto--shorthand-prefix)))
+    arg))
+
 (defun remoto-file-name-handler (operation &rest args)
   "Handle file OPERATION for remoto paths.
 Dispatches to `remoto--handle-OPERATION' or falls through to defaults.
-Pass remaining ARGS to the resolved handler."
-  (if-let* ((handler (intern-soft (format "remoto--handle-%s" operation)))
-            (_ (fboundp handler)))
-      (apply handler args)
-    ;; Fall through to default handler
-    (let ((inhibit-file-name-handlers
-           (cons #'remoto-file-name-handler
-                 (and (eq inhibit-file-name-operation operation)
-                      inhibit-file-name-handlers)))
-          (inhibit-file-name-operation operation))
-      (apply operation args))))
+The /gh: shorthand in ARGS is normalized to /github: first, so every
+resolved handler receives only canonical paths."
+  (let ((args (mapcar #'remoto--normalize-shorthand args)))
+    (if-let* ((handler (intern-soft (format "remoto--handle-%s" operation)))
+              (_ (fboundp handler)))
+        (apply handler args)
+      ;; Fall through to default handler
+      (let ((inhibit-file-name-handlers
+             (cons #'remoto-file-name-handler
+                   (and (eq inhibit-file-name-operation operation)
+                        inhibit-file-name-handlers)))
+            (inhibit-file-name-operation operation))
+        (apply operation args)))))
 
 ;;;; Read operations
 
@@ -2584,8 +2598,9 @@ will try ghub auth on first API call"))))
 ;;;; Handler registration
 
 (defconst remoto--handler-regexp
-  (rx bos "/github:")
-  "Regexp matching remoto file paths.")
+  (rx bos "/" (or "github" "gh") ":")
+  "Regexp matching remoto file paths.
+Matches the canonical /github: prefix and its /gh: shorthand alias.")
 
 (unless (equal (cdr (assoc remoto--handler-regexp file-name-handler-alist))
                #'remoto-file-name-handler)

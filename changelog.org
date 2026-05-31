@@ -3,6 +3,17 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [1.7.0] - 2026-05-31
+
+** Added
+- ~/gh:~ shorthand prefix as an alias for ~/github:~. ~C-x C-f /gh:OWNER/REPO@REF:/path~ now works exactly like the longer ~/github:~ form. The shorthand is an entry point only: it is normalized to the canonical ~/github:~ on the first completion or file operation, so paths still display and resolve canonically. The original ~/github:~ prefix is unchanged and fully backward compatible.
+- ~remoto--normalize-shorthand~ - rewrites a leading ~/gh:~ in handler arguments to ~/github:~ so every downstream handler only ever sees canonical paths (no per-operation changes needed).
+- ~remoto--shorthand-prefix~ - the ~/gh:~ alias prefix constant.
+- Unit tests covering the normalizer (shorthand rewrite, canonical pass-through, non-string and unrelated-string pass-through), the widened ~remoto--handler-regexp~ (matches ~/gh:~ and ~/github:~, rejects look-alikes such as ~/ghostly:~), and ~/gh:~ dispatch parity with ~/github:~ for ~file-directory-p~, ~file-exists-p~, ~file-remote-p~ (prefix and method), ~file-name-directory~, and the public file API.
+
+** Changed
+- ~remoto--handler-regexp~ widened to match both ~/github:~ and the ~/gh:~ shorthand, so the ~/gh:~ entry is routed through ~file-name-handler-alist~ to the same handler.
+
 * [1.6.0] - 2026-05-30
 
 ** Added

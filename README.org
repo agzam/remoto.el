@@ -53,13 +53,18 @@ M-x remoto-browse RET torvalds/linux RET
 GitHub URLs are detected automatically in ~dired~ and ~find-file~:
 
 #+begin_src emacs-lisp
-C-x d /github.com/torvalds/linux RET
+C-x C-f /github:torvalds/linux RET
+
+;; shorthand also works
+C-x C-f /gh:torvalds/linux RET
+
+;; complete urls work too
 C-x C-f https://github.com/torvalds/linux/blob/master/README RET
 #+end_src
 
 *** find-file completion
 
-The ~/github:~ prefix enables multi-level completion directly in ~find-file~ (~C-x C-f~). Three delimiters after ~owner/repo~ control the mode: ~/~ for files, ~@~ for branches/tags, ~#~ for issues/PRs.
+The ~/github:~ prefix (~/gh:~ shorthand works too) enables multi-level completion directly in ~find-file~ (~C-x C-f~). Three delimiters after ~owner/repo~ control the mode: ~/~ for files, ~@~ for branches/tags, ~#~ for issues/PRs.
 
 #+begin_example
 /github:              -> your user + orgs (when authenticated)
