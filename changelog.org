@@ -11,6 +11,9 @@ Changes to the project, following Keep a Changelog conventions.
 - ~remoto-show-fetch-indicator~ - customization to enable or disable the indicator (now governs both the completion overlay and the ~remoto-browse~ echo-area indicator).
 - ~remoto--invalidate-completion-ui~ - refreshes an in-progress minibuffer completion across front-ends after async data arrives.
 - Unit tests covering the in-flight counter (single decrement on success, error, and synchronous failure; correct behavior with overlapping fetches), the indicator overlay lifecycle and its cursor-preserving text property, the indicator appearing for ~remoto-browse~ (both completion and the synchronous fetch), the completion-refresh invalidation, and the consolidated repo search delegating to the shared owner-repos engine.
+- ~remoto--search-owner-repos-sync~ and ~remoto--recent-owner-repos-sync~ - synchronous owner-repo fetches wrapped in ~while-no-input~. The ~/github:OWNER/~ completion branch uses them as a cold-cache fallback so the first computation can return candidates instead of depending solely on the async refresh landing.
+- ~remoto--extract-search-repos~ - shared helper that builds propertized repo candidates (name plus description) from a GitHub search response, replacing three duplicated inline mappers.
+- Unit tests for the synchronous fallbacks (success and error paths), the owner-level sync-fallback wiring (and that it is skipped below ~remoto-min-search-chars~ or when async already has results), the trailing-slash repo candidates, the shared extractor, and the ~remoto~ category registration.
 
 ** Fixed
 - Minibuffer cursor no longer jumps when the indicator renders: the ~[fetching...]~ after-string carries a ~cursor~ text property, so point stays at the end of the typed input instead of being drawn past the marker.
@@ -18,6 +21,10 @@ Changes to the project, following Keep a Changelog conventions.
 - Completion candidates now appear automatically when an async fetch completes. Previously the list stayed empty until the input was edited (for example deleting and retyping the trailing slash), because vertico skips recomputation while the typed input is unchanged. The refresh now voids vertico's input cache and the default sorted-completions cache, runs ~post-command-hook~ for icomplete/fido, and rebuilds ~*Completions*~ when it is displayed.
 - ~remoto--api-async~ decrements its in-flight counter exactly once even though ~ghub~ retries the callback with fewer arguments on an arity mismatch. Without this the indicator could clear while other fetches were still running.
 - Clean byte-compilation: ~remoto-search-cache-ttl~ was referenced (in ~remoto--fetch-dir-children-light~) before its ~defcustom~, producing a free-variable warning that failed ~make check-compile~. The defcustom is now defined ahead of its first use.
+- Repo candidates at ~/github:OWNER/~ now carry a trailing ~/~, matching the owner candidates at ~/github:~. Selecting a repo descends into it (default-branch file listing) instead of re-running a repo search on the bare name.
+- Owner-level repo completion no longer returns an empty candidate list while the async search is still in flight on a cold cache: the branch falls back to a synchronous ~while-no-input~ fetch (cached on completion) and only yields when the user keeps typing. Note: this addresses the cold-cache empty return at the function level; the broader async-refresh-vs-sync timing in the live minibuffer is not yet fully characterized.
+- The ~remoto~ completion category is registered through ~completion-category-overrides~ instead of ~completion-category-defaults~. With a global ~orderless~ in ~completion-styles~, the defaults entry was bypassed (and could be reset elsewhere), so owner-level matching fell back to orderless substring behavior instead of the intended ~partial-completion~/~basic~ prefix filtering.
+- Clean byte-compilation, second instance: ~remoto-min-search-chars~ is now forward-declared ahead of ~remoto--handle-file-name-all-completions~, which references it before the ~defcustom~.
 
 * [1.5.3] - 2026-05-30
 

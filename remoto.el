@@ -723,6 +723,8 @@ Levels: `root', `owner', `repo' (branches/tags), `files-default', `issues'."
                     directory)
       (list :level 'owner :owner (match-string 1 directory))))))
 
+(defvar remoto-min-search-chars) ; forward-decl for byte-compiler
+
 (defun remoto--handle-file-name-all-completions (file directory)
   "Return completions for FILE in remote DIRECTORY.
 Handles multiple levels: user search at /github:, repo listing at
@@ -750,11 +752,24 @@ fetches populate the cache in the background."
                  (remoto--prefetch-owner-repos top))
                (mapcar (lambda (u) (concat u "/")) filtered)))))
         ('owner
-         ;; Repo completion at /github:OWNER/ (non-blocking)
-         (let ((owner (plist-get partial :owner)))
-           (if (string-empty-p file)
-               (remoto--recent-owner-repos owner)
-             (remoto--search-owner-repos owner file))))
+         ;; Repo completion at /github:OWNER/
+         ;; Try cached/async results first; on cold-cache nil, fall
+         ;; back to a synchronous fetch that yields to user input.
+         (let* ((owner (plist-get partial :owner))
+                (repos (if (string-empty-p file)
+                           (remoto--recent-owner-repos owner)
+                         (remoto--search-owner-repos owner file))))
+           (unless repos
+             (let ((sync (while-no-input
+                           (if (string-empty-p file)
+                               (remoto--recent-owner-repos-sync owner)
+                             (when (<= remoto-min-search-chars (length file))
+                               (remoto--search-owner-repos-sync owner file))))))
+               (when (consp sync)
+                 (setq repos sync))))
+           (mapcar (lambda (r)
+                     (if (string-suffix-p "/" r) r (concat r "/")))
+                   repos)))
         ('repo
          ;; Branch + tag completion at /github:OWNER/REPO@
          (if (string-suffix-p ":" file)
@@ -1926,6 +1941,15 @@ updates the cache and refreshes the completion UI."
         (remoto--async-refresh-recent-repos owner cache-key)
         nil))))
 
+(defun remoto--extract-search-repos (data &optional name-key)
+  "Extract propertized repo names from GitHub search DATA.
+NAME-KEY selects the JSON field for the repo name (default `name')."
+  (mapcar (lambda (item)
+            (propertize (alist-get (or name-key 'name) item)
+                        'remoto-repo-desc
+                        (or (alist-get 'description item) "")))
+          (alist-get 'items data)))
+
 (defun remoto--async-refresh-recent-repos (owner cache-key)
   "Fire async fetch of OWNER's recent repos, updating CACHE-KEY."
   (remoto--debounce
@@ -1935,11 +1959,7 @@ updates the cache and refreshes the completion UI."
        (remoto--api-async
         (format "search/repositories?q=%s&sort=updated&per_page=30" q)
         (lambda (data)
-          (let ((repos (mapcar (lambda (item)
-                                 (propertize (alist-get 'name item)
-                                             'remoto-repo-desc
-                                             (or (alist-get 'description item) "")))
-                               (alist-get 'items data))))
+          (let ((repos (remoto--extract-search-repos data)))
             (remoto--search-cache-put cache-key repos)
             (remoto--refresh-minibuffer-completions))))))))
 
@@ -2000,15 +2020,45 @@ Also narrows from the recent-repos cache when available."
                    (remoto--api-async
                     (format "search/repositories?q=%s&per_page=100" q)
                     (lambda (data)
-                      (let ((repos (mapcar (lambda (item)
-                                            (propertize (alist-get 'name item)
-                                                        'remoto-repo-desc
-                                                        (or (alist-get 'description item) "")))
-                                          (alist-get 'items data))))
+                      (let ((repos (remoto--extract-search-repos data)))
                         (remoto--search-cache-put cache-key repos)
                         (remoto--refresh-minibuffer-completions)))))))
               ;; Return preview immediately (may be nil)
               preview))))))))
+
+(defun remoto--recent-owner-repos-sync (owner)
+  "Synchronously fetch recent repos for OWNER, caching the result.
+Intended for use inside `while-no-input' as a fallback when the
+async path returned nil on a cold cache."
+  (condition-case nil
+      (let* ((cache-key (format "\0repos-recent:%s" (downcase owner)))
+             (q (url-hexify-string (format "user:%s" owner)))
+             (data (remoto--api
+                    (format "search/repositories?q=%s&sort=updated&per_page=30"
+                            q))))
+        (when data
+          (let ((repos (remoto--extract-search-repos data)))
+            (remoto--search-cache-put cache-key repos)
+            repos)))
+    (error nil)))
+
+(defun remoto--search-owner-repos-sync (owner query)
+  "Synchronously search OWNER's repos matching QUERY, caching the result.
+Intended for use inside `while-no-input' as a fallback when the
+async path returned nil on a cold cache."
+  (condition-case nil
+      (let* ((owner-down (downcase owner))
+             (query-down (downcase query))
+             (cache-key (format "\0repos:%s/%s" owner-down query-down))
+             (q (url-hexify-string
+                 (format "%s in:name user:%s" query owner)))
+             (data (remoto--api
+                    (format "search/repositories?q=%s&per_page=100" q))))
+        (when data
+          (let ((repos (remoto--extract-search-repos data)))
+            (remoto--search-cache-put cache-key repos)
+            repos)))
+    (error nil)))
 
 (defun remoto--get-authenticated-user ()
   "Return the GitHub login of the authenticated user, or nil.
@@ -2065,11 +2115,7 @@ Requires at least `remoto-min-search-chars' characters."
             (format "search/repositories?q=%s&per_page=100"
                     (url-hexify-string (remoto--search-query query)))
             (lambda (data)
-              (let ((results (mapcar (lambda (item)
-                                       (propertize (alist-get 'full_name item)
-                                                   'remoto-repo-desc
-                                                   (or (alist-get 'description item) "")))
-                                     (alist-get 'items data))))
+              (let ((results (remoto--extract-search-repos data 'full_name)))
                 (remoto--search-cache-put query results)
                 (remoto--refresh-minibuffer-completions))))))
         nil))))
@@ -2551,8 +2597,10 @@ will try ghub auth on first API call"))))
 (add-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
 
 ;; Register completion styles for our category so filtering works
-;; like file-name completion (partial-completion understands path separators).
-(add-to-list 'completion-category-defaults
+;; like file-name completion (partial-completion understands path
+;; separators).  Uses overrides (highest priority) so that a global
+;; orderless in completion-styles does not interfere.
+(add-to-list 'completion-category-overrides
              '(remoto (styles partial-completion basic)))
 
 (defun remoto--get-prop (candidate prop)

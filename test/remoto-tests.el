@@ -1385,6 +1385,108 @@
         (expect result :to-equal '("linux"))
         (expect 'remoto--debounce :not :to-have-been-called)))))
 
+(describe "remoto--extract-search-repos"
+  (it "extracts repo names with description properties"
+    (let* ((data '((items . (((name . "linux") (description . "kernel"))
+                              ((name . "uemacs") (description . nil))))))
+           (repos (remoto--extract-search-repos data)))
+      (expect (length repos) :to-equal 2)
+      (expect (car repos) :to-equal "linux")
+      (expect (get-text-property 0 'remoto-repo-desc (car repos))
+              :to-equal "kernel")
+      (expect (get-text-property 0 'remoto-repo-desc (cadr repos))
+              :to-equal "")))
+
+  (it "uses alternate name key when provided"
+    (let* ((data '((items . (((full_name . "torvalds/linux")
+                               (description . "kernel"))))))
+           (repos (remoto--extract-search-repos data 'full_name)))
+      (expect (car repos) :to-equal "torvalds/linux"))))
+
+(describe "remoto--search-owner-repos-sync"
+  (it "returns repos and populates cache on success"
+    (spy-on 'remoto--api :and-return-value
+            '((items . (((name . "linux") (description . "kernel"))
+                         ((name . "libfdt") (description . ""))))))
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      (let ((result (remoto--search-owner-repos-sync "torvalds" "lin")))
+        (expect (length result) :to-equal 2)
+        (expect (car result) :to-equal "linux")
+        ;; Cache should be warm now
+        (pcase-let ((`(,hit ,cached) (remoto--search-cache-get
+                                       "\0repos:torvalds/lin")))
+          (expect hit :to-be-truthy)
+          (expect (length cached) :to-equal 2)))))
+
+  (it "returns nil on API error without signaling"
+    (spy-on 'remoto--api :and-call-fake
+            (lambda (_) (error "network error")))
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      (expect (remoto--search-owner-repos-sync "torvalds" "lin")
+              :to-be nil))))
+
+(describe "remoto--recent-owner-repos-sync"
+  (it "returns repos and populates cache on success"
+    (spy-on 'remoto--api :and-return-value
+            '((items . (((name . "linux") (description . "kernel"))))))
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      (let ((result (remoto--recent-owner-repos-sync "torvalds")))
+        (expect (length result) :to-equal 1)
+        (expect (car result) :to-equal "linux")
+        ;; Cache should be warm
+        (pcase-let ((`(,hit ,_) (remoto--search-cache-get
+                                  "\0repos-recent:torvalds"
+                                  remoto-repo-cache-ttl)))
+          (expect hit :to-be-truthy)))))
+
+  (it "returns nil on API error without signaling"
+    (spy-on 'remoto--api :and-call-fake
+            (lambda (_) (error "network error")))
+    (let ((remoto--search-cache (make-hash-table :test 'equal)))
+      (expect (remoto--recent-owner-repos-sync "torvalds")
+              :to-be nil))))
+
+(describe "owner-level sync fallback in file-name-all-completions"
+  (it "falls back to sync search when async returns nil"
+    (spy-on 'remoto--search-owner-repos :and-return-value nil)
+    (spy-on 'remoto--search-owner-repos-sync :and-return-value '("linux"))
+    (let ((completions (remoto--handle-file-name-all-completions
+                        "lin" "/github:torvalds/")))
+      (expect completions :to-equal '("linux/"))
+      (expect 'remoto--search-owner-repos-sync
+              :to-have-been-called-with "torvalds" "lin")))
+
+  (it "falls back to sync recent repos when async returns nil"
+    (spy-on 'remoto--recent-owner-repos :and-return-value nil)
+    (spy-on 'remoto--recent-owner-repos-sync :and-return-value '("linux"))
+    (let ((completions (remoto--handle-file-name-all-completions
+                        "" "/github:torvalds/")))
+      (expect completions :to-equal '("linux/"))
+      (expect 'remoto--recent-owner-repos-sync
+              :to-have-been-called-with "torvalds")))
+
+  (it "skips sync fallback when async has results"
+    (spy-on 'remoto--search-owner-repos :and-return-value '("linux"))
+    (spy-on 'remoto--search-owner-repos-sync)
+    (let ((completions (remoto--handle-file-name-all-completions
+                        "lin" "/github:torvalds/")))
+      (expect completions :to-equal '("linux/"))
+      (expect 'remoto--search-owner-repos-sync :not :to-have-been-called)))
+
+  (it "skips sync search below min-search-chars"
+    (let ((remoto-min-search-chars 3))
+      (spy-on 'remoto--search-owner-repos :and-return-value nil)
+      (spy-on 'remoto--search-owner-repos-sync)
+      (remoto--handle-file-name-all-completions "li" "/github:torvalds/")
+      (expect 'remoto--search-owner-repos-sync :not :to-have-been-called))))
+
+(describe "completion-category-overrides registration"
+  (it "registers remoto category with partial-completion style"
+    (let ((entry (assq 'remoto completion-category-overrides)))
+      (expect entry :to-be-truthy)
+      (expect (cdr (assq 'styles (cdr entry)))
+              :to-equal '(partial-completion basic)))))
+
 (describe "remoto--get-authenticated-user"
   (it "returns login from /user endpoint"
     (let ((remoto--authenticated-user nil)
@@ -1459,10 +1561,10 @@
       (let ((users (remoto--handle-file-name-all-completions "tor" "/github:")))
         (expect users :to-equal '("torvalds/")))
 
-      ;; Step 2: /github:torvalds/ + "lin" -> repo completions
+      ;; Step 2: /github:torvalds/ + "lin" -> repo completions (with trailing /)
       (spy-on 'remoto--search-owner-repos :and-return-value '("linux"))
       (let ((repos (remoto--handle-file-name-all-completions "lin" "/github:torvalds/")))
-        (expect repos :to-equal '("linux")))
+        (expect repos :to-equal '("linux/")))
 
       ;; Step 3: verify path splitting for orderless at repo@ boundary
       (expect (remoto--handle-file-name-directory "/github:torvalds/linux@")
@@ -1489,9 +1591,9 @@
     ;; orderless calls with a query, gets matching repos
     (let ((all (remoto--handle-file-name-all-completions "li" "/github:torvalds/")))
       (expect (length all) :to-equal 2)
-      ;; Then filters client-side
+      ;; Then filters client-side (prefix still matches through trailing /)
       (let ((filtered (seq-filter (lambda (r) (string-prefix-p "lin" r)) all)))
-        (expect filtered :to-equal '("linux"))))))
+        (expect filtered :to-equal '("linux/"))))))
 
 ;;; Pre-repo completions
 
@@ -1519,13 +1621,13 @@
   (it "returns recent repos for empty query at /github:owner/"
     (spy-on 'remoto--recent-owner-repos :and-return-value '("linux" "uemacs"))
     (let ((completions (remoto--handle-file-name-all-completions "" "/github:torvalds/")))
-      (expect completions :to-equal '("linux" "uemacs"))
+      (expect completions :to-equal '("linux/" "uemacs/"))
       (expect 'remoto--recent-owner-repos :to-have-been-called-with "torvalds")))
 
   (it "searches repos by query"
     (spy-on 'remoto--search-owner-repos :and-return-value '("linux"))
     (let ((completions (remoto--handle-file-name-all-completions "lin" "/github:torvalds/")))
-      (expect completions :to-equal '("linux"))))
+      (expect completions :to-equal '("linux/"))))
 
   (it "returns branch+tag completions at repo@ directory"
     (spy-on 'remoto--fetch-branches :and-return-value '("main" "develop"))
@@ -2046,10 +2148,10 @@ Returns the full path after completion, or INPUT if no completion."
       (expect (remoto-test--complete "/github:test")
               :to-equal '("testowner/"))
 
-      ;; Step 2: find repo
+      ;; Step 2: find repo (trailing / marks repos as navigable dirs)
       (spy-on 'remoto--recent-owner-repos :and-return-value '("testrepo"))
       (expect (remoto-test--complete "/github:testowner/")
-              :to-equal '("testrepo"))
+              :to-equal '("testrepo/"))
 
       ;; Step 3: list files on default branch (uses lightweight Contents API)
       (spy-on 'remoto--default-branch :and-return-value "main")
@@ -2168,7 +2270,7 @@ Returns the full path after completion, or INPUT if no completion."
   (it "completes unique repo"
     (spy-on 'remoto--search-owner-repos :and-return-value '("linux"))
     (expect (remoto-test--tab-complete "/github:torvalds/lin")
-            :to-equal "/github:torvalds/linux"))
+            :to-equal "/github:torvalds/linux/"))
 
   (it "completes unique branch with :"
     (spy-on 'remoto--fetch-branches :and-return-value '("main"))
