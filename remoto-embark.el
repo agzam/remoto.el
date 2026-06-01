@@ -240,6 +240,13 @@ This routes to the remoto-topic display via `find-file'."
   (remoto--kill-url (apply #'remoto--forge-issue-url
                            (remoto--embark-issue-parts target))))
 
+(defun remoto-embark-browse-pr-diff (target)
+  "Open the PR files-diff page for the remoto issue/PR TARGET in a browser.
+For an issue the forge redirects to the issue page."
+  (interactive "sRemoto PR: ")
+  (browse-url (apply #'remoto--forge-issue-url
+                     (append (remoto--embark-issue-parts target) '(pr-diff)))))
+
 (defun remoto--clone (url dest)
   "Clone URL into DEST asynchronously, showing progress in a buffer."
   (let ((buffer (get-buffer-create "*remoto-clone*")))
@@ -298,6 +305,7 @@ The clone URL kind is governed by `remoto-clone-url-type'."
   "o" #'remoto-embark-open-issue
   "w" #'remoto-embark-browse-issue
   "u" #'remoto-embark-copy-issue-url
+  "d" #'remoto-embark-browse-pr-diff
   "y" #'remoto-embark-copy-issue-ref)
 
 ;;;; Registration (only once Embark is loaded)

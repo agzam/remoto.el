@@ -3994,10 +3994,21 @@ Returns the full path after completion, or INPUT if no completion."
     (remoto-embark-copy-issue-url "/github:o/r#42")
     (expect (car kill-ring) :to-equal "https://github.com/o/r/issues/42"))
 
+  (it "builds the PR files-diff URL via the pr-diff template"
+    (expect (remoto--forge-issue-url 'github "o" "r" "42" 'pr-diff)
+            :to-equal "https://github.com/o/r/pull/42/files"))
+
+  (it "browses the PR files-diff page"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-pr-diff "/github:o/r#42")
+    (expect 'browse-url :to-have-been-called-with
+            "https://github.com/o/r/pull/42/files"))
+
   (it "binds issue actions in the issue keymap"
     (expect (lookup-key remoto-embark-issue-map "o") :to-be 'remoto-embark-open-issue)
     (expect (lookup-key remoto-embark-issue-map "w") :to-be 'remoto-embark-browse-issue)
     (expect (lookup-key remoto-embark-issue-map "u") :to-be 'remoto-embark-copy-issue-url)
+    (expect (lookup-key remoto-embark-issue-map "d") :to-be 'remoto-embark-browse-pr-diff)
     (expect (lookup-key remoto-embark-issue-map "y")
             :to-be 'remoto-embark-copy-issue-ref)))
 

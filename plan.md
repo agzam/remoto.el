@@ -273,11 +273,15 @@ Stage D - remoto-browse surface, richer actions, polish:
   `remoto--embark-browse-transform' that classifies per target (issue/branch by
   path marker, else dir/file/repo via the path context) and dispatches to the
   existing per-type keymaps.  No category churn, no new keymap/override.
-- issue/PR web actions - DONE: browse (`w`) and copy-url (`u`) via
-  `remoto--forge-issue-url' (forge-agnostic `issue' template).
-- Remaining: branch/issue extra actions (gh pr checkout, open diff);
-  export-subdir-to-local (uses remoto fetcher); embark-collect/export refinements
-  (`embark-exporters-alist` -> remoto Dired, if feasible).
+- issue/PR web actions - DONE: browse (`w`), copy-url (`u`), and the PR
+  files-diff page (`d`, `pr-diff' template -> /pull/N/files) via
+  `remoto--forge-issue-url' (forge-agnostic, %N-based templates).
+- DESCOPED (read-only model mismatch): `gh pr checkout' and
+  export-subdir-to-local both bridge into a local working copy and raise
+  contention/conflict-resolution questions against a locally cloned repo;
+  out of scope for the read-only browse integration.
+- Remaining: embark-collect/export refinements (`embark-exporters-alist` ->
+  remoto Dired, if feasible).
 - README docs: how to enable (`(require 'remoto-embark)`), keymaps, opt-in note.
 
 ## 10. File and function pointers
