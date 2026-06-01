@@ -570,38 +570,56 @@
 ;;; remoto--path-context and target classification
 
 (describe "remoto--path-context"
+  ;; Note: plist-get results are bound in `let*' and asserted as plain
+  ;; locals.  Calling (plist-get ctx :key) directly inside `expect'
+  ;; mis-evaluates under buttercup on Emacs 29.
   (it "classifies a repo root as remoto-repo without resolving the ref"
     (remoto-test-with-cache
-      (let ((ctx (remoto--path-context "/github:testowner/testrepo:/")))
-        (expect (plist-get ctx :type) :to-be 'remoto-repo)
-        (expect (plist-get ctx :owner) :to-equal "testowner")
-        (expect (plist-get ctx :repo) :to-equal "testrepo")
+      (let* ((ctx (remoto--path-context "/github:testowner/testrepo:/"))
+             (type (plist-get ctx :type))
+             (owner (plist-get ctx :owner))
+             (repo (plist-get ctx :repo))
+             (ref (plist-get ctx :ref))
+             (path (plist-get ctx :path)))
+        (expect type :to-be 'remoto-repo)
+        (expect owner :to-equal "testowner")
+        (expect repo :to-equal "testrepo")
         ;; root targets stay unresolved (no ref/tree API needed)
-        (expect (plist-get ctx :ref) :to-be nil)
-        (expect (plist-get ctx :path) :to-equal ""))))
+        (expect ref :to-be nil)
+        (expect path :to-equal ""))))
 
   (it "classifies a directory as remoto-dir"
     (remoto-test-with-cache
-      (let ((ctx (remoto--path-context "/github:testowner/testrepo@main:/src")))
-        (expect (plist-get ctx :type) :to-be 'remoto-dir)
-        (expect (plist-get ctx :kind) :to-be 'tree)
-        (expect (plist-get ctx :path) :to-equal "src"))))
+      (let* ((ctx (remoto--path-context "/github:testowner/testrepo@main:/src"))
+             (type (plist-get ctx :type))
+             (kind (plist-get ctx :kind))
+             (path (plist-get ctx :path)))
+        (expect type :to-be 'remoto-dir)
+        (expect kind :to-be 'tree)
+        (expect path :to-equal "src"))))
 
   (it "classifies a file as remoto-file"
     (remoto-test-with-cache
-      (let ((ctx (remoto--path-context "/github:testowner/testrepo@main:/src/main.el")))
-        (expect (plist-get ctx :type) :to-be 'remoto-file)
-        (expect (plist-get ctx :kind) :to-be 'blob)
-        (expect (plist-get ctx :path) :to-equal "src/main.el"))))
+      (let* ((ctx (remoto--path-context "/github:testowner/testrepo@main:/src/main.el"))
+             (type (plist-get ctx :type))
+             (kind (plist-get ctx :kind))
+             (path (plist-get ctx :path)))
+        (expect type :to-be 'remoto-file)
+        (expect kind :to-be 'blob)
+        (expect path :to-equal "src/main.el"))))
 
   (it "keeps line info only for file targets"
     (remoto-test-with-cache
-      (let ((file (remoto--path-context "/github:testowner/testrepo@main:/src/main.el" 5 7))
-            (dir (remoto--path-context "/github:testowner/testrepo@main:/src" 5 7)))
-        (expect (plist-get file :line-start) :to-be 5)
-        (expect (plist-get file :line-end) :to-be 7)
-        (expect (plist-get dir :line-start) :to-be nil)
-        (expect (plist-get dir :line-end) :to-be nil))))
+      (let* ((file (remoto--path-context "/github:testowner/testrepo@main:/src/main.el" 5 7))
+             (dir (remoto--path-context "/github:testowner/testrepo@main:/src" 5 7))
+             (file-start (plist-get file :line-start))
+             (file-end (plist-get file :line-end))
+             (dir-start (plist-get dir :line-start))
+             (dir-end (plist-get dir :line-end)))
+        (expect file-start :to-be 5)
+        (expect file-end :to-be 7)
+        (expect dir-start :to-be nil)
+        (expect dir-end :to-be nil))))
 
   (it "returns nil for a non-remoto path"
     (expect (remoto--path-context "/home/me/x.el") :to-be nil)))
