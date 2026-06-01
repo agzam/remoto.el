@@ -1441,12 +1441,16 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
      (blame   . "https://github.com/%o/%r/blame/%R/%p%L")
      (history . "https://github.com/%o/%r/commits/%R/%p")
      (raw     . "https://raw.githubusercontent.com/%o/%r/%R/%p")
+     (repo    . "https://github.com/%o/%r")
+     (ssh     . "git@github.com:%o/%r.git")
+     (https   . "https://github.com/%o/%r.git")
      (line    . "#L%s")
      (region  . "#L%s-L%e")))
   "Per-forge web-URL templates, keyed by forge symbol.
 
-Each value is an alist of (KIND . TEMPLATE).  KIND is one of `blob',
-`tree', `blame', `history', `raw', plus the line-fragment builders
+Each value is an alist of (KIND . TEMPLATE).  Path-level kinds: `blob',
+`tree', `blame', `history', `raw'.  Repository-level kinds: `repo' (web
+root), `ssh' and `https' (clone URLs).  Plus the line-fragment builders
 `line' and `region'.  Templates are expanded with `format-spec' using:
 
   %o  repository owner
@@ -1502,14 +1506,45 @@ Used for permalinks so the link survives the ref moving on."
         (user-error "Remoto: could not resolve commit SHA for %s/%s@%s"
                     owner repo ref))))
 
+(defun remoto--path-context (path &optional line-start line-end)
+  "Build a forge-agnostic context plist for the remoto PATH string.
+Return nil when PATH is not a remoto path.
+
+Plist keys: :forge :owner :repo :ref :path :kind :type :line-start
+:line-end.  :kind is `tree' or `blob'.  :type is the Embark target type,
+one of `remoto-repo', `remoto-dir', `remoto-file'.  A repository root is
+classified as `remoto-repo' without resolving the ref or fetching the
+tree (so it works offline and on bare `owner/repo' targets).  LINE-START
+and LINE-END are retained only for `remoto-file' targets."
+  (when-let* ((parsed (remoto--parse-path path)))
+    (if (member (remoto-path-path parsed) '("" "/"))
+        (list :forge (remoto--forge-type path)
+              :owner (remoto-path-owner parsed)
+              :repo (remoto-path-repo parsed)
+              :ref (remoto-path-ref parsed)
+              :path "" :kind 'tree :type 'remoto-repo
+              :line-start nil :line-end nil)
+      (let* ((resolved (remoto--resolve-ref parsed))
+             (entry (remoto--tree-entry resolved))
+             (filep (not (and entry (equal "tree" (alist-get 'type entry))))))
+        (list :forge (remoto--forge-type path)
+              :owner (remoto-path-owner resolved)
+              :repo (remoto-path-repo resolved)
+              :ref (remoto-path-ref resolved)
+              :path (remoto--relative-path (remoto-path-path resolved))
+              :kind (if filep 'blob 'tree)
+              :type (if filep 'remoto-file 'remoto-dir)
+              :line-start (and filep line-start)
+              :line-end (and filep line-end))))))
+
 (defun remoto--buffer-file-context ()
   "Return a context plist describing the current buffer's remoto target.
 
-Keys: :forge :owner :repo :ref :path :kind :line-start :line-end.
-:kind is `blob' for a file or `tree' for a directory; the line keys are
-nil in Dired and for directories.  Works in file buffers (line/region at
-point) and in Dired (entry at point, falling back to the directory).
-Signals a `user-error' when the current buffer is not a remoto buffer."
+Works in file buffers (line/region at point) and in Dired (entry at
+point, falling back to the directory).  Resolves the ref so the context
+carries a concrete branch, then delegates classification to
+`remoto--path-context'.  Signals a `user-error' when the current buffer
+is not a remoto buffer."
   (let* ((dired (derived-mode-p 'dired-mode))
          (file (or buffer-file-name
                    (and dired (dired-get-filename nil t))
@@ -1520,24 +1555,13 @@ Signals a `user-error' when the current buffer is not a remoto buffer."
          (parsed (and file (remoto--parse-path file))))
     (unless parsed
       (user-error "Remoto: not in a remoto buffer"))
-    (let* ((resolved (remoto--resolve-ref parsed))
-           (entry (remoto--tree-entry resolved))
-           (kind (if (and entry (equal "tree" (alist-get 'type entry)))
-                     'tree 'blob))
-           (lines (and (eq kind 'blob) (not dired)))
-           (line-start (and lines
+    (let* ((canonical (remoto--canonical-path (remoto--resolve-ref parsed)))
+           (region (and (not dired) (use-region-p)))
+           (line-start (and (not dired)
                             (line-number-at-pos
-                             (if (use-region-p) (region-beginning) (point)))))
-           (line-end (and lines (use-region-p)
-                          (line-number-at-pos (region-end)))))
-      (list :forge (remoto--forge-type file)
-            :owner (remoto-path-owner resolved)
-            :repo (remoto-path-repo resolved)
-            :ref (remoto-path-ref resolved)
-            :path (remoto--relative-path (remoto-path-path resolved))
-            :kind kind
-            :line-start line-start
-            :line-end line-end))))
+                             (if region (region-beginning) (point)))))
+           (line-end (and region (line-number-at-pos (region-end)))))
+      (remoto--path-context canonical line-start line-end))))
 
 (defun remoto--context-url (ctx kind &optional ref)
   "Build a URL of KIND from context plist CTX.
@@ -1550,6 +1574,15 @@ Optional REF overrides the ref in CTX (used for permalinks)."
                      (plist-get ctx :path)
                      (plist-get ctx :line-start)
                      (plist-get ctx :line-end)))
+
+(defun remoto--context-web-url (ctx)
+  "Return the human-facing web URL for context CTX, chosen by its :type.
+A repo target yields the repository page, a directory the tree view, and
+a file the blob view (with any line fragment)."
+  (remoto--context-url ctx (pcase (plist-get ctx :type)
+                             ('remoto-repo 'repo)
+                             ('remoto-dir 'tree)
+                             (_ 'blob))))
 
 (defun remoto--require-blob (ctx what)
   "Signal a `user-error' unless CTX refers to a file.

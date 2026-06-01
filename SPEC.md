@@ -263,7 +263,7 @@ ghub signals typed conditions for HTTP errors. `remoto--api` catches these and r
 
 - `remoto-browse` - prompt for a repo using standard `completing-read` with a programmed completion table (`remoto--repo-completion-table`), open dired at root or find-file for blob paths. Type 3+ characters to trigger GitHub search via the search API. Tab completes repo names. Append `@` to complete branch names - fetches branches via the GitHub Branches API and offers `owner/repo@branch` candidates, with prefix filtering. Works with any completion frontend (vertico, ivy, helm, vanilla Emacs). Search results are cached for `remoto-search-cache-ttl` seconds (default 300). Branch results are cached in `remoto--branches-cache` with the same TTL as search results. Owner-scoped repo search shares the `remoto--search-owner-repos` engine with `/github:` completion (results are reformatted from bare repo names to `owner/repo`), and a `[fetching...]` indicator shows while searching and during the post-selection fetch (see Fetch indicator).
 - `remoto-refresh` - invalidate tree and branch caches for current repo, re-fetch. Reverts dired buffer if in one.
-- `remoto-copy-github-url` - for the current file/line, produce the corresponding `github.com` URL and copy to kill ring. Includes `#L<n>` suffix for files.
+- URL commands - `remoto-copy-url`, `remoto-copy-blame-url`, `remoto-copy-permalink`, `remoto-copy-raw-url`, `remoto-copy-history-url`, `remoto-browse-url` - and the `remoto-mode` minor mode. See "Forge-agnostic URL Layer" below. `remoto-copy-github-url` remains as an obsolete alias of `remoto-copy-url`.
 
 ### find-file completion
 
@@ -375,6 +375,68 @@ Buffer name: `*remoto: owner/repo#NUM*`. Mode: `remoto-topic-mode` (derived from
 
 Faces: `remoto-topic-title`, `remoto-topic-state-open`, `remoto-topic-state-closed`, `remoto-topic-state-merged`, `remoto-topic-meta`, `remoto-topic-comment-header`, `remoto-topic-additions`, `remoto-topic-deletions`.
 
+## Forge-agnostic URL Layer
+
+The web-URL features sit on a small forge-agnostic core, so adding a forge (GitLab, Codeberg, ...) is a data change, not new command code. Two pieces:
+
+1. `remoto-forge-url-templates` - an alist keyed by forge symbol. Each value maps a URL KIND to a `format-spec` template. Path-level kinds: `blob`, `tree`, `blame`, `history`, `raw`. Repository-level kinds: `repo` (web root), `ssh` and `https` (clone URLs). Plus the `line`/`region` fragment builders. Specs: `%o` owner, `%r` repo, `%R` ref, `%p` repo-relative path, `%L` line fragment.
+
+2. A context plist - the currency every command and Embark action consumes, built by `remoto--path-context PATH &optional LINE-START LINE-END`:
+
+| Key | Meaning |
+|---|---|
+| `:forge` | forge symbol, from the path prefix via `remoto--forge-type` |
+| `:owner` `:repo` `:ref` | repository coordinates |
+| `:path` | repo-relative path (`""` for root) |
+| `:kind` | `tree` or `blob` |
+| `:type` | target type: `remoto-repo`, `remoto-dir`, or `remoto-file` |
+| `:line-start` `:line-end` | file line/region (file targets only) |
+
+A repo root is classified `remoto-repo` without resolving the ref or fetching the tree, so it works offline and on bare `owner/repo` targets. `remoto--buffer-file-context` derives PATH plus line/region from the current buffer (file or Dired) and delegates to `remoto--path-context`. `remoto--context-url CTX KIND` and `remoto--context-web-url CTX` (which picks the web KIND from `:type`) turn a context into a URL.
+
+### URL commands and `remoto-mode`
+
+`remoto-copy-url` (obsoletes `remoto-copy-github-url`), `remoto-copy-blame-url`, `remoto-copy-permalink` (resolves ref -> commit SHA), `remoto-copy-raw-url`, `remoto-copy-history-url`, `remoto-browse-url`. All work in file buffers (current line / active region) and in Dired (entry at point, falling back to the directory). `remoto-mode` is a buffer-local minor mode auto-enabled in remoto buffers via `find-file-hook` / `dired-mode-hook`; its keymap is empty by default to avoid the user-reserved `C-c LETTER` space. The commands are grouped in the prefix keymap `remoto-command-map`, which users bind to a prefix of their choosing.
+
+## Embark Integration (remoto-embark.el)
+
+Optional, soft integration. Loaded only when Embark is present; remoto works identically without it.
+
+### Non-breaking mechanism
+
+- `embark` is NOT in `Package-Requires` - no hard dependency.
+- `remoto-embark.el` does not `(require 'embark)`; it `defvar`s the few Embark variables it touches and registers itself inside `(with-eval-after-load 'embark ...)`. It byte-compiles and loads cleanly with Embark absent (verified with `byte-compile-error-on-warn`).
+- `remoto.el` carries no reference to Embark at all, so the main file stays package-lint clean. The integration is opt-in: users `(require 'remoto-embark)` (load order does not matter - it self-registers via `with-eval-after-load 'embark`). The lone `with-eval-after-load` package-lint caution is confined to this dedicated integration file, where it is the correct mechanism.
+
+### Target types (forge-agnostic, stable public API)
+
+`remoto-owner`, `remoto-repo`, `remoto-branch`, `remoto-issue`, `remoto-dir`, `remoto-file`, plus Embark's built-in `url` for forge web links at point. Two sources produce them:
+
+- Buffers / Dired: a target finder (`remoto--embark-target-finder`, via `remoto--embark-target-at-point`) parses the remoto path's shape (root -> repo, tree -> dir, blob -> file) and returns `(TYPE FULLPATH)`.
+- Minibuffer completion: the completion category. remoto already detects the level (owner/repo/branch/issue/file) to fetch the right candidates, so the metadata can report a per-level category that Embark maps to a keymap (stage 2).
+
+Embark actions always receive a full canonical remoto path; a transformer expands minibuffer candidates (e.g. `remoto.el/`) to the full path before the action runs.
+
+### Action catalog (tiered)
+
+Core actions ship first; the rest are documented follow-ups.
+
+- repo: copy web URL, browse, copy SSH URL, copy HTTPS URL, copy history URL. Later: clone, `gh repo clone`, open issues/PRs, fork/star, package recipe.
+- branch: open at ref, browse, copy URL. Later: compare view, new-PR page, copy checkout command, tip SHA.
+- issue/PR: open in remoto-topic, browse, copy URL, copy `owner/repo#N`. Later: `gh pr checkout`, diff, head branch.
+- dir: browse, copy tree URL, copy history URL. Later: export the subdir to a local directory using remoto's own fetcher, sparse-checkout command.
+- file: copy URL, browse, blame, permalink, raw, history. Later: save a local copy, insert contents, copy `curl` command.
+
+### Keymaps
+
+`remoto-embark-repo-map`, `remoto-embark-dir-map`, `remoto-embark-file-map` (defined with `defvar-keymap`), registered in `embark-keymap-alist`. Action commands take the target path and reuse the forge-agnostic context layer, so they are forge-agnostic too.
+
+### Implementation status
+
+- Done: forge-agnostic core (templates including `repo`/`ssh`/`https`, `remoto--path-context` with `:type`, `remoto--context-web-url`), the URL commands, `remoto-mode`, and Stage 1 of `remoto-embark.el` (buffer/Dired target finder `remoto--embark-target-finder`, `remoto-embark-repo-map`/`-dir-map`/`-file-map`, copy/browse/clone-URL actions, opt-in registration).
+- Stage 2 (next): per-level minibuffer completion categories, so `C-x C-f /github:OWNER` candidates become `remoto-repo` targets; `embark-collect` / `embark-export`; candidate-to-path transformer.
+- Stage 3 (next): clone and other repo actions, issue/branch actions, export-subdir-to-local, and the `url`-at-point "open in remoto" bridge.
+
 ## Unloading
 
 `remoto-unload-function` removes the handler-alist entry and all advice, clears all caches (tree, default-branch, branches, tags, issues, users, search, content, file-commits).
@@ -457,6 +519,7 @@ Each prefix would have its own entry in `file-name-handler-alist`, dispatching t
 remoto.el/
   remoto.el          ;; core: file-name-handler, completion, API, caching
   remoto-topic.el    ;; issue/PR display buffers
+  remoto-embark.el   ;; optional Embark integration (loaded only when embark is present)
   SPEC.md            ;; this spec
   README.org         ;; user-facing documentation
   CHANGELOG.org      ;; release history

@@ -9,6 +9,9 @@
 
 (require 'buttercup)
 (require 'remoto)
+;; Soft: present once remoto-embark.el exists; tests below fail (not error)
+;; until then, keeping the rest of the suite runnable.
+(require 'remoto-embark nil t)
 
 ;;; Helpers
 
@@ -548,9 +551,79 @@
     (expect (remoto--forge-url 'github 'history "o" "r" "main" "src/main.el" nil nil)
             :to-equal "https://github.com/o/r/commits/main/src/main.el"))
 
+  (it "builds the repo web URL"
+    (expect (remoto--forge-url 'github 'repo "o" "r" nil nil nil nil)
+            :to-equal "https://github.com/o/r"))
+
+  (it "builds the SSH clone URL"
+    (expect (remoto--forge-url 'github 'ssh "o" "r" nil nil nil nil)
+            :to-equal "git@github.com:o/r.git"))
+
+  (it "builds the HTTPS clone URL"
+    (expect (remoto--forge-url 'github 'https "o" "r" nil nil nil nil)
+            :to-equal "https://github.com/o/r.git"))
+
   (it "signals for an unknown forge"
     (expect (remoto--forge-url 'bogus 'blob "o" "r" "main" "x" nil nil)
             :to-throw 'user-error)))
+
+;;; remoto--path-context and target classification
+
+(describe "remoto--path-context"
+  (it "classifies a repo root as remoto-repo without resolving the ref"
+    (remoto-test-with-cache
+      (let ((ctx (remoto--path-context "/github:testowner/testrepo:/")))
+        (expect (plist-get ctx :type) :to-be 'remoto-repo)
+        (expect (plist-get ctx :owner) :to-equal "testowner")
+        (expect (plist-get ctx :repo) :to-equal "testrepo")
+        ;; root targets stay unresolved (no ref/tree API needed)
+        (expect (plist-get ctx :ref) :to-be nil)
+        (expect (plist-get ctx :path) :to-equal ""))))
+
+  (it "classifies a directory as remoto-dir"
+    (remoto-test-with-cache
+      (let ((ctx (remoto--path-context "/github:testowner/testrepo@main:/src")))
+        (expect (plist-get ctx :type) :to-be 'remoto-dir)
+        (expect (plist-get ctx :kind) :to-be 'tree)
+        (expect (plist-get ctx :path) :to-equal "src"))))
+
+  (it "classifies a file as remoto-file"
+    (remoto-test-with-cache
+      (let ((ctx (remoto--path-context "/github:testowner/testrepo@main:/src/main.el")))
+        (expect (plist-get ctx :type) :to-be 'remoto-file)
+        (expect (plist-get ctx :kind) :to-be 'blob)
+        (expect (plist-get ctx :path) :to-equal "src/main.el"))))
+
+  (it "keeps line info only for file targets"
+    (remoto-test-with-cache
+      (let ((file (remoto--path-context "/github:testowner/testrepo@main:/src/main.el" 5 7))
+            (dir (remoto--path-context "/github:testowner/testrepo@main:/src" 5 7)))
+        (expect (plist-get file :line-start) :to-be 5)
+        (expect (plist-get file :line-end) :to-be 7)
+        (expect (plist-get dir :line-start) :to-be nil)
+        (expect (plist-get dir :line-end) :to-be nil))))
+
+  (it "returns nil for a non-remoto path"
+    (expect (remoto--path-context "/home/me/x.el") :to-be nil)))
+
+(describe "remoto--context-web-url"
+  (it "uses the repo web URL for a repo target"
+    (remoto-test-with-cache
+      (expect (remoto--context-web-url
+               (remoto--path-context "/github:testowner/testrepo@main:/"))
+              :to-equal "https://github.com/testowner/testrepo")))
+
+  (it "uses the tree URL for a directory target"
+    (remoto-test-with-cache
+      (expect (remoto--context-web-url
+               (remoto--path-context "/github:testowner/testrepo@main:/src"))
+              :to-equal "https://github.com/testowner/testrepo/tree/main/src")))
+
+  (it "uses the blob URL (with line) for a file target"
+    (remoto-test-with-cache
+      (expect (remoto--context-web-url
+               (remoto--path-context "/github:testowner/testrepo@main:/src/main.el" 3 nil))
+              :to-equal "https://github.com/testowner/testrepo/blob/main/src/main.el#L3"))))
 
 ;;; remoto-copy-url
 
@@ -3626,6 +3699,74 @@ Returns the full path after completion, or INPUT if no completion."
               "Remoto %s" remoto--fetch-indicator-text)
       (expect 'remoto--resolve-ref :to-have-been-called)
       (expect 'dired :to-have-been-called))))
+
+;;; remoto-embark integration
+
+(describe "remoto-embark module"
+  (it "loads without embark and defines the target keymaps"
+    (expect (featurep 'remoto-embark) :to-be-truthy)
+    (expect (keymapp remoto-embark-repo-map) :to-be-truthy)
+    (expect (keymapp remoto-embark-dir-map) :to-be-truthy)
+    (expect (keymapp remoto-embark-file-map) :to-be-truthy)))
+
+(describe "remoto--embark-target-at-point"
+  (it "classifies a Dired directory entry"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (dired-mode)
+        (setq-local dired-directory "/github:testowner/testrepo@main:/")
+        (spy-on 'dired-get-filename :and-return-value
+                "/github:testowner/testrepo@main:/src")
+        (expect (remoto--embark-target-at-point)
+                :to-equal '(remoto-dir . "/github:testowner/testrepo@main:/src")))))
+
+  (it "classifies a file buffer"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (setq-local buffer-file-name "/github:testowner/testrepo@main:/src/main.el")
+        (expect (remoto--embark-target-at-point)
+                :to-equal
+                '(remoto-file . "/github:testowner/testrepo@main:/src/main.el")))))
+
+  (it "returns nil outside remoto buffers"
+    (with-temp-buffer
+      (setq-local buffer-file-name "/home/me/x.el")
+      (expect (remoto--embark-target-at-point) :to-be nil))))
+
+(describe "remoto-embark actions"
+  (it "copies the repo web URL from a repo target (no network)"
+    (remoto-test-with-cache
+      (remoto-embark-copy-repo-url "/github:o/r:/")
+      (expect (car kill-ring) :to-equal "https://github.com/o/r")))
+
+  (it "copies the SSH clone URL"
+    (remoto-test-with-cache
+      (remoto-embark-copy-ssh-url "/github:o/r:/")
+      (expect (car kill-ring) :to-equal "git@github.com:o/r.git")))
+
+  (it "copies the HTTPS clone URL"
+    (remoto-test-with-cache
+      (remoto-embark-copy-https-url "/github:o/r:/")
+      (expect (car kill-ring) :to-equal "https://github.com/o/r.git")))
+
+  (it "copies the web URL for a file target"
+    (remoto-test-with-cache
+      (remoto-embark-copy-url "/github:testowner/testrepo@main:/src/main.el")
+      (expect (car kill-ring)
+              :to-equal "https://github.com/testowner/testrepo/blob/main/src/main.el")))
+
+  (it "copies the blame URL for a file target"
+    (remoto-test-with-cache
+      (remoto-embark-copy-blame-url "/github:testowner/testrepo@main:/src/main.el")
+      (expect (car kill-ring)
+              :to-equal "https://github.com/testowner/testrepo/blame/main/src/main.el")))
+
+  (it "browses the web URL for a directory target"
+    (remoto-test-with-cache
+      (spy-on 'browse-url)
+      (remoto-embark-browse-url "/github:testowner/testrepo@main:/src")
+      (expect 'browse-url :to-have-been-called-with
+              "https://github.com/testowner/testrepo/tree/main/src"))))
 
 (provide 'remoto-tests)
 
