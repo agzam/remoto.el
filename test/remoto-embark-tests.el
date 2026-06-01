@@ -41,6 +41,10 @@
 
   (it "registers the candidate transformer for remoto-repo"
     (let ((fn (alist-get 'remoto-repo embark-transformer-alist)))
+      (expect fn :to-be 'remoto--embark-transform)))
+
+  (it "registers the candidate transformer for remoto-file"
+    (let ((fn (alist-get 'remoto-file embark-transformer-alist)))
       (expect fn :to-be 'remoto--embark-transform))))
 
 ;;; Target finder (repo-level: no API/cache needed)

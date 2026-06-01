@@ -3854,6 +3854,50 @@ Returns the full path after completion, or INPUT if no completion."
            (result (remoto--embark-transform 'remoto-repo cand)))
       (expect result :to-equal '(remoto-repo . "/github:agzam/remoto.el:/")))))
 
+(describe "file-level completion targets (Stage C)"
+  (it "reports the remoto-file category at file level"
+    (let* ((meta (remoto--completion-metadata "/github:o/r/"))
+           (cat (alist-get 'category meta)))
+      (expect cat :to-be 'remoto-file)))
+
+  (it "registers a completion-category-override for remoto-file"
+    (let ((override (assq 'remoto-file completion-category-overrides)))
+      (expect override :to-be-truthy)))
+
+  (it "attaches remoto-target on files-default candidates"
+    (spy-on 'remoto--default-branch :and-return-value "main")
+    (spy-on 'remoto--fetch-dir-children-light :and-return-value
+            '(("README.md" . ((type . "blob"))) ("src" . ((type . "tree")))))
+    (let* ((cands (remoto--handle-file-name-all-completions "" "/github:o/r/"))
+           (readme (car cands))
+           (rt (get-text-property 0 'remoto-target readme)))
+      (expect readme :to-equal "README.md")
+      (expect rt :to-equal "/github:o/r@main:/README.md")))
+
+  (it "attaches remoto-target on canonical-path candidates"
+    (remoto-test-with-cache
+      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (let* ((cands (remoto--handle-file-name-all-completions
+                     "" "/github:testowner/testrepo@main:/"))
+             (readme (seq-find (lambda (c) (equal c "README.md")) cands))
+             (rt (and readme (get-text-property 0 'remoto-target readme))))
+        (expect rt :to-equal "/github:testowner/testrepo@main:/README.md"))))
+
+  (it "reclassifies dir vs file targets in the transformer"
+    (remoto-test-with-cache
+      (let* ((dir (remoto--embark-transform
+                   'remoto-file
+                   (propertize "src/" 'remoto-target
+                               "/github:testowner/testrepo@main:/src")))
+             (file (remoto--embark-transform
+                    'remoto-file
+                    (propertize "main.el" 'remoto-target
+                                "/github:testowner/testrepo@main:/src/main.el")))
+             (dir-type (car dir))
+             (file-type (car file)))
+        (expect dir-type :to-be 'remoto-dir)
+        (expect file-type :to-be 'remoto-file)))))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:

@@ -855,7 +855,12 @@ fetches populate the cache in the background."
                                   (seq-filter (lambda (name)
                                                (string-search file name))
                                              names)))))
-               filtered))))
+               (when filtered
+                 (mapcar (lambda (name)
+                           (propertize name 'remoto-target
+                                       (format "/github:%s/%s@%s:/%s%s"
+                                               owner repo branch subpath name)))
+                         filtered))))))
         ('issues
          ;; Issue/PR completion at /github:OWNER/REPO#
          (let* ((owner (plist-get partial :owner))
@@ -928,10 +933,13 @@ fetches populate the cache in the background."
                         (remoto--fetch-file-commits
                          owner repo ref dir-path names))))
         (mapcar (lambda (name)
-                  (let ((msg (alist-get name commits nil nil #'equal)))
-                    (if msg
-                        (propertize name 'remoto-file-commit msg)
-                      name)))
+                  (let ((cand (copy-sequence name))
+                        (msg (alist-get name commits nil nil #'equal)))
+                    (when msg
+                      (put-text-property 0 (length cand) 'remoto-file-commit msg cand))
+                    (put-text-property 0 (length cand) 'remoto-target
+                                       (concat directory name) cand)
+                    cand))
                 names)))))
 
 (defun remoto--handle-file-name-completion (file directory &optional predicate)
@@ -2817,6 +2825,8 @@ Matches the canonical /github: prefix and its /gh: shorthand alias.")
              '(remoto (styles partial-completion basic)))
 (add-to-list 'completion-category-overrides
              '(remoto-repo (styles partial-completion basic)))
+(add-to-list 'completion-category-overrides
+             '(remoto-file (styles partial-completion basic)))
 
 ;;;; Minor mode
 
@@ -2956,7 +2966,8 @@ Provides group-function and affixation-function for @ and # modes."
                                  (let ((msg (or (remoto--get-prop c 'remoto-file-commit) "")))
                                    (list c "" msg)))
                                candidates)))))
-      `((affixation-function . ,affix-fn))))
+      `((category . remoto-file)
+        (affixation-function . ,affix-fn))))
    ;; Owner mode: /github:OWNER/ - repo descriptions
    ((string-match (rx "/github:" (+ (not (any "/:@#"))) "/" eos) directory)
     (let ((affix-fn (lambda (candidates)

@@ -71,11 +71,16 @@ full canonical remoto path."
 (defun remoto--embark-transform (type target)
   "Embark transformer: resolve a completion TARGET to its full remoto path.
 Reads the `remoto-target' text property attached to remoto completion
-candidates, so actions work on a bare minibuffer/collect candidate; falls
-back to TARGET unchanged."
-  (cons type (or (and (< 0 (length target))
-                      (get-text-property 0 'remoto-target target))
-                 target)))
+candidates (so actions work on a bare minibuffer/collect candidate) and
+re-derives the type from the resolved path, so a directory listed under
+the `remoto-file' category becomes a `remoto-dir' target.  Falls back to
+TARGET and TYPE unchanged."
+  (let* ((path (or (and (< 0 (length target))
+                        (get-text-property 0 'remoto-target target))
+                   target))
+         (ctx (ignore-errors (remoto--path-context path)))
+         (rtype (or (and ctx (plist-get ctx :type)) type)))
+    (cons rtype path)))
 
 ;;;; Actions
 
@@ -197,6 +202,7 @@ The clone URL kind is governed by `remoto-clone-url-type'."
   (add-to-list 'embark-keymap-alist '(remoto-file remoto-embark-file-map))
   (add-to-list 'embark-target-finders #'remoto--embark-target-finder)
   (add-to-list 'embark-transformer-alist '(remoto-repo . remoto--embark-transform))
+  (add-to-list 'embark-transformer-alist '(remoto-file . remoto--embark-transform))
   (define-key embark-url-map "R" #'remoto-embark-open-in-remoto))
 
 (provide 'remoto-embark)
