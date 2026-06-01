@@ -506,20 +506,65 @@
   (it "handles root"
     (expect (remoto--normalize-path "/") :to-equal "/")))
 
-;;; remoto-copy-github-url
+;;; Forge URL building
 
-(describe "remoto-copy-github-url"
+(describe "remoto--forge-type"
+  (it "maps the github prefix"
+    (expect (remoto--forge-type "/github:o/r@main:/x.el") :to-be 'github))
+
+  (it "maps the gh shorthand prefix"
+    (expect (remoto--forge-type "/gh:o/r:/x.el") :to-be 'github))
+
+  (it "returns nil for non-remoto input"
+    (expect (remoto--forge-type "/home/me/x.el") :to-be nil)
+    (expect (remoto--forge-type nil) :to-be nil)))
+
+(describe "remoto--forge-url"
+  (it "builds a blob URL with a single line"
+    (expect (remoto--forge-url 'github 'blob "o" "r" "main" "src/main.el" 3 nil)
+            :to-equal "https://github.com/o/r/blob/main/src/main.el#L3"))
+
+  (it "builds a blob URL with a line range"
+    (expect (remoto--forge-url 'github 'blob "o" "r" "main" "src/main.el" 2 4)
+            :to-equal "https://github.com/o/r/blob/main/src/main.el#L2-L4"))
+
+  (it "builds a blob URL with no line fragment"
+    (expect (remoto--forge-url 'github 'blob "o" "r" "main" "src/main.el" nil nil)
+            :to-equal "https://github.com/o/r/blob/main/src/main.el"))
+
+  (it "builds a tree URL"
+    (expect (remoto--forge-url 'github 'tree "o" "r" "main" "src" nil nil)
+            :to-equal "https://github.com/o/r/tree/main/src"))
+
+  (it "builds a blame URL with a line"
+    (expect (remoto--forge-url 'github 'blame "o" "r" "main" "src/main.el" 3 nil)
+            :to-equal "https://github.com/o/r/blame/main/src/main.el#L3"))
+
+  (it "builds a raw URL"
+    (expect (remoto--forge-url 'github 'raw "o" "r" "main" "src/main.el" nil nil)
+            :to-equal "https://raw.githubusercontent.com/o/r/main/src/main.el"))
+
+  (it "builds a history URL"
+    (expect (remoto--forge-url 'github 'history "o" "r" "main" "src/main.el" nil nil)
+            :to-equal "https://github.com/o/r/commits/main/src/main.el"))
+
+  (it "signals for an unknown forge"
+    (expect (remoto--forge-url 'bogus 'blob "o" "r" "main" "x" nil nil)
+            :to-throw 'user-error)))
+
+;;; remoto-copy-url
+
+(describe "remoto-copy-url"
   (it "copies file URL with line number from a file buffer"
     (remoto-test-with-cache
-      (let ((buffer-file-name "/github:testowner/testrepo@main:/src/main.el"))
-        (with-temp-buffer
-          (insert "line1\nline2\nline3\n")
-          (setq-local buffer-file-name "/github:testowner/testrepo@main:/src/main.el")
-          (goto-char (point-min))
-          (forward-line 2)
-          (remoto-copy-github-url)
-          (expect (car kill-ring)
-                  :to-equal "https://github.com/testowner/testrepo/blob/main/src/main.el#L3")))))
+      (with-temp-buffer
+        (insert "line1\nline2\nline3\n")
+        (setq-local buffer-file-name "/github:testowner/testrepo@main:/src/main.el")
+        (goto-char (point-min))
+        (forward-line 2)
+        (remoto-copy-url)
+        (expect (car kill-ring)
+                :to-equal "https://github.com/testowner/testrepo/blob/main/src/main.el#L3"))))
 
   (it "copies file URL with line range when region is active"
     (remoto-test-with-cache
@@ -531,7 +576,7 @@
         (set-mark (point))
         (forward-line 2)
         (activate-mark)
-        (remoto-copy-github-url)
+        (remoto-copy-url)
         (deactivate-mark)
         (expect (car kill-ring)
                 :to-equal "https://github.com/testowner/testrepo/blob/main/src/main.el#L2-L4"))))
@@ -543,7 +588,7 @@
         (setq-local dired-directory "/github:testowner/testrepo@main:/")
         (spy-on 'dired-get-filename :and-return-value
                 "/github:testowner/testrepo@main:/src")
-        (remoto-copy-github-url)
+        (remoto-copy-url)
         (expect (car kill-ring)
                 :to-equal "https://github.com/testowner/testrepo/tree/main/src"))))
 
@@ -554,7 +599,7 @@
         (setq-local dired-directory "/github:testowner/testrepo@main:/")
         (spy-on 'dired-get-filename :and-return-value
                 "/github:testowner/testrepo@main:/README.md")
-        (remoto-copy-github-url)
+        (remoto-copy-url)
         (expect (car kill-ring)
                 :to-equal "https://github.com/testowner/testrepo/blob/main/README.md"))))
 
@@ -564,13 +609,159 @@
         (dired-mode)
         (setq-local dired-directory "/github:testowner/testrepo@main:/")
         (spy-on 'dired-get-filename :and-return-value nil)
-        (remoto-copy-github-url)
+        (remoto-copy-url)
         (expect (car kill-ring)
                 :to-equal "https://github.com/testowner/testrepo/tree/main/"))))
 
   (it "signals error outside remoto buffers"
     (with-temp-buffer
-      (expect (remoto-copy-github-url) :to-throw 'user-error))))
+      (expect (remoto-copy-url) :to-throw 'user-error))))
+
+(describe "remoto-copy-github-url (obsolete alias)"
+  (it "still copies the file URL via the new command"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (insert "line1\nline2\nline3\n")
+        (setq-local buffer-file-name "/github:testowner/testrepo@main:/src/main.el")
+        (goto-char (point-min))
+        (forward-line 2)
+        (remoto-copy-github-url)
+        (expect (car kill-ring)
+                :to-equal "https://github.com/testowner/testrepo/blob/main/src/main.el#L3")))))
+
+;;; remoto-copy-blame-url
+
+(describe "remoto-copy-blame-url"
+  (it "copies the blame URL with the current line"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (insert "line1\nline2\nline3\n")
+        (setq-local buffer-file-name "/github:testowner/testrepo@main:/src/main.el")
+        (goto-char (point-min))
+        (forward-line 2)
+        (remoto-copy-blame-url)
+        (expect (car kill-ring)
+                :to-equal "https://github.com/testowner/testrepo/blame/main/src/main.el#L3"))))
+
+  (it "signals when invoked on a directory"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (dired-mode)
+        (setq-local dired-directory "/github:testowner/testrepo@main:/")
+        (spy-on 'dired-get-filename :and-return-value
+                "/github:testowner/testrepo@main:/src")
+        (expect (remoto-copy-blame-url) :to-throw 'user-error)))))
+
+;;; remoto-copy-permalink
+
+(describe "remoto-copy-permalink"
+  (it "copies a URL pinned to the resolved commit SHA"
+    (remoto-test-with-cache
+      (spy-on 'remoto--api :and-return-value '((sha . "abc123def456")))
+      (with-temp-buffer
+        (insert "line1\nline2\nline3\n")
+        (setq-local buffer-file-name "/github:testowner/testrepo@main:/src/main.el")
+        (goto-char (point-min))
+        (forward-line 2)
+        (remoto-copy-permalink)
+        (expect (car kill-ring)
+                :to-equal
+                "https://github.com/testowner/testrepo/blob/abc123def456/src/main.el#L3")))))
+
+;;; remoto-copy-raw-url
+
+(describe "remoto-copy-raw-url"
+  (it "copies the raw content URL for a file"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (setq-local buffer-file-name "/github:testowner/testrepo@main:/src/main.el")
+        (remoto-copy-raw-url)
+        (expect (car kill-ring)
+                :to-equal
+                "https://raw.githubusercontent.com/testowner/testrepo/main/src/main.el"))))
+
+  (it "signals when invoked on a directory"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (dired-mode)
+        (setq-local dired-directory "/github:testowner/testrepo@main:/")
+        (spy-on 'dired-get-filename :and-return-value
+                "/github:testowner/testrepo@main:/src")
+        (expect (remoto-copy-raw-url) :to-throw 'user-error)))))
+
+;;; remoto-copy-history-url
+
+(describe "remoto-copy-history-url"
+  (it "copies the file history URL"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (setq-local buffer-file-name "/github:testowner/testrepo@main:/src/main.el")
+        (remoto-copy-history-url)
+        (expect (car kill-ring)
+                :to-equal "https://github.com/testowner/testrepo/commits/main/src/main.el"))))
+
+  (it "copies the directory history URL from dired"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (dired-mode)
+        (setq-local dired-directory "/github:testowner/testrepo@main:/")
+        (spy-on 'dired-get-filename :and-return-value
+                "/github:testowner/testrepo@main:/src")
+        (remoto-copy-history-url)
+        (expect (car kill-ring)
+                :to-equal "https://github.com/testowner/testrepo/commits/main/src")))))
+
+;;; remoto-browse-url
+
+(describe "remoto-browse-url"
+  (it "opens the file web page in a browser"
+    (remoto-test-with-cache
+      (spy-on 'browse-url)
+      (with-temp-buffer
+        (insert "line1\nline2\nline3\n")
+        (setq-local buffer-file-name "/github:testowner/testrepo@main:/src/main.el")
+        (goto-char (point-min))
+        (forward-line 2)
+        (remoto-browse-url)
+        (expect 'browse-url :to-have-been-called-with
+                "https://github.com/testowner/testrepo/blob/main/src/main.el#L3")))))
+
+;;; remoto-mode
+
+(describe "remoto-mode"
+  (it "toggles on and off"
+    (with-temp-buffer
+      (remoto-mode 1)
+      (expect remoto-mode :to-be-truthy)
+      (remoto-mode -1)
+      (expect remoto-mode :to-be nil)))
+
+  (it "auto-enables for a remoto file path"
+    (with-temp-buffer
+      (setq-local buffer-file-name "/github:o/r@main:/x.el")
+      (remoto--maybe-enable-mode)
+      (expect remoto-mode :to-be-truthy)
+      (remoto-mode -1)))
+
+  (it "does not enable for a normal file path"
+    (with-temp-buffer
+      (setq-local buffer-file-name "/home/me/x.el")
+      (remoto--maybe-enable-mode)
+      (expect remoto-mode :to-be nil)))
+
+  (it "leaves remoto-mode-map empty (no reserved C-c LETTER bindings)"
+    (expect (keymapp remoto-mode-map) :to-be-truthy)
+    (expect remoto-mode-map :to-equal (make-sparse-keymap))
+    (expect (lookup-key remoto-mode-map (kbd "C-c")) :to-be nil))
+
+  (it "groups the url commands in remoto-command-map"
+    (expect (keymapp remoto-command-map) :to-be-truthy)
+    (expect (lookup-key remoto-command-map "u") :to-be 'remoto-copy-url)
+    (expect (lookup-key remoto-command-map "b") :to-be 'remoto-copy-blame-url)
+    (expect (lookup-key remoto-command-map "p") :to-be 'remoto-copy-permalink)
+    (expect (lookup-key remoto-command-map "r") :to-be 'remoto-copy-raw-url)
+    (expect (lookup-key remoto-command-map "h") :to-be 'remoto-copy-history-url)
+    (expect (lookup-key remoto-command-map "w") :to-be 'remoto-browse-url)))
 
 ;;; Repository search
 
