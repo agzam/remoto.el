@@ -4092,6 +4092,29 @@ Returns the full path after completion, or INPUT if no completion."
         (expect dir-type :to-be 'remoto-dir)
         (expect file-type :to-be 'remoto-file)))))
 
+(describe "completion candidates survive embark collection"
+  (it "keeps remoto-target through completion-all-completions per category"
+    ;; embark's candidate collectors call `completion-all-completions' on the
+    ;; remoto table, and embark-collect stores the bare candidate as the
+    ;; entry id.  The remoto-target property must survive that call so a
+    ;; collected candidate still resolves to a full path with no live
+    ;; minibuffer.  Exercised for every remoto category, including the
+    ;; default-style `remoto-browse' (no completion-category-override).
+    (let ((survives
+           (lambda (category)
+             (let* ((cand (propertize "x/y" 'remoto-target "/github:x/y:/"))
+                    (table (lambda (str pred action)
+                             (if (eq action 'metadata)
+                                 `(metadata (category . ,category))
+                               (complete-with-action action (list cand) str pred))))
+                    (all (completion-all-completions "" table nil 0)))
+               (when (and (consp all) (last all)) (setcdr (last all) nil))
+               (and (car all) (get-text-property 0 'remoto-target (car all)))))))
+      (dolist (cat '(remoto-repo remoto-file remoto-branch remoto-issue
+                                 remoto-browse))
+        (let ((rt (funcall survives cat)))
+          (expect rt :to-equal "/github:x/y:/"))))))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:

@@ -99,6 +99,57 @@
     (remoto-embark-browse-url "/github:o/r:/")
     (expect 'browse-url :to-have-been-called-with "https://github.com/o/r")))
 
+;;; Embark Collect round-trip (no API/cache needed)
+
+(defun remoto-embark-tests--collect-target (type cand)
+  "Build a real Embark Collect buffer for CAND of TYPE; return its target.
+Renders CAND through `embark-collect--format-entries' and reads the
+candidate at point with `embark-target-collect-candidate', exactly as
+`embark-act' does in a collect buffer.  This exercises the real property
+round-trip: a bare candidate carrying `remoto-target' must come back out
+with that property intact and no live minibuffer."
+  (with-temp-buffer
+    (embark-collect-mode)
+    (setq-local embark--type type)
+    (embark-collect--format-entries (list (list cand "" "")) nil)
+    (tabulated-list-init-header)
+    (tabulated-list-print)
+    (goto-char (point-min))
+    (let ((btn (or (button-at (point)) (next-button (point)))))
+      (goto-char (button-start btn))
+      (embark-target-collect-candidate))))
+
+(describe "embark-collect candidate round-trip"
+  (it "resolves a browse repo candidate from a collect buffer"
+    (let* ((cand (propertize "torvalds/linux"
+                             'remoto-target "/github:torvalds/linux:/"))
+           (target (remoto-embark-tests--collect-target 'remoto-browse cand))
+           (extracted (nth 1 target))
+           (rt (and extracted (get-text-property 0 'remoto-target extracted)))
+           (xform (remoto--embark-browse-transform (car target) extracted)))
+      (expect (car target) :to-be 'remoto-browse)
+      (expect rt :to-equal "/github:torvalds/linux:/")
+      (expect xform :to-equal '(remoto-repo . "/github:torvalds/linux:/"))))
+
+  (it "resolves a file-name repo candidate from a collect buffer"
+    (let* ((cand (propertize "remoto.el/"
+                             'remoto-target "/github:agzam/remoto.el:/"))
+           (target (remoto-embark-tests--collect-target 'remoto-repo cand))
+           (extracted (nth 1 target))
+           (rt (and extracted (get-text-property 0 'remoto-target extracted)))
+           (xform (remoto--embark-transform (car target) extracted)))
+      (expect rt :to-equal "/github:agzam/remoto.el:/")
+      (expect xform :to-equal '(remoto-repo . "/github:agzam/remoto.el:/"))))
+
+  (it "resolves an issue candidate from a collect buffer"
+    (let* ((cand (propertize "42" 'remoto-target "/github:o/r#42"))
+           (target (remoto-embark-tests--collect-target 'remoto-issue cand))
+           (extracted (nth 1 target))
+           (rt (and extracted (get-text-property 0 'remoto-target extracted)))
+           (xform (remoto--embark-transform-ref (car target) extracted)))
+      (expect rt :to-equal "/github:o/r#42")
+      (expect xform :to-equal '(remoto-issue . "/github:o/r#42")))))
+
 (provide 'remoto-embark-tests)
 
 ;; Local Variables:

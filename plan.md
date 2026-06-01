@@ -182,15 +182,23 @@ Done actions are marked. Ship core first.
 - Decision: attach a text property (e.g. `remoto-target`) holding the full canonical
   path to each completion candidate at generation time (candidates are already
   propertized: `remoto-repo-desc`, `remoto-acct-type`, `remoto-topic-title`, etc.).
-  The transformer reads that property -> `(TYPE . FULLPATH)`. Survives into collect
-  buffers.
-- Verify with real embark whether it preserves text properties on the candidate
-  passed to transformers/actions. If embark strips them in some flow, fall back to
-  reconstructing from `(minibuffer-contents)` directory part + candidate, normalized
-  via remoto's existing path normalization (`remoto--maybe-rewrite` /
-  `remoto--parse-partial-canonical`). The full path must satisfy `remoto--parse-path`
-  (needs the `:` before path), so a bare `/github:owner/repo/` must be normalized to
-  `/github:owner/repo:/` or `/github:owner/repo@REF:/...`.
+  The transformer reads that property -> `(TYPE . FULLPATH)`.
+- VERIFIED (embark 1.2 / Emacs 30.2, and the CI .elpa embark): the property
+  survives the whole collect path, so no fallback/reconstruction is needed.
+  Proven two ways, both now tested:
+  1. Collector link (embark-free, test/remoto-tests.el "completion candidates
+     survive embark collection"): `completion-all-completions' on the remoto
+     table keeps `remoto-target' for every category, including the
+     default-style `remoto-browse' (orderless/partial-completion both copy
+     candidates, never strip).
+  2. Collect-buffer link (real embark, test/remoto-embark-tests.el
+     "embark-collect candidate round-trip"): embark-collect stores the raw
+     candidate as the tabulated-list-id (`embark-collect--format-entries' ->
+     ``(,cand [...])``), `embark--maybe-transform-candidates' passes
+     `:orig-candidates' through unstripped (non-file types), and
+     `embark-target-collect-candidate' returns it with `remoto-target' intact.
+  So a bare collected candidate (e.g. `remoto.el/`) still resolves to its full
+  path with no live minibuffer, and the per-type transformer/keymap dispatch.
 - Register transformers via `embark-transformer-alist`: `(remoto-repo . FN)` etc.
 
 ### buttercup on Emacs 29 - plist-in-expect quirk
@@ -235,7 +243,9 @@ Stage C - minibuffer / embark-collect - DONE (all five levels):
   + remoto-embark-issue-map (open via find-file -> topic, copy OWNER/REPO#N).
   Registered in embark-keymap-alist.
 - `C-x C-f /github:OWNER` -> embark-collect of repos with working actions, and
-  embark-act works at every completion level.
+  embark-act works at every completion level.  VERIFIED + tested end-to-end
+  (see the "Candidate -> full canonical path" note); the collect round-trip is
+  no longer an unproven assumption.
 
 Stage C investigation findings (so it can be executed cold):
 - Categories: add `(category . remoto-LEVEL)` to each cond branch of
@@ -280,8 +290,9 @@ Stage D - remoto-browse surface, richer actions, polish:
   export-subdir-to-local both bridge into a local working copy and raise
   contention/conflict-resolution questions against a locally cloned repo;
   out of scope for the read-only browse integration.
-- Remaining: embark-collect/export refinements (`embark-exporters-alist` ->
-  remoto Dired, if feasible).
+- embark-collect - DONE + tested (round-trip proven; see the crux note).
+- Remaining: embark-export refinement only (`embark-exporters-alist` -> a remoto
+  Dired buffer, if feasible) - distinct from collect, which already works.
 - README docs: how to enable (`(require 'remoto-embark)`), keymaps, opt-in note.
 
 ## 10. File and function pointers
