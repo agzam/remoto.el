@@ -563,6 +563,14 @@
     (expect (remoto--forge-url 'github 'https "o" "r" nil nil nil nil)
             :to-equal "https://github.com/o/r.git"))
 
+  (it "builds a compare URL"
+    (expect (remoto--forge-url 'github 'compare "o" "r" "main" nil nil nil)
+            :to-equal "https://github.com/o/r/compare/main"))
+
+  (it "builds a new-pr URL"
+    (expect (remoto--forge-url 'github 'new-pr "o" "r" "main" nil nil nil)
+            :to-equal "https://github.com/o/r/pull/new/main"))
+
   (it "signals for an unknown forge"
     (expect (remoto--forge-url 'bogus 'blob "o" "r" "main" "x" nil nil)
             :to-throw 'user-error)))
@@ -3922,11 +3930,27 @@ Returns the full path after completion, or INPUT if no completion."
            (result (remoto--embark-transform-ref 'remoto-branch cand)))
       (expect result :to-equal '(remoto-branch . "/github:o/r@main:/"))))
 
+  (it "browses the compare view for a branch"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-compare "/github:o/r@main:/")
+    (expect 'browse-url :to-have-been-called-with
+            "https://github.com/o/r/compare/main"))
+
+  (it "opens the new-PR page for a branch"
+    (spy-on 'browse-url)
+    (remoto-embark-new-pr "/github:o/r@main:/")
+    (expect 'browse-url :to-have-been-called-with
+            "https://github.com/o/r/pull/new/main"))
+
   (it "binds branch actions in the branch keymap"
     (expect (lookup-key remoto-embark-branch-map "u")
             :to-be 'remoto-embark-copy-branch-url)
     (expect (lookup-key remoto-embark-branch-map "w")
-            :to-be 'remoto-embark-browse-branch)))
+            :to-be 'remoto-embark-browse-branch)
+    (expect (lookup-key remoto-embark-branch-map "c")
+            :to-be 'remoto-embark-browse-compare)
+    (expect (lookup-key remoto-embark-branch-map "n")
+            :to-be 'remoto-embark-new-pr)))
 
 (describe "issue-level completion targets (Stage C)"
   (it "reports the remoto-issue category at the # level"

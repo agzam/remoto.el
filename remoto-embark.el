@@ -167,6 +167,16 @@ path; a directory opens Dired and the ref resolves lazily."
   (interactive "sRemoto ref: ")
   (browse-url (remoto--context-url (remoto--path-context target) 'tree)))
 
+(defun remoto-embark-browse-compare (target)
+  "Open the compare view for the remoto ref (branch/tag) TARGET."
+  (interactive "sRemoto ref: ")
+  (browse-url (remoto--context-url (remoto--path-context target) 'compare)))
+
+(defun remoto-embark-new-pr (target)
+  "Open the new-pull-request page for the remoto ref (branch/tag) TARGET."
+  (interactive "sRemoto ref: ")
+  (browse-url (remoto--context-url (remoto--path-context target) 'new-pr)))
+
 (defun remoto-embark-open-issue (target)
   "Open the remoto issue/PR TARGET (a /github:OWNER/REPO#N path) in remoto.
 This routes to the remoto-topic display via `find-file'."
@@ -220,7 +230,9 @@ The clone URL kind is governed by `remoto-clone-url-type'."
 (defvar-keymap remoto-embark-branch-map
   :doc "Embark actions for remoto branch/tag (ref) targets."
   "u" #'remoto-embark-copy-branch-url
-  "w" #'remoto-embark-browse-branch)
+  "w" #'remoto-embark-browse-branch
+  "c" #'remoto-embark-browse-compare
+  "n" #'remoto-embark-new-pr)
 
 (defvar-keymap remoto-embark-dir-map
   :doc "Embark actions for remoto directory targets."

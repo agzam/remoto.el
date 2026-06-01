@@ -1468,6 +1468,8 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
      (repo    . "https://github.com/%o/%r")
      (ssh     . "git@github.com:%o/%r.git")
      (https   . "https://github.com/%o/%r.git")
+     (compare . "https://github.com/%o/%r/compare/%R")
+     (new-pr  . "https://github.com/%o/%r/pull/new/%R")
      (line    . "#L%s")
      (region  . "#L%s-L%e")))
   "Per-forge web-URL templates, keyed by forge symbol.
