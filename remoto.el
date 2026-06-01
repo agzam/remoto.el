@@ -807,12 +807,18 @@ fetches populate the cache in the background."
                (let ((branch-set (when (listp branches)
                                    (mapcar (lambda (b)
                                              (propertize (concat b ":")
-                                                        'remoto-ref-type "branch"))
+                                                        'remoto-ref-type "branch"
+                                                        'remoto-target
+                                                        (format "/github:%s/%s@%s:/"
+                                                                owner repo b)))
                                            branches)))
                      (tag-set (when (listp tags)
                                 (mapcar (lambda (tg)
                                           (propertize (concat tg ":")
-                                                     'remoto-ref-type "tag"))
+                                                     'remoto-ref-type "tag"
+                                                     'remoto-target
+                                                     (format "/github:%s/%s@%s:/"
+                                                             owner repo tg)))
                                         tags))))
                  (thread-last (append branch-set tag-set)
                    (seq-filter (lambda (r)
@@ -2827,6 +2833,8 @@ Matches the canonical /github: prefix and its /gh: shorthand alias.")
              '(remoto-repo (styles partial-completion basic)))
 (add-to-list 'completion-category-overrides
              '(remoto-file (styles partial-completion basic)))
+(add-to-list 'completion-category-overrides
+             '(remoto-branch (styles partial-completion basic)))
 
 ;;;; Minor mode
 
@@ -2954,7 +2962,8 @@ Provides group-function and affixation-function for @ and # modes."
                         (if (equal "tag" (remoto--get-prop candidate 'remoto-ref-type))
                             "Tag"
                           "Branch")))))
-      `((group-function . ,group-fn))))
+      `((category . remoto-branch)
+        (group-function . ,group-fn))))
    ;; File mode: canonical path or files-default (owner/repo/ with optional subpath)
    ((or (string-match (rx "@" (+ (not (any ":"))) ":" (? "/")) directory)
         (string-match (rx "/github:" (+ (not (any "/:@#"))) "/"

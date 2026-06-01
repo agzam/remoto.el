@@ -45,7 +45,13 @@
 
   (it "registers the candidate transformer for remoto-file"
     (let ((fn (alist-get 'remoto-file embark-transformer-alist)))
-      (expect fn :to-be 'remoto--embark-transform))))
+      (expect fn :to-be 'remoto--embark-transform)))
+
+  (it "registers the branch keymap and ref transformer"
+    (let ((kmap (assoc 'remoto-branch embark-keymap-alist))
+          (fn (alist-get 'remoto-branch embark-transformer-alist)))
+      (expect kmap :to-equal '(remoto-branch remoto-embark-branch-map))
+      (expect fn :to-be 'remoto--embark-transform-ref))))
 
 ;;; Target finder (repo-level: no API/cache needed)
 

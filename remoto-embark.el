@@ -82,6 +82,15 @@ TARGET and TYPE unchanged."
          (rtype (or (and ctx (plist-get ctx :type)) type)))
     (cons rtype path)))
 
+(defun remoto--embark-transform-ref (type target)
+  "Embark transformer for ref targets: resolve TARGET's path, keep TYPE.
+Unlike `remoto--embark-transform' it does not re-derive the type, so a
+branch or tag stays a `remoto-branch' instead of collapsing to the
+`remoto-repo' that its root path would otherwise classify as."
+  (cons type (or (and (< 0 (length target))
+                      (get-text-property 0 'remoto-target target))
+                 target)))
+
 ;;;; Actions
 
 ;; Each action receives TARGET, a full canonical remoto path string - the
@@ -148,6 +157,16 @@ path; a directory opens Dired and the ref resolves lazily."
   (interactive "sForge URL: ")
   (find-file (remoto--canonical-path (remoto--parse-input url))))
 
+(defun remoto-embark-copy-branch-url (target)
+  "Copy the web URL for the remoto ref (branch/tag) TARGET."
+  (interactive "sRemoto ref: ")
+  (remoto--kill-url (remoto--context-url (remoto--path-context target) 'tree)))
+
+(defun remoto-embark-browse-branch (target)
+  "Open the web page for the remoto ref (branch/tag) TARGET in a browser."
+  (interactive "sRemoto ref: ")
+  (browse-url (remoto--context-url (remoto--path-context target) 'tree)))
+
 (defun remoto--clone (url dest)
   "Clone URL into DEST asynchronously, showing progress in a buffer."
   (let ((buffer (get-buffer-create "*remoto-clone*")))
@@ -179,6 +198,11 @@ The clone URL kind is governed by `remoto-clone-url-type'."
   "g" #'remoto-embark-copy-https-url
   "h" #'remoto-embark-copy-history-url)
 
+(defvar-keymap remoto-embark-branch-map
+  :doc "Embark actions for remoto branch/tag (ref) targets."
+  "u" #'remoto-embark-copy-branch-url
+  "w" #'remoto-embark-browse-branch)
+
 (defvar-keymap remoto-embark-dir-map
   :doc "Embark actions for remoto directory targets."
   "u" #'remoto-embark-copy-url
@@ -200,9 +224,11 @@ The clone URL kind is governed by `remoto-clone-url-type'."
   (add-to-list 'embark-keymap-alist '(remoto-repo remoto-embark-repo-map))
   (add-to-list 'embark-keymap-alist '(remoto-dir remoto-embark-dir-map))
   (add-to-list 'embark-keymap-alist '(remoto-file remoto-embark-file-map))
+  (add-to-list 'embark-keymap-alist '(remoto-branch remoto-embark-branch-map))
   (add-to-list 'embark-target-finders #'remoto--embark-target-finder)
   (add-to-list 'embark-transformer-alist '(remoto-repo . remoto--embark-transform))
   (add-to-list 'embark-transformer-alist '(remoto-file . remoto--embark-transform))
+  (add-to-list 'embark-transformer-alist '(remoto-branch . remoto--embark-transform-ref))
   (define-key embark-url-map "R" #'remoto-embark-open-in-remoto))
 
 (provide 'remoto-embark)

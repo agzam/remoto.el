@@ -3898,6 +3898,36 @@ Returns the full path after completion, or INPUT if no completion."
         (expect dir-type :to-be 'remoto-dir)
         (expect file-type :to-be 'remoto-file)))))
 
+(describe "branch-level completion targets (Stage C)"
+  (it "reports the remoto-branch category at the @ level"
+    (let* ((meta (remoto--completion-metadata "/github:o/r@"))
+           (cat (alist-get 'category meta)))
+      (expect cat :to-be 'remoto-branch)))
+
+  (it "registers a completion-category-override for remoto-branch"
+    (let ((override (assq 'remoto-branch completion-category-overrides)))
+      (expect override :to-be-truthy)))
+
+  (it "attaches remoto-target on branch candidates"
+    (spy-on 'remoto--fetch-branches :and-return-value '("main" "dev"))
+    (spy-on 'remoto--fetch-tags :and-return-value nil)
+    (let* ((cands (remoto--handle-file-name-all-completions "" "/github:o/r@"))
+           (main (car cands))
+           (rt (get-text-property 0 'remoto-target main)))
+      (expect main :to-equal "main:")
+      (expect rt :to-equal "/github:o/r@main:/")))
+
+  (it "keeps the branch type in the ref transformer"
+    (let* ((cand (propertize "main:" 'remoto-target "/github:o/r@main:/"))
+           (result (remoto--embark-transform-ref 'remoto-branch cand)))
+      (expect result :to-equal '(remoto-branch . "/github:o/r@main:/"))))
+
+  (it "binds branch actions in the branch keymap"
+    (expect (lookup-key remoto-embark-branch-map "u")
+            :to-be 'remoto-embark-copy-branch-url)
+    (expect (lookup-key remoto-embark-branch-map "w")
+            :to-be 'remoto-embark-browse-branch)))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:
