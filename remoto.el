@@ -30,6 +30,7 @@
 
 (require 'cl-lib)
 (require 'files-x)
+(require 'format-spec)
 (require 'ghub)
 
 ;;;; Path parsing
@@ -1431,38 +1432,195 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
             (revert-buffer)))
       (user-error "Remoto: not in a remoto buffer"))))
 
-;;;###autoload
-(defun remoto-copy-github-url ()
-  "Copy the GitHub web URL for the current file/line to kill ring."
-  (interactive)
-  (let* ((file (or buffer-file-name
-                   (when (derived-mode-p 'dired-mode)
-                     (dired-get-filename nil t))
-                   dired-directory
+;;;; Forge web URLs
+
+(defvar remoto-forge-url-templates
+  '((github
+     (blob    . "https://github.com/%o/%r/blob/%R/%p%L")
+     (tree    . "https://github.com/%o/%r/tree/%R/%p%L")
+     (blame   . "https://github.com/%o/%r/blame/%R/%p%L")
+     (history . "https://github.com/%o/%r/commits/%R/%p")
+     (raw     . "https://raw.githubusercontent.com/%o/%r/%R/%p")
+     (line    . "#L%s")
+     (region  . "#L%s-L%e")))
+  "Per-forge web-URL templates, keyed by forge symbol.
+
+Each value is an alist of (KIND . TEMPLATE).  KIND is one of `blob',
+`tree', `blame', `history', `raw', plus the line-fragment builders
+`line' and `region'.  Templates are expanded with `format-spec' using:
+
+  %o  repository owner
+  %r  repository name
+  %R  git ref (branch, tag, or commit SHA)
+  %p  path relative to the repository root
+  %L  line fragment built from the `line'/`region' templates
+  %s  start line (in the `line' and `region' templates)
+  %e  end line (in the `region' template)
+
+Supporting another forge (GitLab, Codeberg, ...) is a matter of adding
+an entry here and teaching `remoto--parse-path' the new path prefix.")
+
+(defun remoto--forge-type (path)
+  "Return the forge symbol for remoto PATH, or nil when undetermined.
+Derived from the path prefix, e.g. \"/github:...\" -> `github'."
+  (when (and (stringp path)
+             (string-match (rx bos "/" (group (+ (not (any "/:")))) ":") path))
+    (let ((prefix (match-string 1 path)))
+      (if (member prefix '("github" "gh")) 'github (intern prefix)))))
+
+(defun remoto--forge-url (forge kind owner repo ref path &optional line-start line-end)
+  "Build a FORGE web URL of KIND for OWNER/REPO at REF and PATH.
+KIND is one of `blob', `tree', `blame', `history', `raw'.  LINE-START
+and LINE-END add a line or line-range fragment when KIND's template
+includes one."
+  (let* ((templates (or (alist-get forge remoto-forge-url-templates)
+                        (user-error "Remoto: no URL templates for forge `%s'"
+                                    forge)))
+         (template (or (alist-get kind templates)
+                       (user-error "Remoto: forge `%s' has no `%s' URL"
+                                   forge kind)))
+         (line (cond
+                ((and line-start line-end)
+                 (format-spec (alist-get 'region templates)
+                              `((?s . ,line-start) (?e . ,line-end))))
+                (line-start
+                 (format-spec (alist-get 'line templates)
+                              `((?s . ,line-start))))
+                (t ""))))
+    (format-spec template `((?o . ,owner)
+                            (?r . ,repo)
+                            (?R . ,ref)
+                            (?p . ,path)
+                            (?L . ,line)))))
+
+(defun remoto--resolve-commit-sha (owner repo ref)
+  "Resolve REF in OWNER/REPO to a commit SHA via the forge API.
+Used for permalinks so the link survives the ref moving on."
+  (let* ((data (remoto--api (format "repos/%s/%s/commits/%s" owner repo ref)))
+         (sha (alist-get 'sha data)))
+    (or sha
+        (user-error "Remoto: could not resolve commit SHA for %s/%s@%s"
+                    owner repo ref))))
+
+(defun remoto--buffer-file-context ()
+  "Return a context plist describing the current buffer's remoto target.
+
+Keys: :forge :owner :repo :ref :path :kind :line-start :line-end.
+:kind is `blob' for a file or `tree' for a directory; the line keys are
+nil in Dired and for directories.  Works in file buffers (line/region at
+point) and in Dired (entry at point, falling back to the directory).
+Signals a `user-error' when the current buffer is not a remoto buffer."
+  (let* ((dired (derived-mode-p 'dired-mode))
+         (file (or buffer-file-name
+                   (and dired (dired-get-filename nil t))
+                   (and dired (if (listp dired-directory)
+                                  (car dired-directory)
+                                dired-directory))
                    default-directory))
-         (parsed (remoto--parse-path file)))
+         (parsed (and file (remoto--parse-path file))))
     (unless parsed
       (user-error "Remoto: not in a remoto buffer"))
     (let* ((resolved (remoto--resolve-ref parsed))
-           (owner (remoto-path-owner resolved))
-           (repo (remoto-path-repo resolved))
-           (ref (remoto-path-ref resolved))
-           (path (remoto--relative-path (remoto-path-path resolved)))
            (entry (remoto--tree-entry resolved))
-           (type (if (and entry (equal "tree" (alist-get 'type entry)))
-                     "tree" "blob"))
-           (line-suffix (when (and (equal type "blob")
-                                   (not (derived-mode-p 'dired-mode)))
-                          (if (use-region-p)
-                              (format "#L%d-L%d"
-                                      (line-number-at-pos (region-beginning))
-                                      (line-number-at-pos (region-end)))
-                            (format "#L%d" (line-number-at-pos)))))
-           (url (format "https://github.com/%s/%s/%s/%s/%s%s"
-                        owner repo type ref path
-                        (or line-suffix ""))))
-      (kill-new url)
-      (message "Copied: %s" url))))
+           (kind (if (and entry (equal "tree" (alist-get 'type entry)))
+                     'tree 'blob))
+           (lines (and (eq kind 'blob) (not dired)))
+           (line-start (and lines
+                            (line-number-at-pos
+                             (if (use-region-p) (region-beginning) (point)))))
+           (line-end (and lines (use-region-p)
+                          (line-number-at-pos (region-end)))))
+      (list :forge (remoto--forge-type file)
+            :owner (remoto-path-owner resolved)
+            :repo (remoto-path-repo resolved)
+            :ref (remoto-path-ref resolved)
+            :path (remoto--relative-path (remoto-path-path resolved))
+            :kind kind
+            :line-start line-start
+            :line-end line-end))))
+
+(defun remoto--context-url (ctx kind &optional ref)
+  "Build a URL of KIND from context plist CTX.
+Optional REF overrides the ref in CTX (used for permalinks)."
+  (remoto--forge-url (plist-get ctx :forge)
+                     kind
+                     (plist-get ctx :owner)
+                     (plist-get ctx :repo)
+                     (or ref (plist-get ctx :ref))
+                     (plist-get ctx :path)
+                     (plist-get ctx :line-start)
+                     (plist-get ctx :line-end)))
+
+(defun remoto--require-blob (ctx what)
+  "Signal a `user-error' unless CTX refers to a file.
+WHAT names the operation, for the error message."
+  (unless (eq (plist-get ctx :kind) 'blob)
+    (user-error "Remoto: %s is only available for files, not directories"
+                what)))
+
+(defun remoto--kill-url (url)
+  "Put URL on the kill ring and report it in the echo area."
+  (kill-new url)
+  (message "Copied: %s" url))
+
+;;;; URL commands
+
+;;;###autoload
+(defun remoto-copy-url ()
+  "Copy the forge web URL for the current file or directory.
+In a file buffer the link targets the current line, or the active
+region as a line range.  In Dired it targets the entry at point, or
+the directory itself."
+  (interactive)
+  (let ((ctx (remoto--buffer-file-context)))
+    (remoto--kill-url (remoto--context-url ctx (plist-get ctx :kind)))))
+
+;;;###autoload
+(defun remoto-copy-blame-url ()
+  "Copy the forge blame URL for the current file and line/region."
+  (interactive)
+  (let ((ctx (remoto--buffer-file-context)))
+    (remoto--require-blob ctx "Blame")
+    (remoto--kill-url (remoto--context-url ctx 'blame))))
+
+;;;###autoload
+(defun remoto-copy-permalink ()
+  "Copy a permalink: the web URL pinned to the current commit SHA.
+Resolves the ref to a commit via the forge API so the link keeps
+pointing at the same content even after the branch advances."
+  (interactive)
+  (let* ((ctx (remoto--buffer-file-context))
+         (sha (remoto--resolve-commit-sha (plist-get ctx :owner)
+                                          (plist-get ctx :repo)
+                                          (plist-get ctx :ref))))
+    (remoto--kill-url (remoto--context-url ctx (plist-get ctx :kind) sha))))
+
+;;;###autoload
+(defun remoto-copy-raw-url ()
+  "Copy the raw-content URL for the current file."
+  (interactive)
+  (let ((ctx (remoto--buffer-file-context)))
+    (remoto--require-blob ctx "Raw URL")
+    (remoto--kill-url (remoto--context-url ctx 'raw))))
+
+;;;###autoload
+(defun remoto-copy-history-url ()
+  "Copy the commit-history URL for the current file or directory."
+  (interactive)
+  (let ((ctx (remoto--buffer-file-context)))
+    (remoto--kill-url (remoto--context-url ctx 'history))))
+
+;;;###autoload
+(defun remoto-browse-url ()
+  "Open the forge web page for the current file or directory in a browser."
+  (interactive)
+  (let* ((ctx (remoto--buffer-file-context))
+         (url (remoto--context-url ctx (plist-get ctx :kind))))
+    (browse-url url)
+    (message "Browsing: %s" url)))
+
+;;;###autoload
+(define-obsolete-function-alias 'remoto-copy-github-url 'remoto-copy-url "1.8.0")
 
 ;;;; Repository search
 
@@ -2618,6 +2776,63 @@ Matches the canonical /github: prefix and its /gh: shorthand alias.")
 (add-to-list 'completion-category-overrides
              '(remoto (styles partial-completion basic)))
 
+;;;; Minor mode
+
+(defvar remoto-command-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map "u" #'remoto-copy-url)
+    (define-key map "b" #'remoto-copy-blame-url)
+    (define-key map "p" #'remoto-copy-permalink)
+    (define-key map "r" #'remoto-copy-raw-url)
+    (define-key map "h" #'remoto-copy-history-url)
+    (define-key map "w" #'remoto-browse-url)
+    map)
+  "Keymap of remoto URL commands, meant to be bound to a prefix key.
+
+Short mnemonic keys: `u' copy-url, `b' blame, `p' permalink, `r' raw,
+`h' history, `w' browse.  It is intentionally bound to no key by
+default, so it claims none of the user-reserved \\=`C-c LETTER\\=' space.
+Bind it as a unit under a prefix of your choice, e.g.:
+
+  (with-eval-after-load \\='remoto
+    (keymap-set remoto-mode-map \"C-c g\" remoto-command-map))")
+(fset 'remoto-command-map remoto-command-map)
+
+(defvar remoto-mode-map (make-sparse-keymap)
+  "Keymap for `remoto-mode'.
+Empty by default.  Populate it in your configuration, commonly by
+binding the variable `remoto-command-map' to a prefix key.")
+
+;;;###autoload
+(define-minor-mode remoto-mode
+  "Minor mode for buffers backed by a remoto virtual filesystem.
+
+Offers forge-agnostic commands to copy or open the web URL of the file
+or directory shown in the current buffer.  The commands work the same in
+file buffers and in Dired, and adapt to the forge behind the path (only
+GitHub today, but designed for more).
+
+`remoto-mode' is enabled automatically when visiting a remoto path.  Its
+keymap is empty by default; the commands are grouped in the variable
+`remoto-command-map', which you can bind to a prefix of your choosing."
+  :lighter " Remoto"
+  :keymap remoto-mode-map)
+
+(defun remoto--maybe-enable-mode ()
+  "Enable `remoto-mode' when the current buffer is a remoto buffer.
+Intended for `find-file-hook' and `dired-mode-hook'."
+  (let ((file (or buffer-file-name
+                  (and (derived-mode-p 'dired-mode)
+                       (if (listp dired-directory)
+                           (car dired-directory)
+                         dired-directory)))))
+    (when (and (stringp file)
+               (string-match-p remoto--handler-regexp file))
+      (remoto-mode 1))))
+
+(add-hook 'find-file-hook #'remoto--maybe-enable-mode)
+(add-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
+
 (defun remoto--get-prop (candidate prop)
   "Get text property PROP from CANDIDATE.
 Searches from the end backwards, skipping trailing delimiters.
@@ -2797,6 +3012,8 @@ Adds the package directory to `load-path' if needed."
   (advice-remove 'dired #'remoto--dired-around-a)
   (advice-remove 'find-file-noselect #'remoto--find-file-around-a)
   (advice-remove 'read-file-name-internal #'remoto--read-file-name-internal-a)
+  (remove-hook 'find-file-hook #'remoto--maybe-enable-mode)
+  (remove-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
   (clrhash remoto--tree-cache)
   (clrhash remoto--default-branch-cache)
   (clrhash remoto--branches-cache)
