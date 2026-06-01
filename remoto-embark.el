@@ -167,6 +167,25 @@ path; a directory opens Dired and the ref resolves lazily."
   (interactive "sRemoto ref: ")
   (browse-url (remoto--context-url (remoto--path-context target) 'tree)))
 
+(defun remoto-embark-open-issue (target)
+  "Open the remoto issue/PR TARGET (a /github:OWNER/REPO#N path) in remoto.
+This routes to the remoto-topic display via `find-file'."
+  (interactive "sRemoto issue: ")
+  (find-file target))
+
+(defun remoto-embark-copy-issue-ref (target)
+  "Copy the OWNER/REPO#N reference for the remoto issue/PR TARGET."
+  (interactive "sRemoto issue: ")
+  (if (string-match (rx "/" (+ (not (any ":"))) ":"
+                        (group (+ (not (any "/")))) "/"
+                        (group (+ (not (any "#")))) "#" (group (+ digit)))
+                    target)
+      (remoto--kill-url (format "%s/%s#%s"
+                                (match-string 1 target)
+                                (match-string 2 target)
+                                (match-string 3 target)))
+    (user-error "Remoto: not an issue target: %s" target)))
+
 (defun remoto--clone (url dest)
   "Clone URL into DEST asynchronously, showing progress in a buffer."
   (let ((buffer (get-buffer-create "*remoto-clone*")))
@@ -218,6 +237,11 @@ The clone URL kind is governed by `remoto-clone-url-type'."
   "r" #'remoto-embark-copy-raw-url
   "h" #'remoto-embark-copy-history-url)
 
+(defvar-keymap remoto-embark-issue-map
+  :doc "Embark actions for remoto issue/PR targets."
+  "o" #'remoto-embark-open-issue
+  "y" #'remoto-embark-copy-issue-ref)
+
 ;;;; Registration (only once Embark is loaded)
 
 (with-eval-after-load 'embark
@@ -225,10 +249,12 @@ The clone URL kind is governed by `remoto-clone-url-type'."
   (add-to-list 'embark-keymap-alist '(remoto-dir remoto-embark-dir-map))
   (add-to-list 'embark-keymap-alist '(remoto-file remoto-embark-file-map))
   (add-to-list 'embark-keymap-alist '(remoto-branch remoto-embark-branch-map))
+  (add-to-list 'embark-keymap-alist '(remoto-issue remoto-embark-issue-map))
   (add-to-list 'embark-target-finders #'remoto--embark-target-finder)
   (add-to-list 'embark-transformer-alist '(remoto-repo . remoto--embark-transform))
   (add-to-list 'embark-transformer-alist '(remoto-file . remoto--embark-transform))
   (add-to-list 'embark-transformer-alist '(remoto-branch . remoto--embark-transform-ref))
+  (add-to-list 'embark-transformer-alist '(remoto-issue . remoto--embark-transform-ref))
   (define-key embark-url-map "R" #'remoto-embark-open-in-remoto))
 
 (provide 'remoto-embark)

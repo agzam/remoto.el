@@ -223,11 +223,19 @@ Stage B - isolated, fully CI-verifiable actions - DONE (uncommitted on `embark-i
 - Remaining Stage B follow-ups (not done): repo copy-shorthand, file save-local /
   insert-contents / copy-curl, dir copy-repo-relative-path.
 
-Stage C - minibuffer / embark-collect:
-- Per-level categories (section 8) + category overrides + candidate full-path
-  property + transformers + owner/branch/issue keymaps + registration. This delivers
-  `C-x C-f /github:agzam` -> embark-collect of repos with working actions.
-- Update affected completion tests; add transformer/category tests.
+Stage C - minibuffer / embark-collect - DONE (all five levels):
+- Per-level categories injected via `remoto--completion-metadata` + the
+  read-file-name advice: owner->remoto-repo, files/canonical->remoto-file,
+  `@`->remoto-branch, `#`->remoto-issue. Overrides added for each.
+- Candidates carry a `remoto-target' full canonical path (attached in the
+  file-name-all-completions handler per level). `remoto--embark-transform'
+  reads it and re-derives type (file vs dir vs repo); `remoto--embark-transform-ref'
+  keeps the type for branch/issue. Registered in embark-transformer-alist.
+- Keymaps: repo/dir/file (Stage 1) + remoto-embark-branch-map (copy-url/browse)
+  + remoto-embark-issue-map (open via find-file -> topic, copy OWNER/REPO#N).
+  Registered in embark-keymap-alist.
+- `C-x C-f /github:OWNER` -> embark-collect of repos with working actions, and
+  embark-act works at every completion level.
 
 Stage C investigation findings (so it can be executed cold):
 - Categories: add `(category . remoto-LEVEL)` to each cond branch of

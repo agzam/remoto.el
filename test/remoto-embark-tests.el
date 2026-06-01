@@ -51,6 +51,12 @@
     (let ((kmap (assoc 'remoto-branch embark-keymap-alist))
           (fn (alist-get 'remoto-branch embark-transformer-alist)))
       (expect kmap :to-equal '(remoto-branch remoto-embark-branch-map))
+      (expect fn :to-be 'remoto--embark-transform-ref)))
+
+  (it "registers the issue keymap and transformer"
+    (let ((kmap (assoc 'remoto-issue embark-keymap-alist))
+          (fn (alist-get 'remoto-issue embark-transformer-alist)))
+      (expect kmap :to-equal '(remoto-issue remoto-embark-issue-map))
       (expect fn :to-be 'remoto--embark-transform-ref))))
 
 ;;; Target finder (repo-level: no API/cache needed)

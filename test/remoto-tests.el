@@ -3928,6 +3928,39 @@ Returns the full path after completion, or INPUT if no completion."
     (expect (lookup-key remoto-embark-branch-map "w")
             :to-be 'remoto-embark-browse-branch)))
 
+(describe "issue-level completion targets (Stage C)"
+  (it "reports the remoto-issue category at the # level"
+    (let* ((meta (remoto--completion-metadata "/github:o/r#"))
+           (cat (alist-get 'category meta)))
+      (expect cat :to-be 'remoto-issue)))
+
+  (it "registers a completion-category-override for remoto-issue"
+    (let ((override (assq 'remoto-issue completion-category-overrides)))
+      (expect override :to-be-truthy)))
+
+  (it "attaches remoto-target on issue candidates"
+    (spy-on 'remoto--fetch-issues :and-return-value
+            '(((number . 42) (title . "Bug") (state . "open"))))
+    (let* ((cands (remoto--handle-file-name-all-completions "" "/github:o/r#"))
+           (first (car cands))
+           (rt (get-text-property 0 'remoto-target first)))
+      (expect first :to-equal "42")
+      (expect rt :to-equal "/github:o/r#42")))
+
+  (it "opens an issue target via find-file"
+    (spy-on 'find-file)
+    (remoto-embark-open-issue "/github:o/r#42")
+    (expect 'find-file :to-have-been-called-with "/github:o/r#42"))
+
+  (it "copies the OWNER/REPO#N reference"
+    (remoto-embark-copy-issue-ref "/github:o/r#42")
+    (expect (car kill-ring) :to-equal "o/r#42"))
+
+  (it "binds issue actions in the issue keymap"
+    (expect (lookup-key remoto-embark-issue-map "o") :to-be 'remoto-embark-open-issue)
+    (expect (lookup-key remoto-embark-issue-map "y")
+            :to-be 'remoto-embark-copy-issue-ref)))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:

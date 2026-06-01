@@ -903,7 +903,10 @@ fetches populate the cache in the background."
                                  (propertize num
                                              'remoto-topic-pr is-pr
                                              'remoto-topic-title title
-                                             'remoto-topic-state state)))
+                                             'remoto-topic-state state
+                                             'remoto-target
+                                             (format "/github:%s/%s#%s"
+                                                     owner repo num))))
                              issues))
                     (filtered
                      (if (or (string-empty-p file)
@@ -2835,6 +2838,8 @@ Matches the canonical /github: prefix and its /gh: shorthand alias.")
              '(remoto-file (styles partial-completion basic)))
 (add-to-list 'completion-category-overrides
              '(remoto-branch (styles partial-completion basic)))
+(add-to-list 'completion-category-overrides
+             '(remoto-issue (styles partial-completion basic)))
 
 ;;;; Minor mode
 
@@ -2952,7 +2957,8 @@ Provides group-function and affixation-function for @ and # modes."
                                          (if is-pr "PR " "   ")
                                          (format "%s [%s]" title state))))
                                candidates)))))
-      `((group-function . ,group-fn)
+      `((category . remoto-issue)
+        (group-function . ,group-fn)
         (affixation-function . ,affix-fn))))
    ;; Branches/tags mode: /github:OWNER/REPO@
    ((string-match (rx (+ (not (any "/:@#"))) "/" (+ (not (any "/:@#"))) "@" eos)
