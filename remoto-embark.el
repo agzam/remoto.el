@@ -93,6 +93,24 @@ branch or tag stays a `remoto-branch' instead of collapsing to the
                       (get-text-property 0 'remoto-target target))
                  target)))
 
+(defun remoto--embark-browse-transform (type target)
+  "Embark transformer for the single-category `remoto-browse' table.
+Reads TARGET's `remoto-target' full path and dispatches it to a per-type
+target: an issue (trailing `#N'), a branch (a bare `@REF' root), else a
+repo/dir/file via the path context.  Lets the one `remoto-browse'
+category reuse the per-type keymaps.  Falls back to TYPE."
+  (let ((path (or (and (< 0 (length target))
+                       (get-text-property 0 'remoto-target target))
+                  target)))
+    (cond
+     ((string-match-p (rx "#" (+ digit) eos) path)
+      (cons 'remoto-issue path))
+     ((string-match-p (rx "@" (+ nonl) ":/" eos) path)
+      (cons 'remoto-branch path))
+     (t (let* ((ctx (ignore-errors (remoto--path-context path)))
+               (rtype (or (and ctx (plist-get ctx :type)) type)))
+          (cons rtype path))))))
+
 ;;;; Actions
 
 ;; Each action receives TARGET, a full canonical remoto path string - the
@@ -295,6 +313,7 @@ The clone URL kind is governed by `remoto-clone-url-type'."
   (add-to-list 'embark-transformer-alist '(remoto-file . remoto--embark-transform))
   (add-to-list 'embark-transformer-alist '(remoto-branch . remoto--embark-transform-ref))
   (add-to-list 'embark-transformer-alist '(remoto-issue . remoto--embark-transform-ref))
+  (add-to-list 'embark-transformer-alist '(remoto-browse . remoto--embark-browse-transform))
   (define-key embark-url-map "R" #'remoto-embark-open-in-remoto))
 
 (provide 'remoto-embark)

@@ -57,7 +57,11 @@
     (let ((kmap (assoc 'remoto-issue embark-keymap-alist))
           (fn (alist-get 'remoto-issue embark-transformer-alist)))
       (expect kmap :to-equal '(remoto-issue remoto-embark-issue-map))
-      (expect fn :to-be 'remoto--embark-transform-ref))))
+      (expect fn :to-be 'remoto--embark-transform-ref)))
+
+  (it "registers the browse-table transformer"
+    (let ((fn (alist-get 'remoto-browse embark-transformer-alist)))
+      (expect fn :to-be 'remoto--embark-browse-transform))))
 
 ;;; Target finder (repo-level: no API/cache needed)
 

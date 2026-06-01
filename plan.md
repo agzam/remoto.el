@@ -266,9 +266,17 @@ Stage C investigation findings (so it can be executed cold):
 - This is one atomic, hot-path change; best done with a fresh context budget.
 
 Stage D - remoto-browse surface, richer actions, polish:
-- Per-level targets for the `remoto-browse` table (category `remoto-browse` today).
-- branch/issue action sets; export-subdir-to-local (uses remoto fetcher); compare /
-  new-PR / gh pr checkout; embark-collect/export refinements
+- remoto-browse surface - DONE: `remoto--browse-completions` candidates now carry
+  a `remoto-target' full canonical path in every mode (search->repo `:/`,
+  `@`->branch `@ref:/`, `#`->issue `#N`, `/`->file `@branch:/path`).  Kept the
+  single `remoto-browse' category and registered one transformer
+  `remoto--embark-browse-transform' that classifies per target (issue/branch by
+  path marker, else dir/file/repo via the path context) and dispatches to the
+  existing per-type keymaps.  No category churn, no new keymap/override.
+- issue/PR web actions - DONE: browse (`w`) and copy-url (`u`) via
+  `remoto--forge-issue-url' (forge-agnostic `issue' template).
+- Remaining: branch/issue extra actions (gh pr checkout, open diff);
+  export-subdir-to-local (uses remoto fetcher); embark-collect/export refinements
   (`embark-exporters-alist` -> remoto Dired, if feasible).
 - README docs: how to enable (`(require 'remoto-embark)`), keymaps, opt-in note.
 

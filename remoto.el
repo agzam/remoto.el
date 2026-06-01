@@ -2462,7 +2462,10 @@ Handles search, branch, and issue modes."
                               (propertize (concat prefix num)
                                           'remoto-topic-pr is-pr
                                           'remoto-topic-title title
-                                          'remoto-topic-state state)))
+                                          'remoto-topic-state state
+                                          'remoto-target
+                                          (format "/github:%s/%s#%s"
+                                                  owner repo num))))
                           issues)))
              (sort candidates
                    (lambda (a b)
@@ -2483,12 +2486,18 @@ Handles search, branch, and issue modes."
            (let ((branch-set (when (listp branches)
                                (mapcar (lambda (b)
                                          (propertize (concat prefix b)
-                                                     'remoto-ref-type "branch"))
+                                                     'remoto-ref-type "branch"
+                                                     'remoto-target
+                                                     (format "/github:%s/%s@%s:/"
+                                                             owner repo b)))
                                        branches)))
                  (tag-set (when (listp tags)
                             (mapcar (lambda (tg)
                                       (propertize (concat prefix tg)
-                                                  'remoto-ref-type "tag"))
+                                                  'remoto-ref-type "tag"
+                                                  'remoto-target
+                                                  (format "/github:%s/%s@%s:/"
+                                                          owner repo tg)))
                                     tags))))
              (seq-filter (lambda (r)
                            (or (string-empty-p query)
@@ -2511,17 +2520,28 @@ Handles search, branch, and issue modes."
                                owner repo branch subpath)))
                   (names (when (listp children)
                            (mapcar (lambda (child)
-                                     (let ((name (car child))
-                                           (dir? (equal "tree"
-                                                        (alist-get 'type (cdr child)))))
-                                       (concat prefix subpath
-                                               (if dir? (concat name "/") name))))
+                                     (let* ((name (car child))
+                                            (dir? (equal "tree"
+                                                         (alist-get 'type (cdr child))))
+                                            (display (if dir? (concat name "/") name)))
+                                       (propertize (concat prefix subpath display)
+                                                   'remoto-target
+                                                   (format "/github:%s/%s@%s:/%s%s"
+                                                           owner repo branch
+                                                           subpath display))))
                                    children))))
              (if (string-empty-p file-part)
                  names
                (seq-filter (lambda (n) (string-search file-part n)) names))))))
       ('search
-       (remoto--search-repos query)))))
+       (mapcar (lambda (cand)
+                 (let ((c (copy-sequence cand)))
+                   (put-text-property 0 (length c) 'remoto-target
+                                      (format "/github:%s:/"
+                                              (substring-no-properties c))
+                                      c)
+                   c))
+               (remoto--search-repos query))))))
 
 (defun remoto--browse-metadata (string)
   "Return completion metadata alist for STRING in `remoto-browse'."

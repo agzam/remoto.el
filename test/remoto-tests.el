@@ -4001,6 +4001,86 @@ Returns the full path after completion, or INPUT if no completion."
     (expect (lookup-key remoto-embark-issue-map "y")
             :to-be 'remoto-embark-copy-issue-ref)))
 
+(describe "remoto-browse Embark targets (Stage D)"
+  ;; Candidates from the browse completion table carry the full canonical
+  ;; path in a `remoto-target' property so Embark actions resolve a bare
+  ;; candidate (mirrors the file-name completion surface).
+  (it "attaches remoto-target on search-mode candidates"
+    (spy-on 'remoto--search-repos :and-return-value
+            (list (propertize "torvalds/linux" 'remoto-repo-desc "kernel")))
+    (let* ((cands (remoto--browse-completions "torvalds"))
+           (cand (car cands))
+           (rt (get-text-property 0 'remoto-target cand))
+           (desc (get-text-property 0 'remoto-repo-desc cand)))
+      (expect cand :to-equal "torvalds/linux")
+      (expect rt :to-equal "/github:torvalds/linux:/")
+      ;; existing display property is preserved
+      (expect desc :to-equal "kernel")))
+
+  (it "attaches remoto-target on issue-mode candidates"
+    (spy-on 'remoto--fetch-issues :and-return-value
+            '(((number . 42) (title . "Bug") (state . "open"))))
+    (let* ((cands (remoto--browse-completions "foo/bar#"))
+           (cand (car cands))
+           (rt (get-text-property 0 'remoto-target cand)))
+      (expect cand :to-equal "foo/bar#42")
+      (expect rt :to-equal "/github:foo/bar#42")))
+
+  (it "attaches remoto-target on branch-mode candidates"
+    (spy-on 'remoto--fetch-branches :and-return-value '("main"))
+    (spy-on 'remoto--fetch-tags :and-return-value nil)
+    (let* ((cands (remoto--browse-completions "foo/bar@"))
+           (cand (car cands))
+           (rt (get-text-property 0 'remoto-target cand)))
+      (expect cand :to-equal "foo/bar@main")
+      (expect rt :to-equal "/github:foo/bar@main:/")))
+
+  (it "attaches remoto-target on file-mode candidates"
+    (spy-on 'remoto--default-branch :and-return-value "main")
+    (spy-on 'remoto--fetch-dir-children-light :and-return-value
+            '(("README.md" . ((type . "blob"))) ("src" . ((type . "tree")))))
+    (let* ((cands (remoto--browse-completions "foo/bar/"))
+           (readme (seq-find (lambda (c) (equal c "foo/bar/README.md")) cands))
+           (dir (seq-find (lambda (c) (equal c "foo/bar/src/")) cands))
+           (readme-rt (get-text-property 0 'remoto-target readme))
+           (dir-rt (get-text-property 0 'remoto-target dir)))
+      (expect readme-rt :to-equal "/github:foo/bar@main:/README.md")
+      (expect dir-rt :to-equal "/github:foo/bar@main:/src/")))
+
+  ;; The single `remoto-browse' category dispatches per-target via the
+  ;; transformer, reusing the per-type keymaps.
+  (it "classifies a repo browse target"
+    (let* ((cand (propertize "torvalds/linux"
+                             'remoto-target "/github:torvalds/linux:/"))
+           (result (remoto--embark-browse-transform 'remoto-browse cand)))
+      (expect result :to-equal '(remoto-repo . "/github:torvalds/linux:/"))))
+
+  (it "classifies an issue browse target"
+    (let* ((cand (propertize "foo/bar#42" 'remoto-target "/github:foo/bar#42"))
+           (result (remoto--embark-browse-transform 'remoto-browse cand)))
+      (expect result :to-equal '(remoto-issue . "/github:foo/bar#42"))))
+
+  (it "classifies a branch browse target"
+    (let* ((cand (propertize "foo/bar@main"
+                             'remoto-target "/github:foo/bar@main:/"))
+           (result (remoto--embark-browse-transform 'remoto-browse cand)))
+      (expect result :to-equal '(remoto-branch . "/github:foo/bar@main:/"))))
+
+  (it "reclassifies dir vs file browse targets via the path context"
+    (remoto-test-with-cache
+      (let* ((dir (remoto--embark-browse-transform
+                   'remoto-browse
+                   (propertize "testowner/testrepo/src/" 'remoto-target
+                               "/github:testowner/testrepo@main:/src")))
+             (file (remoto--embark-browse-transform
+                    'remoto-browse
+                    (propertize "testowner/testrepo/src/main.el" 'remoto-target
+                                "/github:testowner/testrepo@main:/src/main.el")))
+             (dir-type (car dir))
+             (file-type (car file)))
+        (expect dir-type :to-be 'remoto-dir)
+        (expect file-type :to-be 'remoto-file)))))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:
