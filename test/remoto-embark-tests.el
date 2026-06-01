@@ -34,7 +34,10 @@
 
   (it "registers the target finder"
     (expect (and (memq 'remoto--embark-target-finder embark-target-finders) t)
-            :to-be t)))
+            :to-be t))
+
+  (it "binds open-in-remoto in embark-url-map"
+    (expect (lookup-key embark-url-map "R") :to-be 'remoto-embark-open-in-remoto)))
 
 ;;; Target finder (repo-level: no API/cache needed)
 

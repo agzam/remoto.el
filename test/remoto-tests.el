@@ -3786,6 +3786,50 @@ Returns the full path after completion, or INPUT if no completion."
       (expect 'browse-url :to-have-been-called-with
               "https://github.com/testowner/testrepo/tree/main/src"))))
 
+(describe "remoto-embark-open-in-remoto"
+  (it "opens a blob URL at its canonical remoto path"
+    (spy-on 'find-file)
+    (remoto-embark-open-in-remoto "https://github.com/o/r/blob/main/x.el")
+    (expect 'find-file :to-have-been-called-with "/github:o/r@main:/x.el"))
+
+  (it "opens a repo URL at its root"
+    (spy-on 'find-file)
+    (remoto-embark-open-in-remoto "https://github.com/o/r")
+    (expect 'find-file :to-have-been-called-with "/github:o/r:/"))
+
+  (it "errors on a non-forge URL"
+    (expect (remoto-embark-open-in-remoto "https://example.com/foo")
+            :to-throw 'user-error)))
+
+(describe "remoto-embark-clone"
+  (it "clones with the HTTPS URL and chosen dir by default"
+    (let ((remoto-clone-url-type 'https))
+      (spy-on 'read-directory-name :and-return-value "/tmp/r/")
+      (spy-on 'remoto--clone)
+      (remoto-embark-clone "/github:o/r:/")
+      (expect 'remoto--clone :to-have-been-called-with
+              "https://github.com/o/r.git" "/tmp/r/")))
+
+  (it "honors remoto-clone-url-type set to ssh"
+    (let ((remoto-clone-url-type 'ssh))
+      (spy-on 'read-directory-name :and-return-value "/tmp/r/")
+      (spy-on 'remoto--clone)
+      (remoto-embark-clone "/github:o/r:/")
+      (expect 'remoto--clone :to-have-been-called-with
+              "git@github.com:o/r.git" "/tmp/r/")))
+
+  (it "is bound in the repo keymap"
+    (expect (lookup-key remoto-embark-repo-map "c") :to-be 'remoto-embark-clone)))
+
+(describe "remoto--clone"
+  (it "launches git clone with the url and dest"
+    (spy-on 'start-process :and-return-value nil)
+    (spy-on 'set-process-sentinel)
+    (spy-on 'display-buffer)
+    (remoto--clone "https://github.com/o/r.git" "/tmp/r/")
+    (expect (nthcdr 2 (spy-calls-args-for 'start-process 0))
+            :to-equal '("git" "clone" "https://github.com/o/r.git" "/tmp/r/"))))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:

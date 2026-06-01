@@ -27,6 +27,8 @@
 (declare-function remoto--kill-url "remoto" (url))
 (declare-function remoto--require-blob "remoto" (ctx what))
 (declare-function remoto--resolve-commit-sha "remoto" (owner repo ref))
+(declare-function remoto--parse-input "remoto" (input))
+(declare-function remoto--canonical-path "remoto" (parsed))
 (declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
 (defvar dired-directory)
 
@@ -34,6 +36,16 @@
 ;; without Embark installed; their real definitions come from Embark.
 (defvar embark-keymap-alist)
 (defvar embark-target-finders)
+(defvar embark-url-map)
+
+;;;; Options
+
+(defcustom remoto-clone-url-type 'https
+  "Clone URL kind used by `remoto-embark-clone'.
+`https' works for any public repository without SSH keys; `ssh' uses the
+`git@host:owner/repo.git' form."
+  :type '(choice (const :tag "HTTPS" https) (const :tag "SSH" ssh))
+  :group 'remoto)
 
 ;;;; Target detection
 
@@ -114,12 +126,40 @@ full canonical remoto path."
                                           (plist-get ctx :ref))))
     (remoto--kill-url (remoto--context-url ctx (plist-get ctx :kind) sha))))
 
+(defun remoto-embark-open-in-remoto (url)
+  "Open the forge URL (or `owner/repo' shorthand) URL in remoto.
+Parses URL with `remoto--parse-input' and visits the canonical remoto
+path; a directory opens Dired and the ref resolves lazily."
+  (interactive "sForge URL: ")
+  (find-file (remoto--canonical-path (remoto--parse-input url))))
+
+(defun remoto--clone (url dest)
+  "Clone URL into DEST asynchronously, showing progress in a buffer."
+  (let ((buffer (get-buffer-create "*remoto-clone*")))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t)) (erase-buffer)))
+    (set-process-sentinel
+     (start-process "remoto-clone" buffer "git" "clone" url dest)
+     (lambda (_proc event) (message "remoto clone %s: %s" dest (string-trim event))))
+    (display-buffer buffer)))
+
+(defun remoto-embark-clone (target)
+  "Clone the repository for remoto TARGET into a chosen directory.
+The clone URL kind is governed by `remoto-clone-url-type'."
+  (interactive "sRemoto repo: ")
+  (let* ((ctx (remoto--path-context target))
+         (url (remoto--context-url ctx remoto-clone-url-type))
+         (dest (read-directory-name "Clone into: " nil nil nil
+                                    (plist-get ctx :repo))))
+    (remoto--clone url dest)))
+
 ;;;; Keymaps
 
 (defvar-keymap remoto-embark-repo-map
   :doc "Embark actions for remoto repository targets."
   "u" #'remoto-embark-copy-url
   "w" #'remoto-embark-browse-url
+  "c" #'remoto-embark-clone
   "s" #'remoto-embark-copy-ssh-url
   "g" #'remoto-embark-copy-https-url
   "h" #'remoto-embark-copy-history-url)
@@ -145,7 +185,8 @@ full canonical remoto path."
   (add-to-list 'embark-keymap-alist '(remoto-repo remoto-embark-repo-map))
   (add-to-list 'embark-keymap-alist '(remoto-dir remoto-embark-dir-map))
   (add-to-list 'embark-keymap-alist '(remoto-file remoto-embark-file-map))
-  (add-to-list 'embark-target-finders #'remoto--embark-target-finder))
+  (add-to-list 'embark-target-finders #'remoto--embark-target-finder)
+  (define-key embark-url-map "R" #'remoto-embark-open-in-remoto))
 
 (provide 'remoto-embark)
 
