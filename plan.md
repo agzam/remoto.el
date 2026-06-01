@@ -229,6 +229,34 @@ Stage C - minibuffer / embark-collect:
   `C-x C-f /github:agzam` -> embark-collect of repos with working actions.
 - Update affected completion tests; add transformer/category tests.
 
+Stage C investigation findings (so it can be executed cold):
+- Categories: add `(category . remoto-LEVEL)` to each cond branch of
+  `remoto--completion-metadata` (issues->remoto-issue, branches `@`->remoto-branch,
+  file [canonical `@ref:` + files-default]->remoto-file, owner `/github:O/`->remoto-repo,
+  root `/github:`->remoto-owner), and simplify `remoto--read-file-name-internal-a` to
+  append `extra` (now carrying the category) instead of hardcoding `(category . remoto)`.
+- Add `completion-category-overrides` for each new category (keep `remoto` as
+  fallback). Affected tests in test/remoto-tests.el: ~L1814 (override registration),
+  ~L2831 (category). The `remoto--completion-metadata` level tests (~L2790-2840,
+  ~L2939-2950) check group/affixation only - adding a `category` cons is additive,
+  but confirm none assert an exact alist.
+- ATOMICITY (important): categories must land together with the candidate-to-path
+  transformer. `remoto-repo`/`remoto-file` keymaps are already registered (Stage 1),
+  so once owner-level candidates get category `remoto-repo`, `embark-act` uses
+  `remoto-embark-repo-map` and the actions need a full path - shipping categories
+  alone makes those actions error on bare candidates (`remoto.el/`). Do not commit
+  categories without the transformer.
+- Candidate -> full path: attach a `remoto-target` (full canonical path) text
+  property to candidates. Prefer two chokepoints over the ~7 generation sites: the
+  `file-name-all-completions` handler (find-file path) and
+  `remoto--repo-completion-table` / `remoto--browse-completions` (browse path).
+  Per-level normalization needed: owner-level `/github:O/repo/` -> `/github:O/repo:/`
+  (canonical dirs already carry `:`). The transformer reads `remoto-target`; this also
+  makes it unit-testable (propertize a string -> transform -> assert) and works in
+  embark-collect (no live minibuffer). Generation sites for reference: remoto.el
+  ~759, ~802-807, ~885-887, ~926, ~2034-2154, ~2303, ~2428-2456.
+- This is one atomic, hot-path change; best done with a fresh context budget.
+
 Stage D - remoto-browse surface, richer actions, polish:
 - Per-level targets for the `remoto-browse` table (category `remoto-browse` today).
 - branch/issue action sets; export-subdir-to-local (uses remoto fetcher); compare /

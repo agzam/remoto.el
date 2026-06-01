@@ -3830,6 +3830,30 @@ Returns the full path after completion, or INPUT if no completion."
     (expect (nthcdr 2 (spy-calls-args-for 'start-process 0))
             :to-equal '("git" "clone" "https://github.com/o/r.git" "/tmp/r/"))))
 
+(describe "owner-level repo completion targets (Stage C)"
+  (it "reports the remoto-repo category at owner level"
+    (let* ((meta (remoto--completion-metadata "/github:agzam/"))
+           (cat (alist-get 'category meta)))
+      (expect cat :to-be 'remoto-repo)))
+
+  (it "registers a completion-category-override for remoto-repo"
+    (let ((override (assq 'remoto-repo completion-category-overrides)))
+      (expect override :to-be-truthy)))
+
+  (it "attaches the full remoto path as a remoto-target property on candidates"
+    (spy-on 'remoto--recent-owner-repos :and-return-value
+            (list (propertize "remoto.el" 'remoto-repo-desc "desc")))
+    (let* ((cands (remoto--handle-file-name-all-completions "" "/github:agzam/"))
+           (cand (car cands))
+           (target (get-text-property 0 'remoto-target cand)))
+      (expect cand :to-equal "remoto.el/")
+      (expect target :to-equal "/github:agzam/remoto.el:/")))
+
+  (it "transforms a candidate to its full path via remoto--embark-transform"
+    (let* ((cand (propertize "remoto.el/" 'remoto-target "/github:agzam/remoto.el:/"))
+           (result (remoto--embark-transform 'remoto-repo cand)))
+      (expect result :to-equal '(remoto-repo . "/github:agzam/remoto.el:/")))))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:

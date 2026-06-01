@@ -36,6 +36,7 @@
 ;; without Embark installed; their real definitions come from Embark.
 (defvar embark-keymap-alist)
 (defvar embark-target-finders)
+(defvar embark-transformer-alist)
 (defvar embark-url-map)
 
 ;;;; Options
@@ -66,6 +67,15 @@ Return (TYPE PATH), where TYPE is a remoto target symbol and PATH is the
 full canonical remoto path."
   (when-let* ((target (remoto--embark-target-at-point)))
     (list (car target) (cdr target))))
+
+(defun remoto--embark-transform (type target)
+  "Embark transformer: resolve a completion TARGET to its full remoto path.
+Reads the `remoto-target' text property attached to remoto completion
+candidates, so actions work on a bare minibuffer/collect candidate; falls
+back to TARGET unchanged."
+  (cons type (or (and (< 0 (length target))
+                      (get-text-property 0 'remoto-target target))
+                 target)))
 
 ;;;; Actions
 
@@ -186,6 +196,7 @@ The clone URL kind is governed by `remoto-clone-url-type'."
   (add-to-list 'embark-keymap-alist '(remoto-dir remoto-embark-dir-map))
   (add-to-list 'embark-keymap-alist '(remoto-file remoto-embark-file-map))
   (add-to-list 'embark-target-finders #'remoto--embark-target-finder)
+  (add-to-list 'embark-transformer-alist '(remoto-repo . remoto--embark-transform))
   (define-key embark-url-map "R" #'remoto-embark-open-in-remoto))
 
 (provide 'remoto-embark)

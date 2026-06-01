@@ -37,7 +37,11 @@
             :to-be t))
 
   (it "binds open-in-remoto in embark-url-map"
-    (expect (lookup-key embark-url-map "R") :to-be 'remoto-embark-open-in-remoto)))
+    (expect (lookup-key embark-url-map "R") :to-be 'remoto-embark-open-in-remoto))
+
+  (it "registers the candidate transformer for remoto-repo"
+    (let ((fn (alist-get 'remoto-repo embark-transformer-alist)))
+      (expect fn :to-be 'remoto--embark-transform))))
 
 ;;; Target finder (repo-level: no API/cache needed)
 

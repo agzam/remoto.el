@@ -783,7 +783,14 @@ fetches populate the cache in the background."
                (when (consp sync)
                  (setq repos sync))))
            (mapcar (lambda (r)
-                     (if (string-suffix-p "/" r) r (concat r "/")))
+                     (let* ((name (if (string-suffix-p "/" r) (substring r 0 -1) r))
+                            (cand (concat name "/")))
+                       ;; Carry the full canonical path so Embark actions can
+                       ;; resolve a bare candidate (see `remoto--embark-transform').
+                       (put-text-property 0 (length cand) 'remoto-target
+                                          (format "/github:%s/%s:/" owner name)
+                                          cand)
+                       cand))
                    repos)))
         ('repo
          ;; Branch + tag completion at /github:OWNER/REPO@
@@ -2808,6 +2815,8 @@ Matches the canonical /github: prefix and its /gh: shorthand alias.")
 ;; orderless in completion-styles does not interfere.
 (add-to-list 'completion-category-overrides
              '(remoto (styles partial-completion basic)))
+(add-to-list 'completion-category-overrides
+             '(remoto-repo (styles partial-completion basic)))
 
 ;;;; Minor mode
 
@@ -2956,7 +2965,8 @@ Provides group-function and affixation-function for @ and # modes."
                                  (let ((desc (or (remoto--get-prop c 'remoto-repo-desc) "")))
                                    (list c "" desc)))
                                candidates)))))
-      `((affixation-function . ,affix-fn))))
+      `((category . remoto-repo)
+        (affixation-function . ,affix-fn))))
    ;; Root mode: /github: - user/org type
    ((equal directory "/github:")
     (let ((affix-fn (lambda (candidates)
@@ -2990,12 +3000,15 @@ Args: ORIG, STRING, PRED, ACTION."
              (extra (remoto--completion-metadata dir))
              (base (funcall orig string pred action))
              (base-alist (and (consp base) (eq (car base) 'metadata) (cdr base))))
-        (if extra
-            ;; Replace category so Marginalia doesn't override our annotations
-            (cons 'metadata (append extra
-                                    `((category . remoto))
-                                    (assq-delete-all 'category (copy-alist base-alist))))
-          (or base (cons 'metadata nil)))))
+              (if extra
+                  ;; Replace category so Marginalia doesn't override our annotations.
+                  ;; Use the per-level category from `remoto--completion-metadata' when
+                  ;; it provides one, else the generic `remoto'.
+                  (let ((cat (or (alist-get 'category extra) 'remoto)))
+                    (cons 'metadata (append (assq-delete-all 'category (copy-alist extra))
+                                            `((category . ,cat))
+                                            (assq-delete-all 'category (copy-alist base-alist)))))
+                (or base (cons 'metadata nil)))))
      ;; Non-standard action (boundaries, etc.) - pass through.
      ((not (memq action '(nil t lambda)))
       (funcall orig string pred action))
