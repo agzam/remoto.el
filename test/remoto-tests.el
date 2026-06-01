@@ -3980,8 +3980,24 @@ Returns the full path after completion, or INPUT if no completion."
     (remoto-embark-copy-issue-ref "/github:o/r#42")
     (expect (car kill-ring) :to-equal "o/r#42"))
 
+  (it "builds the issue web URL"
+    (expect (remoto--forge-issue-url 'github "o" "r" "42")
+            :to-equal "https://github.com/o/r/issues/42"))
+
+  (it "browses the issue web page"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-issue "/github:o/r#42")
+    (expect 'browse-url :to-have-been-called-with
+            "https://github.com/o/r/issues/42"))
+
+  (it "copies the issue web URL"
+    (remoto-embark-copy-issue-url "/github:o/r#42")
+    (expect (car kill-ring) :to-equal "https://github.com/o/r/issues/42"))
+
   (it "binds issue actions in the issue keymap"
     (expect (lookup-key remoto-embark-issue-map "o") :to-be 'remoto-embark-open-issue)
+    (expect (lookup-key remoto-embark-issue-map "w") :to-be 'remoto-embark-browse-issue)
+    (expect (lookup-key remoto-embark-issue-map "u") :to-be 'remoto-embark-copy-issue-url)
     (expect (lookup-key remoto-embark-issue-map "y")
             :to-be 'remoto-embark-copy-issue-ref)))
 

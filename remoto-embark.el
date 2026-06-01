@@ -29,6 +29,8 @@
 (declare-function remoto--resolve-commit-sha "remoto" (owner repo ref))
 (declare-function remoto--parse-input "remoto" (input))
 (declare-function remoto--canonical-path "remoto" (parsed))
+(declare-function remoto--forge-type "remoto" (path))
+(declare-function remoto--forge-issue-url "remoto" (forge owner repo number))
 (declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
 (defvar dired-directory)
 
@@ -196,6 +198,30 @@ This routes to the remoto-topic display via `find-file'."
                                 (match-string 3 target)))
     (user-error "Remoto: not an issue target: %s" target)))
 
+(defun remoto--embark-issue-parts (target)
+  "Return (FORGE OWNER REPO NUMBER) for an issue TARGET like /github:O/R#N."
+  (when (string-match (rx "/" (+ (not (any ":"))) ":"
+                          (group (+ (not (any "/")))) "/"
+                          (group (+ (not (any "#")))) "#" (group (+ digit)))
+                      target)
+    ;; Bind the match strings before `remoto--forge-type', which runs its
+    ;; own `string-match' and would otherwise clobber the match data.
+    (let ((owner (match-string 1 target))
+          (repo (match-string 2 target))
+          (number (match-string 3 target)))
+      (list (remoto--forge-type target) owner repo number))))
+
+(defun remoto-embark-browse-issue (target)
+  "Open the web page for the remoto issue/PR TARGET in a browser."
+  (interactive "sRemoto issue: ")
+  (browse-url (apply #'remoto--forge-issue-url (remoto--embark-issue-parts target))))
+
+(defun remoto-embark-copy-issue-url (target)
+  "Copy the web URL for the remoto issue/PR TARGET."
+  (interactive "sRemoto issue: ")
+  (remoto--kill-url (apply #'remoto--forge-issue-url
+                           (remoto--embark-issue-parts target))))
+
 (defun remoto--clone (url dest)
   "Clone URL into DEST asynchronously, showing progress in a buffer."
   (let ((buffer (get-buffer-create "*remoto-clone*")))
@@ -252,6 +278,8 @@ The clone URL kind is governed by `remoto-clone-url-type'."
 (defvar-keymap remoto-embark-issue-map
   :doc "Embark actions for remoto issue/PR targets."
   "o" #'remoto-embark-open-issue
+  "w" #'remoto-embark-browse-issue
+  "u" #'remoto-embark-copy-issue-url
   "y" #'remoto-embark-copy-issue-ref)
 
 ;;;; Registration (only once Embark is loaded)

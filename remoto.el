@@ -1470,6 +1470,7 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
      (https   . "https://github.com/%o/%r.git")
      (compare . "https://github.com/%o/%r/compare/%R")
      (new-pr  . "https://github.com/%o/%r/pull/new/%R")
+     (issue   . "https://github.com/%o/%r/issues/%N")
      (line    . "#L%s")
      (region  . "#L%s-L%e")))
   "Per-forge web-URL templates, keyed by forge symbol.
@@ -1522,6 +1523,13 @@ includes one."
                             (?R . ,ref)
                             (?p . ,path)
                             (?L . ,line)))))
+
+(defun remoto--forge-issue-url (forge owner repo number)
+  "Build the web URL for issue/PR NUMBER in OWNER/REPO on FORGE.
+Uses the `issue' template; %N is the issue/PR number."
+  (let ((template (or (alist-get 'issue (alist-get forge remoto-forge-url-templates))
+                      (user-error "Remoto: forge `%s' has no `issue' URL" forge))))
+    (format-spec template `((?o . ,owner) (?r . ,repo) (?N . ,number)))))
 
 (defun remoto--resolve-commit-sha (owner repo ref)
   "Resolve REF in OWNER/REPO to a commit SHA via the forge API.
