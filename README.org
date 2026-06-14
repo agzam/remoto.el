@@ -98,11 +98,47 @@ Keybindings in the display buffer: ~b~ (open in browser), ~g~ (refresh).
 
 *** Commands
 
-| Command                  | Description                                            |
-|--------------------------+--------------------------------------------------------|
+| Command                | Description                                            |
+|------------------------+--------------------------------------------------------|
 | ~remoto-browse~          | Prompt for a repo, open dired at root                  |
 | ~remoto-refresh~         | Clear tree cache for current repo, re-fetch            |
 | ~remoto-copy-github-url~ | Copy ~github.com~ URL for current file/line to kill ring |
+
+** Embark integration
+
+Optional [[https://github.com/oantolin/embark][Embark]] integration lives in a separate file, ~remoto-embark.el~. It has no hard dependency on Embark (Embark is not in ~Package-Requires~), so it is opt-in. Enable it with:
+
+#+begin_src emacs-lisp
+(require 'remoto-embark)
+#+end_src
+
+Load order does not matter - it self-registers once Embark is loaded, and it byte-compiles and loads cleanly even when Embark is absent. With it active, ~embark-act~ offers forge-agnostic actions on remoto targets in three places: remoto file buffers, ~dired~, and ~/github:~ minibuffer completion (including ~embark-collect~ buffers).
+
+Targets are classified by what is at point or which completion level you are on:
+
+| Target        | Example                               | Keymap                   |
+|---------------+---------------------------------------+--------------------------|
+| ~remoto-owner~  | ~/github:torvalds~                      | ~remoto-embark-owner-map~  |
+| ~remoto-repo~   | ~/github:torvalds/linux:/~              | ~remoto-embark-repo-map~   |
+| ~remoto-branch~ | ~/github:torvalds/linux@master:/~       | ~remoto-embark-branch-map~ |
+| ~remoto-issue~  | ~/github:torvalds/linux#42~             | ~remoto-embark-issue-map~  |
+| ~remoto-dir~    | ~/github:torvalds/linux@master:/fs~     | ~remoto-embark-dir-map~    |
+| ~remoto-file~   | ~/github:torvalds/linux@master:/README~ | ~remoto-embark-file-map~   |
+
+Default actions reuse remoto's forge-agnostic URL layer, so adding a forge later needs no Embark change:
+
+| Target | Keys                                                                |
+|--------+---------------------------------------------------------------------|
+| owner  | ~w~ browse profile, ~u~ copy URL, ~r~ open repositories tab               |
+| repo   | ~u~ copy URL, ~w~ browse, ~c~ clone, ~s~ copy SSH, ~g~ copy HTTPS, ~h~ history  |
+| branch | ~u~ copy URL, ~w~ browse, ~c~ compare view, ~n~ new pull request            |
+| issue  | ~o~ open in remoto, ~w~ browse, ~u~ copy URL, ~d~ PR files diff, ~y~ copy ref |
+| dir    | ~u~ copy URL, ~w~ browse, ~h~ history                                     |
+| file   | ~u~ copy URL, ~w~ browse, ~b~ blame, ~p~ permalink, ~r~ raw, ~h~ history        |
+
+Cloning honors ~remoto-clone-url-type~ (~https~ or ~ssh~, default ~https~).
+
+There is also a bridge on Embark's built-in ~url~ target: ~R~ (~remoto-embark-open-in-remoto~) opens a GitHub URL at point as a remoto path instead of in a browser.
 
 ** How does it work
 

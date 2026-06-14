@@ -10,6 +10,8 @@ here without prior chat history. Update this file as work proceeds.
 - Commits on branch:
   - `5a213da` Add optional Embark integration on a forge-agnostic URL layer (Stage 1 + forge core).
   - `c158704` Bind plist-get results in let* for buttercup on Emacs 29 (test fix).
+  - Stages A-D plus owner-level and the generic fallback have since landed on the
+    branch (see `git log main..HEAD`); the lists below are reconciled to that.
 - `main` (`ad0b42c`, PR #29) already has the forge-agnostic URL commands + `remoto-mode`.
 
 Done (Stage 1):
@@ -23,9 +25,14 @@ Done (Stage 1):
   loads with embark absent.
 - `SPEC.md` documents the design ("Forge-agnostic URL Layer" + "Embark Integration").
 
-Not done: a real CI test strategy for embark; minibuffer / embark-collect targets;
-the url-at-point bridge; clone command; richer per-type actions; the remoto-browse
-surface; README docs.
+Done since: CI embark test strategy; minibuffer / embark-collect targets; the
+url-at-point bridge; clone command; per-type actions (repo/branch/dir/file/issue);
+the remoto-browse surface; owner-level target + actions; a generic `remoto`
+fallback keymap; README docs.
+
+Remaining: `embark-export` refinement (a remoto Dired exporter, if feasible -
+`embark-collect` already works) and the follow-up action tier (repo copy-shorthand,
+file save-local / insert-contents / copy-curl, dir copy-repo-relative-path).
 
 ## 2. Goal
 
@@ -118,22 +125,23 @@ action does". Built by `remoto--path-context PATH &optional LINE-START LINE-END`
 
 ## 6. Action catalog (tiered) per type
 
-Done actions are marked. Ship core first.
+Shipped actions are marked; only genuine follow-ups remain TODO.
 
-- repo: copy web URL (done), browse (done), copy SSH (done), copy HTTPS (done),
-  copy history (done); TODO clone, `gh repo clone`, open issues/PRs page, copy
-  `owner/repo` shorthand, insert org/markdown link, fork/star.
-- branch: TODO open at ref, browse, copy URL, compare view
-  (`/compare/REF`), new-PR page (`/pull/new/REF`), copy checkout command, tip SHA.
-- issue/PR: TODO open in `remoto-topic`, browse, copy URL, copy `owner/repo#N`,
-  `gh pr checkout`, open diff (`/pull/N/files`).
-- dir: browse (done), copy tree URL (done), copy history (done); TODO export
-  subdir to a local directory using remoto's own fetcher, sparse-checkout command,
-  copy repo-relative path.
+- owner: browse profile (done), copy URL (done), open repositories tab (done).
+- repo: copy web URL (done), browse (done), clone (done), copy SSH (done), copy
+  HTTPS (done), copy history (done); TODO `gh repo clone`, open issues/PRs page,
+  copy `owner/repo` shorthand, insert org/markdown link, fork/star.
+- branch: browse (done), copy URL (done), compare view (done, `/compare/REF`),
+  new-PR page (done, `/pull/new/REF`); TODO copy checkout command, tip SHA.
+- issue/PR: open in `remoto-topic` (done), browse (done), copy URL (done), copy
+  `owner/repo#N` (done), open diff (done, `/pull/N/files`); TODO head branch.
+  DESCOPED `gh pr checkout`.
+- dir: browse (done), copy tree URL (done), copy history (done); TODO copy
+  repo-relative path. DESCOPED export-subdir-to-local.
 - file: copy URL/blame/permalink/raw/history/browse (done); TODO save local copy,
   insert contents at point, copy `curl` command.
-- url (bridge): TODO `remoto-embark-open-in-remoto` - parse via `remoto--parse-input`
-  and open (dired/find-file the canonical path).
+- url (bridge): `remoto-embark-open-in-remoto` (done) - parse via
+  `remoto--parse-input` and open (dired/find-file the canonical path).
 
 ## 7. Integration surfaces
 
@@ -291,9 +299,18 @@ Stage D - remoto-browse surface, richer actions, polish:
   contention/conflict-resolution questions against a locally cloned repo;
   out of scope for the read-only browse integration.
 - embark-collect - DONE + tested (round-trip proven; see the crux note).
-- Remaining: embark-export refinement only (`embark-exporters-alist` -> a remoto
-  Dired buffer, if feasible) - distinct from collect, which already works.
-- README docs: how to enable (`(require 'remoto-embark)`), keymaps, opt-in note.
+- owner-level target - DONE: root-level `/github:` candidates carry a `remoto-target`
+  (`/github:OWNER`); the metadata reports category `remoto-owner`;
+  `remoto-embark-owner-map` (browse profile / copy URL / repositories tab) dispatches
+  via the owner URL templates (`owner`, `owner-repos`). A generic `remoto` fallback
+  keymap (reusing the repo map) covers any candidate that falls back to the bare
+  `remoto` category.
+- README docs - DONE: an "Embark integration" section (how to enable, opt-in note,
+  target-types + keymaps tables, the `R` url bridge, collect support).
+- Remaining: `embark-export` refinement only (`embark-exporters-alist` -> a remoto
+  Dired buffer, if feasible) - distinct from collect, which already works; plus the
+  §6 follow-up action tier (repo copy-shorthand, file save-local / insert / curl,
+  dir copy-repo-relative-path).
 
 ## 10. File and function pointers
 
@@ -307,16 +324,23 @@ Stage D - remoto-browse surface, richer actions, polish:
 - Mode: `remoto-mode`, `remoto-command-map`, `remoto--maybe-enable-mode`.
 - Completion: `remoto--completion-metadata` (per-level group/affix),
   `remoto--parse-partial-github-path` (`:level`), `remoto--read-file-name-internal-a`
-  (injects `(category . remoto)` at `'metadata`), the `completion-category-overrides`
+  (injects the per-level completion category at `'metadata`), the `completion-category-overrides`
   registration, `remoto--browse-metadata` / `remoto--repo-completion-table`
   (category `remoto-browse`).
 
 `remoto-embark.el`:
 - `remoto--embark-target-at-point`, `remoto--embark-target-finder`.
-- Actions: `remoto-embark-copy-url`, `-browse-url`, `-copy-repo-url`, `-copy-ssh-url`,
-  `-copy-https-url`, `-copy-history-url`, `-copy-blame-url`, `-copy-raw-url`,
-  `-copy-permalink`.
-- Keymaps: `remoto-embark-repo-map`, `-dir-map`, `-file-map`.
+- Actions: repo/dir/file URL (`remoto-embark-copy-url`, `-browse-url`,
+  `-copy-repo-url`, `-copy-ssh-url`, `-copy-https-url`, `-copy-history-url`,
+  `-copy-blame-url`, `-copy-raw-url`, `-copy-permalink`); branch (`-copy-branch-url`,
+  `-browse-branch`, `-browse-compare`, `-new-pr`); issue (`-open-issue`,
+  `-browse-issue`, `-copy-issue-url`, `-browse-pr-diff`, `-copy-issue-ref`); owner
+  (`-browse-owner`, `-copy-owner-url`, `-browse-owner-repos`); clone
+  (`remoto-embark-clone`); url bridge (`remoto-embark-open-in-remoto`).
+- Keymaps: `remoto-embark-owner-map`, `-repo-map`, `-branch-map`, `-dir-map`,
+  `-file-map`, `-issue-map` (+ generic `remoto` fallback -> repo map).
+- Transformers: `remoto--embark-transform` (repo/file), `-transform-ref`
+  (owner/branch/issue), `-browse-transform` (`remoto-browse`).
 - `(with-eval-after-load 'embark ...)` registration block.
 
 `SPEC.md`: "Forge-agnostic URL Layer", "Embark Integration" (keep in sync).

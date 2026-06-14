@@ -97,7 +97,22 @@
   (it "browses the repo web URL"
     (spy-on 'browse-url)
     (remoto-embark-browse-url "/github:o/r:/")
-    (expect 'browse-url :to-have-been-called-with "https://github.com/o/r")))
+    (expect 'browse-url :to-have-been-called-with "https://github.com/o/r"))
+
+  (it "copies the owner page URL"
+    (remoto-embark-copy-owner-url "/github:torvalds")
+    (expect (car kill-ring) :to-equal "https://github.com/torvalds"))
+
+  (it "browses the owner page"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-owner "/github:torvalds")
+    (expect 'browse-url :to-have-been-called-with "https://github.com/torvalds"))
+
+  (it "browses the owner's repositories page"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-owner-repos "/github:torvalds")
+    (expect 'browse-url :to-have-been-called-with
+            "https://github.com/torvalds?tab=repositories")))
 
 ;;; Embark Collect round-trip (no API/cache needed)
 
@@ -148,7 +163,17 @@ with that property intact and no live minibuffer."
            (rt (and extracted (get-text-property 0 'remoto-target extracted)))
            (xform (remoto--embark-transform-ref (car target) extracted)))
       (expect rt :to-equal "/github:o/r#42")
-      (expect xform :to-equal '(remoto-issue . "/github:o/r#42")))))
+      (expect xform :to-equal '(remoto-issue . "/github:o/r#42"))))
+
+  (it "resolves an owner candidate from a collect buffer"
+    (let* ((cand (propertize "torvalds/" 'remoto-target "/github:torvalds"))
+           (target (remoto-embark-tests--collect-target 'remoto-owner cand))
+           (extracted (nth 1 target))
+           (rt (and extracted (get-text-property 0 'remoto-target extracted)))
+           (xform (remoto--embark-transform-ref (car target) extracted)))
+      (expect (car target) :to-be 'remoto-owner)
+      (expect rt :to-equal "/github:torvalds")
+      (expect xform :to-equal '(remoto-owner . "/github:torvalds")))))
 
 (provide 'remoto-embark-tests)
 

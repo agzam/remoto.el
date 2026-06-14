@@ -740,6 +740,13 @@ Levels: `root', `owner', `repo' (branches/tags), `files-default', `issues'."
 
 (defvar remoto-min-search-chars) ; forward-decl for byte-compiler
 
+(defun remoto--owner-candidate (owner)
+  "Return a /github: root completion candidate for account OWNER.
+Preserves OWNER's text properties (used for affixation) and attaches a
+`remoto-target' of the canonical owner path so Embark can act on it."
+  (propertize (concat owner "/")
+              'remoto-target (concat "/github:" (substring-no-properties owner))))
+
 (defun remoto--handle-file-name-all-completions (file directory)
   "Return completions for FILE in remote DIRECTORY.
 Handles multiple levels: user search at /github:, repo listing at
@@ -757,7 +764,7 @@ fetches populate the cache in the background."
              (when-let* ((user remoto--authenticated-user))
                (let* ((orgs (remoto--fetch-user-orgs user))
                       (all (cons (propertize user 'remoto-acct-type "User") orgs)))
-                 (mapcar (lambda (u) (concat u "/")) all)))
+                 (mapcar #'remoto--owner-candidate all)))
            (when-let* ((result (remoto--search-users file)))
              (let ((filtered (seq-filter (lambda (u) (string-prefix-p file u))
                                          result)))
@@ -765,7 +772,7 @@ fetches populate the cache in the background."
                ;; warm by the time the user types "/"
                (when-let* ((top (car filtered)))
                  (remoto--prefetch-owner-repos top))
-               (mapcar (lambda (u) (concat u "/")) filtered)))))
+               (mapcar #'remoto--owner-candidate filtered)))))
         ('owner
          ;; Repo completion at /github:OWNER/
          ;; Try cached/async results first; on cold-cache nil, fall
@@ -1472,14 +1479,18 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
      (new-pr  . "https://github.com/%o/%r/pull/new/%R")
      (issue   . "https://github.com/%o/%r/issues/%N")
      (pr-diff . "https://github.com/%o/%r/pull/%N/files")
+     (owner       . "https://github.com/%o")
+     (owner-repos . "https://github.com/%o?tab=repositories")
      (line    . "#L%s")
      (region  . "#L%s-L%e")))
   "Per-forge web-URL templates, keyed by forge symbol.
 
 Each value is an alist of (KIND . TEMPLATE).  Path-level kinds: `blob',
 `tree', `blame', `history', `raw'.  Repository-level kinds: `repo' (web
-root), `ssh' and `https' (clone URLs).  Plus the line-fragment builders
-`line' and `region'.  Templates are expanded with `format-spec' using:
+root), `ssh' and `https' (clone URLs).  Account-level kinds: `owner' for
+the profile page and `owner-repos' for the repositories tab.  Plus the
+line-fragment builders `line' and `region'.  Templates are expanded with
+`format-spec' using:
 
   %o  repository owner
   %r  repository name
@@ -1533,6 +1544,15 @@ page uses `pr-diff'."
          (template (or (alist-get kind (alist-get forge remoto-forge-url-templates))
                        (user-error "Remoto: forge `%s' has no `%s' URL" forge kind))))
     (format-spec template `((?o . ,owner) (?r . ,repo) (?N . ,number)))))
+
+(defun remoto--forge-owner-url (forge owner &optional kind)
+  "Build a web URL for the account/organization OWNER on FORGE.
+KIND selects the %o-based template (default `owner'); the repositories
+tab uses `owner-repos'."
+  (let* ((kind (or kind 'owner))
+         (template (or (alist-get kind (alist-get forge remoto-forge-url-templates))
+                       (user-error "Remoto: forge `%s' has no `%s' URL" forge kind))))
+    (format-spec template `((?o . ,owner)))))
 
 (defun remoto--resolve-commit-sha (owner repo ref)
   "Resolve REF in OWNER/REPO to a commit SHA via the forge API.
@@ -2873,6 +2893,8 @@ Matches the canonical /github: prefix and its /gh: shorthand alias.")
              '(remoto-branch (styles partial-completion basic)))
 (add-to-list 'completion-category-overrides
              '(remoto-issue (styles partial-completion basic)))
+(add-to-list 'completion-category-overrides
+             '(remoto-owner (styles partial-completion basic)))
 
 ;;;; Minor mode
 
@@ -3039,7 +3061,8 @@ Provides group-function and affixation-function for @ and # modes."
                                                  (t acct-type))))
                                    (list c "" suffix)))
                                candidates)))))
-      `((affixation-function . ,affix-fn))))))
+      `((category . remoto-owner)
+        (affixation-function . ,affix-fn))))))
 
 (defun remoto--read-file-name-internal-a (orig string pred action)
   "Fix completion for /github: paths inside `read-file-name'.

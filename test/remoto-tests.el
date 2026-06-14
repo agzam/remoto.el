@@ -3792,7 +3792,47 @@ Returns the full path after completion, or INPUT if no completion."
       (spy-on 'browse-url)
       (remoto-embark-browse-url "/github:testowner/testrepo@main:/src")
       (expect 'browse-url :to-have-been-called-with
-              "https://github.com/testowner/testrepo/tree/main/src"))))
+              "https://github.com/testowner/testrepo/tree/main/src")))
+
+  (it "copies the owner page URL (no network)"
+    (remoto-embark-copy-owner-url "/github:torvalds")
+    (expect (car kill-ring) :to-equal "https://github.com/torvalds"))
+
+  (it "browses the owner page"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-owner "/github:torvalds")
+    (expect 'browse-url :to-have-been-called-with "https://github.com/torvalds"))
+
+  (it "browses the owner's repositories page"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-owner-repos "/github:torvalds")
+    (expect 'browse-url :to-have-been-called-with
+            "https://github.com/torvalds?tab=repositories")))
+
+(describe "remoto owner target plumbing"
+  (it "builds the owner profile and repositories URLs"
+    (expect (remoto--forge-owner-url 'github "agzam")
+            :to-equal "https://github.com/agzam")
+    (expect (remoto--forge-owner-url 'github "agzam" 'owner-repos)
+            :to-equal "https://github.com/agzam?tab=repositories"))
+
+  (it "makes a root candidate carrying the canonical owner path"
+    (let ((cand (remoto--owner-candidate
+                 (propertize "agzam" 'remoto-acct-type "User"))))
+      (expect (get-text-property 0 'remoto-target cand)
+              :to-equal "/github:agzam")
+      (expect (get-text-property 0 'remoto-acct-type cand)
+              :to-equal "User")))
+
+  (it "tags the /github: root completion with the remoto-owner category"
+    (expect (alist-get 'category (remoto--completion-metadata "/github:"))
+            :to-be 'remoto-owner))
+
+  (it "parses owner parts, tolerating a trailing slash"
+    (expect (remoto--embark-owner-parts "/github:agzam")
+            :to-equal '(github "agzam"))
+    (expect (remoto--embark-owner-parts "/github:agzam/")
+            :to-equal '(github "agzam"))))
 
 (describe "remoto-embark-open-in-remoto"
   (it "opens a blob URL at its canonical remoto path"
@@ -4111,7 +4151,7 @@ Returns the full path after completion, or INPUT if no completion."
                (when (and (consp all) (last all)) (setcdr (last all) nil))
                (and (car all) (get-text-property 0 'remoto-target (car all)))))))
       (dolist (cat '(remoto-repo remoto-file remoto-branch remoto-issue
-                                 remoto-browse))
+                                 remoto-owner remoto-browse))
         (let ((rt (funcall survives cat)))
           (expect rt :to-equal "/github:x/y:/"))))))
 

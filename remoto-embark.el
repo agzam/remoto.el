@@ -31,6 +31,7 @@
 (declare-function remoto--canonical-path "remoto" (parsed))
 (declare-function remoto--forge-type "remoto" (path))
 (declare-function remoto--forge-issue-url "remoto" (forge owner repo number))
+(declare-function remoto--forge-owner-url "remoto" (forge owner &optional kind))
 (declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
 (defvar dired-directory)
 
@@ -247,6 +248,33 @@ For an issue the forge redirects to the issue page."
   (browse-url (apply #'remoto--forge-issue-url
                      (append (remoto--embark-issue-parts target) '(pr-diff)))))
 
+(defun remoto--embark-owner-parts (target)
+  "Return (FORGE OWNER) for an account TARGET like /github:OWNER."
+  (when (string-match (rx "/" (+ (not (any ":"))) ":"
+                          (group (+ (not (any "/")))) (? "/") eos)
+                      target)
+    ;; Bind the owner before `remoto--forge-type', whose own `string-match'
+    ;; would otherwise clobber the match data.
+    (let ((owner (match-string 1 target)))
+      (list (remoto--forge-type target) owner))))
+
+(defun remoto-embark-browse-owner (target)
+  "Open the account/organization page for the remoto owner TARGET."
+  (interactive "sRemoto owner: ")
+  (browse-url (apply #'remoto--forge-owner-url (remoto--embark-owner-parts target))))
+
+(defun remoto-embark-copy-owner-url (target)
+  "Copy the account/organization page URL for the remoto owner TARGET."
+  (interactive "sRemoto owner: ")
+  (remoto--kill-url (apply #'remoto--forge-owner-url
+                           (remoto--embark-owner-parts target))))
+
+(defun remoto-embark-browse-owner-repos (target)
+  "Open the repositories page for the remoto owner TARGET in a browser."
+  (interactive "sRemoto owner: ")
+  (browse-url (apply #'remoto--forge-owner-url
+                     (append (remoto--embark-owner-parts target) '(owner-repos)))))
+
 (defun remoto--clone (url dest)
   "Clone URL into DEST asynchronously, showing progress in a buffer."
   (let ((buffer (get-buffer-create "*remoto-clone*")))
@@ -308,6 +336,12 @@ The clone URL kind is governed by `remoto-clone-url-type'."
   "d" #'remoto-embark-browse-pr-diff
   "y" #'remoto-embark-copy-issue-ref)
 
+(defvar-keymap remoto-embark-owner-map
+  :doc "Embark actions for remoto account/organization targets."
+  "w" #'remoto-embark-browse-owner
+  "u" #'remoto-embark-copy-owner-url
+  "r" #'remoto-embark-browse-owner-repos)
+
 ;;;; Registration (only once Embark is loaded)
 
 (with-eval-after-load 'embark
@@ -316,11 +350,18 @@ The clone URL kind is governed by `remoto-clone-url-type'."
   (add-to-list 'embark-keymap-alist '(remoto-file remoto-embark-file-map))
   (add-to-list 'embark-keymap-alist '(remoto-branch remoto-embark-branch-map))
   (add-to-list 'embark-keymap-alist '(remoto-issue remoto-embark-issue-map))
+  (add-to-list 'embark-keymap-alist '(remoto-owner remoto-embark-owner-map))
+  ;; Fallback for the generic `remoto' completion category: reuse the repo
+  ;; actions.  Best-effort - only candidates carrying a parseable
+  ;; `remoto-target' resolve; others fall back to `embark-general-map'.
+  (add-to-list 'embark-keymap-alist '(remoto remoto-embark-repo-map))
   (add-to-list 'embark-target-finders #'remoto--embark-target-finder)
   (add-to-list 'embark-transformer-alist '(remoto-repo . remoto--embark-transform))
   (add-to-list 'embark-transformer-alist '(remoto-file . remoto--embark-transform))
   (add-to-list 'embark-transformer-alist '(remoto-branch . remoto--embark-transform-ref))
   (add-to-list 'embark-transformer-alist '(remoto-issue . remoto--embark-transform-ref))
+  (add-to-list 'embark-transformer-alist '(remoto-owner . remoto--embark-transform-ref))
+  (add-to-list 'embark-transformer-alist '(remoto . remoto--embark-transform))
   (add-to-list 'embark-transformer-alist '(remoto-browse . remoto--embark-browse-transform))
   (define-key embark-url-map "R" #'remoto-embark-open-in-remoto))
 

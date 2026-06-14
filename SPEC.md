@@ -379,7 +379,7 @@ Faces: `remoto-topic-title`, `remoto-topic-state-open`, `remoto-topic-state-clos
 
 The web-URL features sit on a small forge-agnostic core, so adding a forge (GitLab, Codeberg, ...) is a data change, not new command code. Two pieces:
 
-1. `remoto-forge-url-templates` - an alist keyed by forge symbol. Each value maps a URL KIND to a `format-spec` template. Path-level kinds: `blob`, `tree`, `blame`, `history`, `raw`. Repository-level kinds: `repo` (web root), `ssh` and `https` (clone URLs). Plus the `line`/`region` fragment builders. Specs: `%o` owner, `%r` repo, `%R` ref, `%p` repo-relative path, `%L` line fragment.
+1. `remoto-forge-url-templates` - an alist keyed by forge symbol. Each value maps a URL KIND to a `format-spec` template. Path-level kinds: `blob`, `tree`, `blame`, `history`, `raw`. Repository-level kinds: `repo` (web root), `ssh` and `https` (clone URLs). Account-level kinds: `owner` (profile page), `owner-repos` (repositories tab). Issue/PR kinds: `issue`, `pr-diff`; branch kinds: `compare`, `new-pr`. Plus the `line`/`region` fragment builders. Specs: `%o` owner, `%r` repo, `%R` ref, `%p` repo-relative path, `%N` issue/PR number, `%L` line fragment.
 
 2. A context plist - the currency every command and Embark action consumes, built by `remoto--path-context PATH &optional LINE-START LINE-END`:
 
@@ -413,29 +413,33 @@ Optional, soft integration. Loaded only when Embark is present; remoto works ide
 `remoto-owner`, `remoto-repo`, `remoto-branch`, `remoto-issue`, `remoto-dir`, `remoto-file`, plus Embark's built-in `url` for forge web links at point. Two sources produce them:
 
 - Buffers / Dired: a target finder (`remoto--embark-target-finder`, via `remoto--embark-target-at-point`) parses the remoto path's shape (root -> repo, tree -> dir, blob -> file) and returns `(TYPE FULLPATH)`.
-- Minibuffer completion: the completion category. remoto already detects the level (owner/repo/branch/issue/file) to fetch the right candidates, so the metadata can report a per-level category that Embark maps to a keymap (stage 2).
+- Minibuffer completion: the completion category. remoto detects the level (owner/repo/branch/issue/file) and reports a per-level category (`remoto-owner`, `remoto-repo`, `remoto-branch`, `remoto-issue`, `remoto-file`, plus the single `remoto-browse` category used by `remoto-browse`) that Embark maps to a keymap.
 
 Embark actions always receive a full canonical remoto path; a transformer expands minibuffer candidates (e.g. `remoto.el/`) to the full path before the action runs.
 
 ### Action catalog (tiered)
 
-Core actions ship first; the rest are documented follow-ups.
+Shipped actions are marked; the rest are documented follow-ups.
 
-- repo: copy web URL, browse, copy SSH URL, copy HTTPS URL, copy history URL. Later: clone, `gh repo clone`, open issues/PRs, fork/star, package recipe.
-- branch: open at ref, browse, copy URL. Later: compare view, new-PR page, copy checkout command, tip SHA.
-- issue/PR: open in remoto-topic, browse, copy URL, copy `owner/repo#N`. Later: `gh pr checkout`, diff, head branch.
-- dir: browse, copy tree URL, copy history URL. Later: export the subdir to a local directory using remoto's own fetcher, sparse-checkout command.
-- file: copy URL, browse, blame, permalink, raw, history. Later: save a local copy, insert contents, copy `curl` command.
+- owner: browse profile, copy URL, open repositories tab. (Shipped.)
+- repo: copy web URL, browse, clone, copy SSH URL, copy HTTPS URL, copy history URL. (Shipped.) Later: `gh repo clone`, open issues/PRs, fork/star, copy `owner/repo` shorthand, package recipe.
+- branch: browse, copy URL, compare view, new-PR page. (Shipped.) Later: copy checkout command, tip SHA.
+- issue/PR: open in remoto-topic, browse, copy URL, PR files-diff page, copy `owner/repo#N`. (Shipped.) Later: head branch.
+- dir: copy URL, browse, copy history URL. (Shipped.) Later: copy repo-relative path.
+- file: copy URL, browse, blame, permalink, raw, history. (Shipped.) Later: save a local copy, insert contents, copy `curl` command.
+
+Descoped (read-only model mismatch): `gh pr checkout` and export-subdir-to-local both bridge into a local working copy, raising contention against a separately cloned repo - out of scope for a read-only browse integration.
 
 ### Keymaps
 
-`remoto-embark-repo-map`, `remoto-embark-dir-map`, `remoto-embark-file-map` (defined with `defvar-keymap`), registered in `embark-keymap-alist`. Action commands take the target path and reuse the forge-agnostic context layer, so they are forge-agnostic too.
+`remoto-embark-owner-map`, `remoto-embark-repo-map`, `remoto-embark-branch-map`, `remoto-embark-dir-map`, `remoto-embark-file-map`, `remoto-embark-issue-map` (defined with `defvar-keymap`), registered in `embark-keymap-alist` by target type, plus a generic `remoto` fallback entry mapped to the repo keymap. Action commands take the target path and reuse the forge-agnostic context layer (owner and issue actions parse the path and use a dedicated URL builder, since owner-only paths do not resolve through `remoto--path-context`), so they are forge-agnostic too. A per-category transformer expands a bare minibuffer/collect candidate to its full path before the action runs: `remoto-owner`/`remoto-branch`/`remoto-issue` keep their type, while `remoto-repo`/`remoto-file` re-derive it from the resolved path. The built-in `url` target also gains `R` (`remoto-embark-open-in-remoto`).
 
 ### Implementation status
 
-- Done: forge-agnostic core (templates including `repo`/`ssh`/`https`, `remoto--path-context` with `:type`, `remoto--context-web-url`), the URL commands, `remoto-mode`, and Stage 1 of `remoto-embark.el` (buffer/Dired target finder `remoto--embark-target-finder`, `remoto-embark-repo-map`/`-dir-map`/`-file-map`, copy/browse/clone-URL actions, opt-in registration).
-- Stage 2 (next): per-level minibuffer completion categories, so `C-x C-f /github:OWNER` candidates become `remoto-repo` targets; `embark-collect` / `embark-export`; candidate-to-path transformer.
-- Stage 3 (next): clone and other repo actions, issue/branch actions, export-subdir-to-local, and the `url`-at-point "open in remoto" bridge.
+- Done: forge-agnostic core (templates including `repo`/`ssh`/`https`/`owner`/`owner-repos`/`issue`/`pr-diff`/`compare`/`new-pr`, `remoto--path-context` with `:type`, `remoto--context-web-url`), the URL commands, `remoto-mode`.
+- Done: `remoto-embark.el` end to end - buffer/Dired target finder; per-level minibuffer completion categories (`remoto-owner`/`-repo`/`-branch`/`-issue`/`-file`) plus the `remoto-browse` category; candidate-to-path transformers; the `embark-collect` round-trip (verified against real Embark); owner/repo/branch/dir/file/issue keymaps and a generic `remoto` fallback; the `url`-at-point "open in remoto" bridge; clone governed by `remoto-clone-url-type`. CI exercises the integration against real Embark (`make test-embark`); the runtime stays embark-free.
+- Remaining: `embark-export` refinement (a remoto Dired exporter via `embark-exporters-alist`, if feasible - `embark-collect` already works); the follow-up action tier (repo copy-shorthand, file save-local / insert-contents / copy-curl, dir copy-repo-relative-path).
+- Descoped: `gh pr checkout` and export-subdir-to-local (read-only model mismatch).
 
 ## Unloading
 
@@ -526,5 +530,7 @@ remoto.el/
   Makefile           ;; test runner
   LICENSE
   test/
-    remoto-tests.el  ;; buttercup tests
+    remoto-tests.el             ;; buttercup tests (embark-free path)
+    remoto-embark-tests.el      ;; Embark integration tests (real embark; make test-embark)
+    remoto-integration-tests.el ;; end-to-end integration tests
 ```
