@@ -98,11 +98,28 @@ Keybindings in the display buffer: ~b~ (open in browser), ~g~ (refresh).
 
 *** Commands
 
-| Command                  | Description                                            |
-|--------------------------+--------------------------------------------------------|
+| Command                | Description                                            |
+|------------------------+--------------------------------------------------------|
 | ~remoto-browse~          | Prompt for a repo, open dired at root                  |
 | ~remoto-refresh~         | Clear tree cache for current repo, re-fetch            |
 | ~remoto-copy-github-url~ | Copy ~github.com~ URL for current file/line to kill ring |
+
+** Embark integration
+
+Optional [[https://github.com/oantolin/embark][Embark]] integration lives in ~remoto-embark.el~. Embark is not a hard dependency; when it is installed the integration activates automatically, with nothing to configure. With it active, ~embark-act~ offers forge-agnostic actions on remoto targets in remoto file buffers, ~dired~, and ~/github:~ minibuffer completion (including ~embark-collect~).
+
+Each target type has its own keymap of actions that reuse remoto's forge-agnostic URL layer (copy or browse the web URL, clone, blame, permalink, open an issue/PR, and so on):
+
+| Target        | Example                               | Keymap                   |
+|---------------+---------------------------------------+--------------------------|
+| ~remoto-owner~  | ~/github:torvalds~                      | ~remoto-embark-owner-map~  |
+| ~remoto-repo~   | ~/github:torvalds/linux:/~              | ~remoto-embark-repo-map~   |
+| ~remoto-branch~ | ~/github:torvalds/linux@master:/~       | ~remoto-embark-branch-map~ |
+| ~remoto-issue~  | ~/github:torvalds/linux#42~             | ~remoto-embark-issue-map~  |
+| ~remoto-dir~    | ~/github:torvalds/linux@master:/fs~     | ~remoto-embark-dir-map~    |
+| ~remoto-file~   | ~/github:torvalds/linux@master:/README~ | ~remoto-embark-file-map~   |
+
+Run ~embark-act~ on a target to see its actions and keys. Cloning honors ~remoto-clone-url-type~, and Embark's built-in ~url~ target gains ~R~ to open a forge URL at point as a remoto path.
 
 ** How does it work
 

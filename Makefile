@@ -24,7 +24,8 @@ $(ELPA_DIR):
 	$(EMACS_BATCH) \
 	--eval "(package-refresh-contents)" \
 	--eval "(package-install 'ghub)" \
-	--eval "(package-install 'buttercup)"
+	--eval "(package-install 'buttercup)" \
+	--eval "(package-install 'embark)"
 
 deps: $(ELPA_DIR)
 
@@ -34,13 +35,19 @@ test: $(ELPA_DIR)
 	-l test/remoto-tests.el \
 	--funcall buttercup-run
 
+test-embark: $(ELPA_DIR)
+	$(EMACS_BATCH) --directory . \
+	--eval "(setq buttercup-stack-frame-style 'omit)" \
+	-l test/remoto-embark-tests.el \
+	--funcall buttercup-run
+
 test-integration: $(ELPA_DIR)
 	$(EMACS_BATCH) --directory . \
 	--eval "(setq buttercup-stack-frame-style 'omit)" \
 	-l test/remoto-integration-tests.el \
 	--funcall buttercup-run
 
-test-all: test test-integration
+test-all: test test-embark test-integration
 
 check-autoloads:
 	@echo "Generating and loading autoloads..."
@@ -55,7 +62,8 @@ check-compile: $(ELPA_DIR) check-autoloads
 	$(EMACS_BATCH) \
 	--eval "(setq byte-compile-error-on-warn t)" \
 	--eval "(add-to-list 'load-path \".\")" \
-	--eval "(byte-compile-file \"remoto.el\")"
+	--eval "(byte-compile-file \"remoto.el\")" \
+	--eval "(byte-compile-file \"remoto-embark.el\")"
 
 compile: $(ELPA_DIR)
 	@echo "Byte-compiling package files..."

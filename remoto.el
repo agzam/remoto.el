@@ -740,6 +740,13 @@ Levels: `root', `owner', `repo' (branches/tags), `files-default', `issues'."
 
 (defvar remoto-min-search-chars) ; forward-decl for byte-compiler
 
+(defun remoto--owner-candidate (owner)
+  "Return a /github: root completion candidate for account OWNER.
+Preserves OWNER's text properties (used for affixation) and attaches a
+`remoto-target' of the canonical owner path so Embark can act on it."
+  (propertize (concat owner "/")
+              'remoto-target (concat "/github:" (substring-no-properties owner))))
+
 (defun remoto--handle-file-name-all-completions (file directory)
   "Return completions for FILE in remote DIRECTORY.
 Handles multiple levels: user search at /github:, repo listing at
@@ -757,7 +764,7 @@ fetches populate the cache in the background."
              (when-let* ((user remoto--authenticated-user))
                (let* ((orgs (remoto--fetch-user-orgs user))
                       (all (cons (propertize user 'remoto-acct-type "User") orgs)))
-                 (mapcar (lambda (u) (concat u "/")) all)))
+                 (mapcar #'remoto--owner-candidate all)))
            (when-let* ((result (remoto--search-users file)))
              (let ((filtered (seq-filter (lambda (u) (string-prefix-p file u))
                                          result)))
@@ -765,7 +772,7 @@ fetches populate the cache in the background."
                ;; warm by the time the user types "/"
                (when-let* ((top (car filtered)))
                  (remoto--prefetch-owner-repos top))
-               (mapcar (lambda (u) (concat u "/")) filtered)))))
+               (mapcar #'remoto--owner-candidate filtered)))))
         ('owner
          ;; Repo completion at /github:OWNER/
          ;; Try cached/async results first; on cold-cache nil, fall
@@ -783,7 +790,14 @@ fetches populate the cache in the background."
                (when (consp sync)
                  (setq repos sync))))
            (mapcar (lambda (r)
-                     (if (string-suffix-p "/" r) r (concat r "/")))
+                     (let* ((name (if (string-suffix-p "/" r) (substring r 0 -1) r))
+                            (cand (concat name "/")))
+                       ;; Carry the full canonical path so Embark actions can
+                       ;; resolve a bare candidate (see `remoto--embark-transform').
+                       (put-text-property 0 (length cand) 'remoto-target
+                                          (format "/github:%s/%s:/" owner name)
+                                          cand)
+                       cand))
                    repos)))
         ('repo
          ;; Branch + tag completion at /github:OWNER/REPO@
@@ -800,12 +814,18 @@ fetches populate the cache in the background."
                (let ((branch-set (when (listp branches)
                                    (mapcar (lambda (b)
                                              (propertize (concat b ":")
-                                                        'remoto-ref-type "branch"))
+                                                        'remoto-ref-type "branch"
+                                                        'remoto-target
+                                                        (format "/github:%s/%s@%s:/"
+                                                                owner repo b)))
                                            branches)))
                      (tag-set (when (listp tags)
                                 (mapcar (lambda (tg)
                                           (propertize (concat tg ":")
-                                                     'remoto-ref-type "tag"))
+                                                     'remoto-ref-type "tag"
+                                                     'remoto-target
+                                                     (format "/github:%s/%s@%s:/"
+                                                             owner repo tg)))
                                         tags))))
                  (thread-last (append branch-set tag-set)
                    (seq-filter (lambda (r)
@@ -848,7 +868,12 @@ fetches populate the cache in the background."
                                   (seq-filter (lambda (name)
                                                (string-search file name))
                                              names)))))
-               filtered))))
+               (when filtered
+                 (mapcar (lambda (name)
+                           (propertize name 'remoto-target
+                                       (format "/github:%s/%s@%s:/%s%s"
+                                               owner repo branch subpath name)))
+                         filtered))))))
         ('issues
          ;; Issue/PR completion at /github:OWNER/REPO#
          (let* ((owner (plist-get partial :owner))
@@ -885,7 +910,10 @@ fetches populate the cache in the background."
                                  (propertize num
                                              'remoto-topic-pr is-pr
                                              'remoto-topic-title title
-                                             'remoto-topic-state state)))
+                                             'remoto-topic-state state
+                                             'remoto-target
+                                             (format "/github:%s/%s#%s"
+                                                     owner repo num))))
                              issues))
                     (filtered
                      (if (or (string-empty-p file)
@@ -921,10 +949,13 @@ fetches populate the cache in the background."
                         (remoto--fetch-file-commits
                          owner repo ref dir-path names))))
         (mapcar (lambda (name)
-                  (let ((msg (alist-get name commits nil nil #'equal)))
-                    (if msg
-                        (propertize name 'remoto-file-commit msg)
-                      name)))
+                  (let ((cand (copy-sequence name))
+                        (msg (alist-get name commits nil nil #'equal)))
+                    (when msg
+                      (put-text-property 0 (length cand) 'remoto-file-commit msg cand))
+                    (put-text-property 0 (length cand) 'remoto-target
+                                       (concat directory name) cand)
+                    cand))
                 names)))))
 
 (defun remoto--handle-file-name-completion (file directory &optional predicate)
@@ -1441,13 +1472,25 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
      (blame   . "https://github.com/%o/%r/blame/%R/%p%L")
      (history . "https://github.com/%o/%r/commits/%R/%p")
      (raw     . "https://raw.githubusercontent.com/%o/%r/%R/%p")
+     (repo    . "https://github.com/%o/%r")
+     (ssh     . "git@github.com:%o/%r.git")
+     (https   . "https://github.com/%o/%r.git")
+     (compare . "https://github.com/%o/%r/compare/%R")
+     (new-pr  . "https://github.com/%o/%r/pull/new/%R")
+     (issue   . "https://github.com/%o/%r/issues/%N")
+     (pr-diff . "https://github.com/%o/%r/pull/%N/files")
+     (owner       . "https://github.com/%o")
+     (owner-repos . "https://github.com/%o?tab=repositories")
      (line    . "#L%s")
      (region  . "#L%s-L%e")))
   "Per-forge web-URL templates, keyed by forge symbol.
 
-Each value is an alist of (KIND . TEMPLATE).  KIND is one of `blob',
-`tree', `blame', `history', `raw', plus the line-fragment builders
-`line' and `region'.  Templates are expanded with `format-spec' using:
+Each value is an alist of (KIND . TEMPLATE).  Path-level kinds: `blob',
+`tree', `blame', `history', `raw'.  Repository-level kinds: `repo' (web
+root), `ssh' and `https' (clone URLs).  Account-level kinds: `owner' for
+the profile page and `owner-repos' for the repositories tab.  Plus the
+line-fragment builders `line' and `region'.  Templates are expanded with
+`format-spec' using:
 
   %o  repository owner
   %r  repository name
@@ -1470,9 +1513,11 @@ Derived from the path prefix, e.g. \"/github:...\" -> `github'."
 
 (defun remoto--forge-url (forge kind owner repo ref path &optional line-start line-end)
   "Build a FORGE web URL of KIND for OWNER/REPO at REF and PATH.
-KIND is one of `blob', `tree', `blame', `history', `raw'.  LINE-START
-and LINE-END add a line or line-range fragment when KIND's template
-includes one."
+KIND is one of `blob', `tree', `blame', `history', `raw'.  A nil REF
+defaults to \"HEAD\" (the forge resolves it to the default branch), so a
+repo-level target with no ref still produces a valid URL.  LINE-START and
+LINE-END add a line or line-range fragment when KIND's template includes
+one."
   (let* ((templates (or (alist-get forge remoto-forge-url-templates)
                         (user-error "Remoto: no URL templates for forge `%s'"
                                     forge)))
@@ -1489,9 +1534,27 @@ includes one."
                 (t ""))))
     (format-spec template `((?o . ,owner)
                             (?r . ,repo)
-                            (?R . ,ref)
+                            (?R . ,(or ref "HEAD"))
                             (?p . ,path)
                             (?L . ,line)))))
+
+(defun remoto--forge-issue-url (forge owner repo number &optional kind)
+  "Build a web URL for issue/PR NUMBER in OWNER/REPO on FORGE.
+KIND selects the %N-based template (default `issue'); the PR files-diff
+page uses `pr-diff'."
+  (let* ((kind (or kind 'issue))
+         (template (or (alist-get kind (alist-get forge remoto-forge-url-templates))
+                       (user-error "Remoto: forge `%s' has no `%s' URL" forge kind))))
+    (format-spec template `((?o . ,owner) (?r . ,repo) (?N . ,number)))))
+
+(defun remoto--forge-owner-url (forge owner &optional kind)
+  "Build a web URL for the account/organization OWNER on FORGE.
+KIND selects the %o-based template (default `owner'); the repositories
+tab uses `owner-repos'."
+  (let* ((kind (or kind 'owner))
+         (template (or (alist-get kind (alist-get forge remoto-forge-url-templates))
+                       (user-error "Remoto: forge `%s' has no `%s' URL" forge kind))))
+    (format-spec template `((?o . ,owner)))))
 
 (defun remoto--resolve-commit-sha (owner repo ref)
   "Resolve REF in OWNER/REPO to a commit SHA via the forge API.
@@ -1502,14 +1565,45 @@ Used for permalinks so the link survives the ref moving on."
         (user-error "Remoto: could not resolve commit SHA for %s/%s@%s"
                     owner repo ref))))
 
+(defun remoto--path-context (path &optional line-start line-end)
+  "Build a forge-agnostic context plist for the remoto PATH string.
+Return nil when PATH is not a remoto path.
+
+Plist keys: :forge :owner :repo :ref :path :kind :type :line-start
+:line-end.  :kind is `tree' or `blob'.  :type is the Embark target type,
+one of `remoto-repo', `remoto-dir', `remoto-file'.  A repository root is
+classified as `remoto-repo' without resolving the ref or fetching the
+tree (so it works offline and on bare `owner/repo' targets).  LINE-START
+and LINE-END are retained only for `remoto-file' targets."
+  (when-let* ((parsed (remoto--parse-path path)))
+    (if (member (remoto-path-path parsed) '("" "/"))
+        (list :forge (remoto--forge-type path)
+              :owner (remoto-path-owner parsed)
+              :repo (remoto-path-repo parsed)
+              :ref (remoto-path-ref parsed)
+              :path "" :kind 'tree :type 'remoto-repo
+              :line-start nil :line-end nil)
+      (let* ((resolved (remoto--resolve-ref parsed))
+             (entry (remoto--tree-entry resolved))
+             (filep (not (and entry (equal "tree" (alist-get 'type entry))))))
+        (list :forge (remoto--forge-type path)
+              :owner (remoto-path-owner resolved)
+              :repo (remoto-path-repo resolved)
+              :ref (remoto-path-ref resolved)
+              :path (remoto--relative-path (remoto-path-path resolved))
+              :kind (if filep 'blob 'tree)
+              :type (if filep 'remoto-file 'remoto-dir)
+              :line-start (and filep line-start)
+              :line-end (and filep line-end))))))
+
 (defun remoto--buffer-file-context ()
   "Return a context plist describing the current buffer's remoto target.
 
-Keys: :forge :owner :repo :ref :path :kind :line-start :line-end.
-:kind is `blob' for a file or `tree' for a directory; the line keys are
-nil in Dired and for directories.  Works in file buffers (line/region at
-point) and in Dired (entry at point, falling back to the directory).
-Signals a `user-error' when the current buffer is not a remoto buffer."
+Works in file buffers (line/region at point) and in Dired (entry at
+point, falling back to the directory).  Resolves the ref so the context
+carries a concrete branch, then delegates classification to
+`remoto--path-context'.  Signals a `user-error' when the current buffer
+is not a remoto buffer."
   (let* ((dired (derived-mode-p 'dired-mode))
          (file (or buffer-file-name
                    (and dired (dired-get-filename nil t))
@@ -1520,24 +1614,13 @@ Signals a `user-error' when the current buffer is not a remoto buffer."
          (parsed (and file (remoto--parse-path file))))
     (unless parsed
       (user-error "Remoto: not in a remoto buffer"))
-    (let* ((resolved (remoto--resolve-ref parsed))
-           (entry (remoto--tree-entry resolved))
-           (kind (if (and entry (equal "tree" (alist-get 'type entry)))
-                     'tree 'blob))
-           (lines (and (eq kind 'blob) (not dired)))
-           (line-start (and lines
+    (let* ((canonical (remoto--canonical-path (remoto--resolve-ref parsed)))
+           (region (and (not dired) (use-region-p)))
+           (line-start (and (not dired)
                             (line-number-at-pos
-                             (if (use-region-p) (region-beginning) (point)))))
-           (line-end (and lines (use-region-p)
-                          (line-number-at-pos (region-end)))))
-      (list :forge (remoto--forge-type file)
-            :owner (remoto-path-owner resolved)
-            :repo (remoto-path-repo resolved)
-            :ref (remoto-path-ref resolved)
-            :path (remoto--relative-path (remoto-path-path resolved))
-            :kind kind
-            :line-start line-start
-            :line-end line-end))))
+                             (if region (region-beginning) (point)))))
+           (line-end (and region (line-number-at-pos (region-end)))))
+      (remoto--path-context canonical line-start line-end))))
 
 (defun remoto--context-url (ctx kind &optional ref)
   "Build a URL of KIND from context plist CTX.
@@ -1550,6 +1633,15 @@ Optional REF overrides the ref in CTX (used for permalinks)."
                      (plist-get ctx :path)
                      (plist-get ctx :line-start)
                      (plist-get ctx :line-end)))
+
+(defun remoto--context-web-url (ctx)
+  "Return the human-facing web URL for context CTX, chosen by its :type.
+A repo target yields the repository page, a directory the tree view, and
+a file the blob view (with any line fragment)."
+  (remoto--context-url ctx (pcase (plist-get ctx :type)
+                             ('remoto-repo 'repo)
+                             ('remoto-dir 'tree)
+                             (_ 'blob))))
 
 (defun remoto--require-blob (ctx what)
   "Signal a `user-error' unless CTX refers to a file.
@@ -2395,7 +2487,10 @@ Handles search, branch, and issue modes."
                               (propertize (concat prefix num)
                                           'remoto-topic-pr is-pr
                                           'remoto-topic-title title
-                                          'remoto-topic-state state)))
+                                          'remoto-topic-state state
+                                          'remoto-target
+                                          (format "/github:%s/%s#%s"
+                                                  owner repo num))))
                           issues)))
              (sort candidates
                    (lambda (a b)
@@ -2416,12 +2511,18 @@ Handles search, branch, and issue modes."
            (let ((branch-set (when (listp branches)
                                (mapcar (lambda (b)
                                          (propertize (concat prefix b)
-                                                     'remoto-ref-type "branch"))
+                                                     'remoto-ref-type "branch"
+                                                     'remoto-target
+                                                     (format "/github:%s/%s@%s:/"
+                                                             owner repo b)))
                                        branches)))
                  (tag-set (when (listp tags)
                             (mapcar (lambda (tg)
                                       (propertize (concat prefix tg)
-                                                  'remoto-ref-type "tag"))
+                                                  'remoto-ref-type "tag"
+                                                  'remoto-target
+                                                  (format "/github:%s/%s@%s:/"
+                                                          owner repo tg)))
                                     tags))))
              (seq-filter (lambda (r)
                            (or (string-empty-p query)
@@ -2444,17 +2545,28 @@ Handles search, branch, and issue modes."
                                owner repo branch subpath)))
                   (names (when (listp children)
                            (mapcar (lambda (child)
-                                     (let ((name (car child))
-                                           (dir? (equal "tree"
-                                                        (alist-get 'type (cdr child)))))
-                                       (concat prefix subpath
-                                               (if dir? (concat name "/") name))))
+                                     (let* ((name (car child))
+                                            (dir? (equal "tree"
+                                                         (alist-get 'type (cdr child))))
+                                            (display (if dir? (concat name "/") name)))
+                                       (propertize (concat prefix subpath display)
+                                                   'remoto-target
+                                                   (format "/github:%s/%s@%s:/%s%s"
+                                                           owner repo branch
+                                                           subpath display))))
                                    children))))
              (if (string-empty-p file-part)
                  names
                (seq-filter (lambda (n) (string-search file-part n)) names))))))
       ('search
-       (remoto--search-repos query)))))
+       (mapcar (lambda (cand)
+                 (let ((c (copy-sequence cand)))
+                   (put-text-property 0 (length c) 'remoto-target
+                                      (format "/github:%s:/"
+                                              (substring-no-properties c))
+                                      c)
+                   c))
+               (remoto--search-repos query))))))
 
 (defun remoto--browse-metadata (string)
   "Return completion metadata alist for STRING in `remoto-browse'."
@@ -2775,6 +2887,16 @@ Matches the canonical /github: prefix and its /gh: shorthand alias.")
 ;; orderless in completion-styles does not interfere.
 (add-to-list 'completion-category-overrides
              '(remoto (styles partial-completion basic)))
+(add-to-list 'completion-category-overrides
+             '(remoto-repo (styles partial-completion basic)))
+(add-to-list 'completion-category-overrides
+             '(remoto-file (styles partial-completion basic)))
+(add-to-list 'completion-category-overrides
+             '(remoto-branch (styles partial-completion basic)))
+(add-to-list 'completion-category-overrides
+             '(remoto-issue (styles partial-completion basic)))
+(add-to-list 'completion-category-overrides
+             '(remoto-owner (styles partial-completion basic)))
 
 ;;;; Minor mode
 
@@ -2892,7 +3014,8 @@ Provides group-function and affixation-function for @ and # modes."
                                          (if is-pr "PR " "   ")
                                          (format "%s [%s]" title state))))
                                candidates)))))
-      `((group-function . ,group-fn)
+      `((category . remoto-issue)
+        (group-function . ,group-fn)
         (affixation-function . ,affix-fn))))
    ;; Branches/tags mode: /github:OWNER/REPO@
    ((string-match (rx (+ (not (any "/:@#"))) "/" (+ (not (any "/:@#"))) "@" eos)
@@ -2902,7 +3025,8 @@ Provides group-function and affixation-function for @ and # modes."
                         (if (equal "tag" (remoto--get-prop candidate 'remoto-ref-type))
                             "Tag"
                           "Branch")))))
-      `((group-function . ,group-fn))))
+      `((category . remoto-branch)
+        (group-function . ,group-fn))))
    ;; File mode: canonical path or files-default (owner/repo/ with optional subpath)
    ((or (string-match (rx "@" (+ (not (any ":"))) ":" (? "/")) directory)
         (string-match (rx "/github:" (+ (not (any "/:@#"))) "/"
@@ -2914,7 +3038,8 @@ Provides group-function and affixation-function for @ and # modes."
                                  (let ((msg (or (remoto--get-prop c 'remoto-file-commit) "")))
                                    (list c "" msg)))
                                candidates)))))
-      `((affixation-function . ,affix-fn))))
+      `((category . remoto-file)
+        (affixation-function . ,affix-fn))))
    ;; Owner mode: /github:OWNER/ - repo descriptions
    ((string-match (rx "/github:" (+ (not (any "/:@#"))) "/" eos) directory)
     (let ((affix-fn (lambda (candidates)
@@ -2923,7 +3048,8 @@ Provides group-function and affixation-function for @ and # modes."
                                  (let ((desc (or (remoto--get-prop c 'remoto-repo-desc) "")))
                                    (list c "" desc)))
                                candidates)))))
-      `((affixation-function . ,affix-fn))))
+      `((category . remoto-repo)
+        (affixation-function . ,affix-fn))))
    ;; Root mode: /github: - user/org type
    ((equal directory "/github:")
     (let ((affix-fn (lambda (candidates)
@@ -2937,7 +3063,8 @@ Provides group-function and affixation-function for @ and # modes."
                                                  (t acct-type))))
                                    (list c "" suffix)))
                                candidates)))))
-      `((affixation-function . ,affix-fn))))))
+      `((category . remoto-owner)
+        (affixation-function . ,affix-fn))))))
 
 (defun remoto--read-file-name-internal-a (orig string pred action)
   "Fix completion for /github: paths inside `read-file-name'.
@@ -2957,12 +3084,15 @@ Args: ORIG, STRING, PRED, ACTION."
              (extra (remoto--completion-metadata dir))
              (base (funcall orig string pred action))
              (base-alist (and (consp base) (eq (car base) 'metadata) (cdr base))))
-        (if extra
-            ;; Replace category so Marginalia doesn't override our annotations
-            (cons 'metadata (append extra
-                                    `((category . remoto))
-                                    (assq-delete-all 'category (copy-alist base-alist))))
-          (or base (cons 'metadata nil)))))
+              (if extra
+                  ;; Replace category so Marginalia doesn't override our annotations.
+                  ;; Use the per-level category from `remoto--completion-metadata' when
+                  ;; it provides one, else the generic `remoto'.
+                  (let ((cat (or (alist-get 'category extra) 'remoto)))
+                    (cons 'metadata (append (assq-delete-all 'category (copy-alist extra))
+                                            `((category . ,cat))
+                                            (assq-delete-all 'category (copy-alist base-alist)))))
+                (or base (cons 'metadata nil)))))
      ;; Non-standard action (boundaries, etc.) - pass through.
      ((not (memq action '(nil t lambda)))
       (funcall orig string pred action))

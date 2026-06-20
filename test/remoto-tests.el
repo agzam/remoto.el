@@ -9,6 +9,9 @@
 
 (require 'buttercup)
 (require 'remoto)
+;; Soft: present once remoto-embark.el exists; tests below fail (not error)
+;; until then, keeping the rest of the suite runnable.
+(require 'remoto-embark nil t)
 
 ;;; Helpers
 
@@ -548,9 +551,111 @@
     (expect (remoto--forge-url 'github 'history "o" "r" "main" "src/main.el" nil nil)
             :to-equal "https://github.com/o/r/commits/main/src/main.el"))
 
+  (it "defaults a nil ref to HEAD instead of erroring"
+    (expect (remoto--forge-url 'github 'history "o" "r" nil "" nil nil)
+            :to-equal "https://github.com/o/r/commits/HEAD/")
+    (expect (remoto--forge-url 'github 'tree "o" "r" nil "" nil nil)
+            :to-equal "https://github.com/o/r/tree/HEAD/"))
+
+  (it "builds the repo web URL"
+    (expect (remoto--forge-url 'github 'repo "o" "r" nil nil nil nil)
+            :to-equal "https://github.com/o/r"))
+
+  (it "builds the SSH clone URL"
+    (expect (remoto--forge-url 'github 'ssh "o" "r" nil nil nil nil)
+            :to-equal "git@github.com:o/r.git"))
+
+  (it "builds the HTTPS clone URL"
+    (expect (remoto--forge-url 'github 'https "o" "r" nil nil nil nil)
+            :to-equal "https://github.com/o/r.git"))
+
+  (it "builds a compare URL"
+    (expect (remoto--forge-url 'github 'compare "o" "r" "main" nil nil nil)
+            :to-equal "https://github.com/o/r/compare/main"))
+
+  (it "builds a new-pr URL"
+    (expect (remoto--forge-url 'github 'new-pr "o" "r" "main" nil nil nil)
+            :to-equal "https://github.com/o/r/pull/new/main"))
+
   (it "signals for an unknown forge"
     (expect (remoto--forge-url 'bogus 'blob "o" "r" "main" "x" nil nil)
             :to-throw 'user-error)))
+
+;;; remoto--path-context and target classification
+
+(describe "remoto--path-context"
+  ;; Note: plist-get results are bound in `let*' and asserted as plain
+  ;; locals.  Calling (plist-get ctx :key) directly inside `expect'
+  ;; mis-evaluates under buttercup on Emacs 29.
+  (it "classifies a repo root as remoto-repo without resolving the ref"
+    (remoto-test-with-cache
+      (let* ((ctx (remoto--path-context "/github:testowner/testrepo:/"))
+             (type (plist-get ctx :type))
+             (owner (plist-get ctx :owner))
+             (repo (plist-get ctx :repo))
+             (ref (plist-get ctx :ref))
+             (path (plist-get ctx :path)))
+        (expect type :to-be 'remoto-repo)
+        (expect owner :to-equal "testowner")
+        (expect repo :to-equal "testrepo")
+        ;; root targets stay unresolved (no ref/tree API needed)
+        (expect ref :to-be nil)
+        (expect path :to-equal ""))))
+
+  (it "classifies a directory as remoto-dir"
+    (remoto-test-with-cache
+      (let* ((ctx (remoto--path-context "/github:testowner/testrepo@main:/src"))
+             (type (plist-get ctx :type))
+             (kind (plist-get ctx :kind))
+             (path (plist-get ctx :path)))
+        (expect type :to-be 'remoto-dir)
+        (expect kind :to-be 'tree)
+        (expect path :to-equal "src"))))
+
+  (it "classifies a file as remoto-file"
+    (remoto-test-with-cache
+      (let* ((ctx (remoto--path-context "/github:testowner/testrepo@main:/src/main.el"))
+             (type (plist-get ctx :type))
+             (kind (plist-get ctx :kind))
+             (path (plist-get ctx :path)))
+        (expect type :to-be 'remoto-file)
+        (expect kind :to-be 'blob)
+        (expect path :to-equal "src/main.el"))))
+
+  (it "keeps line info only for file targets"
+    (remoto-test-with-cache
+      (let* ((file (remoto--path-context "/github:testowner/testrepo@main:/src/main.el" 5 7))
+             (dir (remoto--path-context "/github:testowner/testrepo@main:/src" 5 7))
+             (file-start (plist-get file :line-start))
+             (file-end (plist-get file :line-end))
+             (dir-start (plist-get dir :line-start))
+             (dir-end (plist-get dir :line-end)))
+        (expect file-start :to-be 5)
+        (expect file-end :to-be 7)
+        (expect dir-start :to-be nil)
+        (expect dir-end :to-be nil))))
+
+  (it "returns nil for a non-remoto path"
+    (expect (remoto--path-context "/home/me/x.el") :to-be nil)))
+
+(describe "remoto--context-web-url"
+  (it "uses the repo web URL for a repo target"
+    (remoto-test-with-cache
+      (expect (remoto--context-web-url
+               (remoto--path-context "/github:testowner/testrepo@main:/"))
+              :to-equal "https://github.com/testowner/testrepo")))
+
+  (it "uses the tree URL for a directory target"
+    (remoto-test-with-cache
+      (expect (remoto--context-web-url
+               (remoto--path-context "/github:testowner/testrepo@main:/src"))
+              :to-equal "https://github.com/testowner/testrepo/tree/main/src")))
+
+  (it "uses the blob URL (with line) for a file target"
+    (remoto-test-with-cache
+      (expect (remoto--context-web-url
+               (remoto--path-context "/github:testowner/testrepo@main:/src/main.el" 3 nil))
+              :to-equal "https://github.com/testowner/testrepo/blob/main/src/main.el#L3"))))
 
 ;;; remoto-copy-url
 
@@ -3626,6 +3731,435 @@ Returns the full path after completion, or INPUT if no completion."
               "Remoto %s" remoto--fetch-indicator-text)
       (expect 'remoto--resolve-ref :to-have-been-called)
       (expect 'dired :to-have-been-called))))
+
+;;; remoto-embark integration
+
+(describe "remoto-embark module"
+  (it "loads without embark and defines the target keymaps"
+    (expect (featurep 'remoto-embark) :to-be-truthy)
+    (expect (keymapp remoto-embark-repo-map) :to-be-truthy)
+    (expect (keymapp remoto-embark-dir-map) :to-be-truthy)
+    (expect (keymapp remoto-embark-file-map) :to-be-truthy)))
+
+(describe "remoto--embark-target-at-point"
+  (it "classifies a Dired directory entry"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (dired-mode)
+        (setq-local dired-directory "/github:testowner/testrepo@main:/")
+        (spy-on 'dired-get-filename :and-return-value
+                "/github:testowner/testrepo@main:/src")
+        (expect (remoto--embark-target-at-point)
+                :to-equal '(remoto-dir . "/github:testowner/testrepo@main:/src")))))
+
+  (it "classifies a file buffer"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (setq-local buffer-file-name "/github:testowner/testrepo@main:/src/main.el")
+        (expect (remoto--embark-target-at-point)
+                :to-equal
+                '(remoto-file . "/github:testowner/testrepo@main:/src/main.el")))))
+
+  (it "returns nil outside remoto buffers"
+    (with-temp-buffer
+      (setq-local buffer-file-name "/home/me/x.el")
+      (expect (remoto--embark-target-at-point) :to-be nil))))
+
+(describe "remoto-embark actions"
+  (it "copies the repo web URL from a repo target (no network)"
+    (remoto-test-with-cache
+      (remoto-embark-copy-repo-url "/github:o/r:/")
+      (expect (car kill-ring) :to-equal "https://github.com/o/r")))
+
+  (it "copies the SSH clone URL"
+    (remoto-test-with-cache
+      (remoto-embark-copy-ssh-url "/github:o/r:/")
+      (expect (car kill-ring) :to-equal "git@github.com:o/r.git")))
+
+  (it "copies the HTTPS clone URL"
+    (remoto-test-with-cache
+      (remoto-embark-copy-https-url "/github:o/r:/")
+      (expect (car kill-ring) :to-equal "https://github.com/o/r.git")))
+
+  (it "copies the web URL for a file target"
+    (remoto-test-with-cache
+      (remoto-embark-copy-url "/github:testowner/testrepo@main:/src/main.el")
+      (expect (car kill-ring)
+              :to-equal "https://github.com/testowner/testrepo/blob/main/src/main.el")))
+
+  (it "copies the blame URL for a file target"
+    (remoto-test-with-cache
+      (remoto-embark-copy-blame-url "/github:testowner/testrepo@main:/src/main.el")
+      (expect (car kill-ring)
+              :to-equal "https://github.com/testowner/testrepo/blame/main/src/main.el")))
+
+  (it "browses the web URL for a directory target"
+    (remoto-test-with-cache
+      (spy-on 'browse-url)
+      (remoto-embark-browse-url "/github:testowner/testrepo@main:/src")
+      (expect 'browse-url :to-have-been-called-with
+              "https://github.com/testowner/testrepo/tree/main/src")))
+
+  (it "copies the owner page URL (no network)"
+    (remoto-embark-copy-owner-url "/github:torvalds")
+    (expect (car kill-ring) :to-equal "https://github.com/torvalds"))
+
+  (it "browses the owner page"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-owner "/github:torvalds")
+    (expect 'browse-url :to-have-been-called-with "https://github.com/torvalds"))
+
+  (it "browses the owner's repositories page"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-owner-repos "/github:torvalds")
+    (expect 'browse-url :to-have-been-called-with
+            "https://github.com/torvalds?tab=repositories")))
+
+(describe "remoto owner target plumbing"
+  (it "builds the owner profile and repositories URLs"
+    (expect (remoto--forge-owner-url 'github "agzam")
+            :to-equal "https://github.com/agzam")
+    (expect (remoto--forge-owner-url 'github "agzam" 'owner-repos)
+            :to-equal "https://github.com/agzam?tab=repositories"))
+
+  (it "makes a root candidate carrying the canonical owner path"
+    (let ((cand (remoto--owner-candidate
+                 (propertize "agzam" 'remoto-acct-type "User"))))
+      (expect (get-text-property 0 'remoto-target cand)
+              :to-equal "/github:agzam")
+      (expect (get-text-property 0 'remoto-acct-type cand)
+              :to-equal "User")))
+
+  (it "tags the /github: root completion with the remoto-owner category"
+    (expect (alist-get 'category (remoto--completion-metadata "/github:"))
+            :to-be 'remoto-owner))
+
+  (it "parses owner parts, tolerating a trailing slash"
+    (expect (remoto--embark-owner-parts "/github:agzam")
+            :to-equal '(github "agzam"))
+    (expect (remoto--embark-owner-parts "/github:agzam/")
+            :to-equal '(github "agzam"))))
+
+(describe "remoto-embark-open-in-remoto"
+  (it "opens a blob URL at its canonical remoto path"
+    (spy-on 'find-file)
+    (remoto-embark-open-in-remoto "https://github.com/o/r/blob/main/x.el")
+    (expect 'find-file :to-have-been-called-with "/github:o/r@main:/x.el"))
+
+  (it "opens a repo URL at its root"
+    (spy-on 'find-file)
+    (remoto-embark-open-in-remoto "https://github.com/o/r")
+    (expect 'find-file :to-have-been-called-with "/github:o/r:/"))
+
+  (it "errors on a non-forge URL"
+    (expect (remoto-embark-open-in-remoto "https://example.com/foo")
+            :to-throw 'user-error)))
+
+(describe "remoto-embark-clone"
+  (it "clones with the HTTPS URL and chosen dir by default"
+    (let ((remoto-clone-url-type 'https))
+      (spy-on 'read-directory-name :and-return-value "/tmp/r/")
+      (spy-on 'remoto--clone)
+      (remoto-embark-clone "/github:o/r:/")
+      (expect 'remoto--clone :to-have-been-called-with
+              "https://github.com/o/r.git" "/tmp/r/")))
+
+  (it "honors remoto-clone-url-type set to ssh"
+    (let ((remoto-clone-url-type 'ssh))
+      (spy-on 'read-directory-name :and-return-value "/tmp/r/")
+      (spy-on 'remoto--clone)
+      (remoto-embark-clone "/github:o/r:/")
+      (expect 'remoto--clone :to-have-been-called-with
+              "git@github.com:o/r.git" "/tmp/r/")))
+
+  (it "is bound in the repo keymap"
+    (expect (lookup-key remoto-embark-repo-map "c") :to-be 'remoto-embark-clone)))
+
+(describe "remoto--clone"
+  (it "launches git clone with the url and dest"
+    (spy-on 'start-process :and-return-value nil)
+    (spy-on 'set-process-sentinel)
+    (spy-on 'display-buffer)
+    (remoto--clone "https://github.com/o/r.git" "/tmp/r/")
+    (expect (nthcdr 2 (spy-calls-args-for 'start-process 0))
+            :to-equal '("git" "clone" "https://github.com/o/r.git" "/tmp/r/"))))
+
+(describe "owner-level repo completion targets (Stage C)"
+  (it "reports the remoto-repo category at owner level"
+    (let* ((meta (remoto--completion-metadata "/github:agzam/"))
+           (cat (alist-get 'category meta)))
+      (expect cat :to-be 'remoto-repo)))
+
+  (it "registers a completion-category-override for remoto-repo"
+    (let ((override (assq 'remoto-repo completion-category-overrides)))
+      (expect override :to-be-truthy)))
+
+  (it "attaches the full remoto path as a remoto-target property on candidates"
+    (spy-on 'remoto--recent-owner-repos :and-return-value
+            (list (propertize "remoto.el" 'remoto-repo-desc "desc")))
+    (let* ((cands (remoto--handle-file-name-all-completions "" "/github:agzam/"))
+           (cand (car cands))
+           (target (get-text-property 0 'remoto-target cand)))
+      (expect cand :to-equal "remoto.el/")
+      (expect target :to-equal "/github:agzam/remoto.el:/")))
+
+  (it "transforms a candidate to its full path via remoto--embark-transform"
+    (let* ((cand (propertize "remoto.el/" 'remoto-target "/github:agzam/remoto.el:/"))
+           (result (remoto--embark-transform 'remoto-repo cand)))
+      (expect result :to-equal '(remoto-repo . "/github:agzam/remoto.el:/")))))
+
+(describe "file-level completion targets (Stage C)"
+  (it "reports the remoto-file category at file level"
+    (let* ((meta (remoto--completion-metadata "/github:o/r/"))
+           (cat (alist-get 'category meta)))
+      (expect cat :to-be 'remoto-file)))
+
+  (it "registers a completion-category-override for remoto-file"
+    (let ((override (assq 'remoto-file completion-category-overrides)))
+      (expect override :to-be-truthy)))
+
+  (it "attaches remoto-target on files-default candidates"
+    (spy-on 'remoto--default-branch :and-return-value "main")
+    (spy-on 'remoto--fetch-dir-children-light :and-return-value
+            '(("README.md" . ((type . "blob"))) ("src" . ((type . "tree")))))
+    (let* ((cands (remoto--handle-file-name-all-completions "" "/github:o/r/"))
+           (readme (car cands))
+           (rt (get-text-property 0 'remoto-target readme)))
+      (expect readme :to-equal "README.md")
+      (expect rt :to-equal "/github:o/r@main:/README.md")))
+
+  (it "attaches remoto-target on canonical-path candidates"
+    (remoto-test-with-cache
+      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (let* ((cands (remoto--handle-file-name-all-completions
+                     "" "/github:testowner/testrepo@main:/"))
+             (readme (seq-find (lambda (c) (equal c "README.md")) cands))
+             (rt (and readme (get-text-property 0 'remoto-target readme))))
+        (expect rt :to-equal "/github:testowner/testrepo@main:/README.md"))))
+
+  (it "reclassifies dir vs file targets in the transformer"
+    (remoto-test-with-cache
+      (let* ((dir (remoto--embark-transform
+                   'remoto-file
+                   (propertize "src/" 'remoto-target
+                               "/github:testowner/testrepo@main:/src")))
+             (file (remoto--embark-transform
+                    'remoto-file
+                    (propertize "main.el" 'remoto-target
+                                "/github:testowner/testrepo@main:/src/main.el")))
+             (dir-type (car dir))
+             (file-type (car file)))
+        (expect dir-type :to-be 'remoto-dir)
+        (expect file-type :to-be 'remoto-file)))))
+
+(describe "branch-level completion targets (Stage C)"
+  (it "reports the remoto-branch category at the @ level"
+    (let* ((meta (remoto--completion-metadata "/github:o/r@"))
+           (cat (alist-get 'category meta)))
+      (expect cat :to-be 'remoto-branch)))
+
+  (it "registers a completion-category-override for remoto-branch"
+    (let ((override (assq 'remoto-branch completion-category-overrides)))
+      (expect override :to-be-truthy)))
+
+  (it "attaches remoto-target on branch candidates"
+    (spy-on 'remoto--fetch-branches :and-return-value '("main" "dev"))
+    (spy-on 'remoto--fetch-tags :and-return-value nil)
+    (let* ((cands (remoto--handle-file-name-all-completions "" "/github:o/r@"))
+           (main (car cands))
+           (rt (get-text-property 0 'remoto-target main)))
+      (expect main :to-equal "main:")
+      (expect rt :to-equal "/github:o/r@main:/")))
+
+  (it "keeps the branch type in the ref transformer"
+    (let* ((cand (propertize "main:" 'remoto-target "/github:o/r@main:/"))
+           (result (remoto--embark-transform-ref 'remoto-branch cand)))
+      (expect result :to-equal '(remoto-branch . "/github:o/r@main:/"))))
+
+  (it "browses the compare view for a branch"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-compare "/github:o/r@main:/")
+    (expect 'browse-url :to-have-been-called-with
+            "https://github.com/o/r/compare/main"))
+
+  (it "opens the new-PR page for a branch"
+    (spy-on 'browse-url)
+    (remoto-embark-new-pr "/github:o/r@main:/")
+    (expect 'browse-url :to-have-been-called-with
+            "https://github.com/o/r/pull/new/main"))
+
+  (it "binds branch actions in the branch keymap"
+    (expect (lookup-key remoto-embark-branch-map "y")
+            :to-be 'remoto-embark-copy-branch-url)
+    (expect (lookup-key remoto-embark-branch-map "b")
+            :to-be 'remoto-embark-browse-branch)
+    (expect (lookup-key remoto-embark-branch-map "d")
+            :to-be 'remoto-embark-browse-compare)
+    (expect (lookup-key remoto-embark-branch-map "n")
+            :to-be 'remoto-embark-new-pr)))
+
+(describe "issue-level completion targets (Stage C)"
+  (it "reports the remoto-issue category at the # level"
+    (let* ((meta (remoto--completion-metadata "/github:o/r#"))
+           (cat (alist-get 'category meta)))
+      (expect cat :to-be 'remoto-issue)))
+
+  (it "registers a completion-category-override for remoto-issue"
+    (let ((override (assq 'remoto-issue completion-category-overrides)))
+      (expect override :to-be-truthy)))
+
+  (it "attaches remoto-target on issue candidates"
+    (spy-on 'remoto--fetch-issues :and-return-value
+            '(((number . 42) (title . "Bug") (state . "open"))))
+    (let* ((cands (remoto--handle-file-name-all-completions "" "/github:o/r#"))
+           (first (car cands))
+           (rt (get-text-property 0 'remoto-target first)))
+      (expect first :to-equal "42")
+      (expect rt :to-equal "/github:o/r#42")))
+
+  (it "opens an issue target via find-file"
+    (spy-on 'find-file)
+    (remoto-embark-open-issue "/github:o/r#42")
+    (expect 'find-file :to-have-been-called-with "/github:o/r#42"))
+
+  (it "copies the OWNER/REPO#N reference"
+    (remoto-embark-copy-issue-ref "/github:o/r#42")
+    (expect (car kill-ring) :to-equal "o/r#42"))
+
+  (it "builds the issue web URL"
+    (expect (remoto--forge-issue-url 'github "o" "r" "42")
+            :to-equal "https://github.com/o/r/issues/42"))
+
+  (it "browses the issue web page"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-issue "/github:o/r#42")
+    (expect 'browse-url :to-have-been-called-with
+            "https://github.com/o/r/issues/42"))
+
+  (it "copies the issue web URL"
+    (remoto-embark-copy-issue-url "/github:o/r#42")
+    (expect (car kill-ring) :to-equal "https://github.com/o/r/issues/42"))
+
+  (it "builds the PR files-diff URL via the pr-diff template"
+    (expect (remoto--forge-issue-url 'github "o" "r" "42" 'pr-diff)
+            :to-equal "https://github.com/o/r/pull/42/files"))
+
+  (it "browses the PR files-diff page"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-pr-diff "/github:o/r#42")
+    (expect 'browse-url :to-have-been-called-with
+            "https://github.com/o/r/pull/42/files"))
+
+  (it "binds issue actions in the issue keymap"
+    (expect (lookup-key remoto-embark-issue-map "o") :to-be 'remoto-embark-open-issue)
+    (expect (lookup-key remoto-embark-issue-map "b") :to-be 'remoto-embark-browse-issue)
+    (expect (lookup-key remoto-embark-issue-map "y") :to-be 'remoto-embark-copy-issue-url)
+    (expect (lookup-key remoto-embark-issue-map "d") :to-be 'remoto-embark-browse-pr-diff)
+    (expect (lookup-key remoto-embark-issue-map "R")
+            :to-be 'remoto-embark-copy-issue-ref)))
+
+(describe "remoto-browse Embark targets (Stage D)"
+  ;; Candidates from the browse completion table carry the full canonical
+  ;; path in a `remoto-target' property so Embark actions resolve a bare
+  ;; candidate (mirrors the file-name completion surface).
+  (it "attaches remoto-target on search-mode candidates"
+    (spy-on 'remoto--search-repos :and-return-value
+            (list (propertize "torvalds/linux" 'remoto-repo-desc "kernel")))
+    (let* ((cands (remoto--browse-completions "torvalds"))
+           (cand (car cands))
+           (rt (get-text-property 0 'remoto-target cand))
+           (desc (get-text-property 0 'remoto-repo-desc cand)))
+      (expect cand :to-equal "torvalds/linux")
+      (expect rt :to-equal "/github:torvalds/linux:/")
+      ;; existing display property is preserved
+      (expect desc :to-equal "kernel")))
+
+  (it "attaches remoto-target on issue-mode candidates"
+    (spy-on 'remoto--fetch-issues :and-return-value
+            '(((number . 42) (title . "Bug") (state . "open"))))
+    (let* ((cands (remoto--browse-completions "foo/bar#"))
+           (cand (car cands))
+           (rt (get-text-property 0 'remoto-target cand)))
+      (expect cand :to-equal "foo/bar#42")
+      (expect rt :to-equal "/github:foo/bar#42")))
+
+  (it "attaches remoto-target on branch-mode candidates"
+    (spy-on 'remoto--fetch-branches :and-return-value '("main"))
+    (spy-on 'remoto--fetch-tags :and-return-value nil)
+    (let* ((cands (remoto--browse-completions "foo/bar@"))
+           (cand (car cands))
+           (rt (get-text-property 0 'remoto-target cand)))
+      (expect cand :to-equal "foo/bar@main")
+      (expect rt :to-equal "/github:foo/bar@main:/")))
+
+  (it "attaches remoto-target on file-mode candidates"
+    (spy-on 'remoto--default-branch :and-return-value "main")
+    (spy-on 'remoto--fetch-dir-children-light :and-return-value
+            '(("README.md" . ((type . "blob"))) ("src" . ((type . "tree")))))
+    (let* ((cands (remoto--browse-completions "foo/bar/"))
+           (readme (seq-find (lambda (c) (equal c "foo/bar/README.md")) cands))
+           (dir (seq-find (lambda (c) (equal c "foo/bar/src/")) cands))
+           (readme-rt (get-text-property 0 'remoto-target readme))
+           (dir-rt (get-text-property 0 'remoto-target dir)))
+      (expect readme-rt :to-equal "/github:foo/bar@main:/README.md")
+      (expect dir-rt :to-equal "/github:foo/bar@main:/src/")))
+
+  ;; The single `remoto-browse' category dispatches per-target via the
+  ;; transformer, reusing the per-type keymaps.
+  (it "classifies a repo browse target"
+    (let* ((cand (propertize "torvalds/linux"
+                             'remoto-target "/github:torvalds/linux:/"))
+           (result (remoto--embark-browse-transform 'remoto-browse cand)))
+      (expect result :to-equal '(remoto-repo . "/github:torvalds/linux:/"))))
+
+  (it "classifies an issue browse target"
+    (let* ((cand (propertize "foo/bar#42" 'remoto-target "/github:foo/bar#42"))
+           (result (remoto--embark-browse-transform 'remoto-browse cand)))
+      (expect result :to-equal '(remoto-issue . "/github:foo/bar#42"))))
+
+  (it "classifies a branch browse target"
+    (let* ((cand (propertize "foo/bar@main"
+                             'remoto-target "/github:foo/bar@main:/"))
+           (result (remoto--embark-browse-transform 'remoto-browse cand)))
+      (expect result :to-equal '(remoto-branch . "/github:foo/bar@main:/"))))
+
+  (it "reclassifies dir vs file browse targets via the path context"
+    (remoto-test-with-cache
+      (let* ((dir (remoto--embark-browse-transform
+                   'remoto-browse
+                   (propertize "testowner/testrepo/src/" 'remoto-target
+                               "/github:testowner/testrepo@main:/src")))
+             (file (remoto--embark-browse-transform
+                    'remoto-browse
+                    (propertize "testowner/testrepo/src/main.el" 'remoto-target
+                                "/github:testowner/testrepo@main:/src/main.el")))
+             (dir-type (car dir))
+             (file-type (car file)))
+        (expect dir-type :to-be 'remoto-dir)
+        (expect file-type :to-be 'remoto-file)))))
+
+(describe "completion candidates survive embark collection"
+  (it "keeps remoto-target through completion-all-completions per category"
+    ;; embark's candidate collectors call `completion-all-completions' on the
+    ;; remoto table, and embark-collect stores the bare candidate as the
+    ;; entry id.  The remoto-target property must survive that call so a
+    ;; collected candidate still resolves to a full path with no live
+    ;; minibuffer.  Exercised for every remoto category, including the
+    ;; default-style `remoto-browse' (no completion-category-override).
+    (let ((survives
+           (lambda (category)
+             (let* ((cand (propertize "x/y" 'remoto-target "/github:x/y:/"))
+                    (table (lambda (str pred action)
+                             (if (eq action 'metadata)
+                                 `(metadata (category . ,category))
+                               (complete-with-action action (list cand) str pred))))
+                    (all (completion-all-completions "" table nil 0)))
+               (when (and (consp all) (last all)) (setcdr (last all) nil))
+               (and (car all) (get-text-property 0 'remoto-target (car all)))))))
+      (dolist (cat '(remoto-repo remoto-file remoto-branch remoto-issue
+                                 remoto-owner remoto-browse))
+        (let ((rt (funcall survives cat)))
+          (expect rt :to-equal "/github:x/y:/"))))))
 
 (provide 'remoto-tests)
 
