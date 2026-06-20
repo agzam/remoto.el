@@ -551,6 +551,12 @@
     (expect (remoto--forge-url 'github 'history "o" "r" "main" "src/main.el" nil nil)
             :to-equal "https://github.com/o/r/commits/main/src/main.el"))
 
+  (it "defaults a nil ref to HEAD instead of erroring"
+    (expect (remoto--forge-url 'github 'history "o" "r" nil "" nil nil)
+            :to-equal "https://github.com/o/r/commits/HEAD/")
+    (expect (remoto--forge-url 'github 'tree "o" "r" nil "" nil nil)
+            :to-equal "https://github.com/o/r/tree/HEAD/"))
+
   (it "builds the repo web URL"
     (expect (remoto--forge-url 'github 'repo "o" "r" nil nil nil nil)
             :to-equal "https://github.com/o/r"))
@@ -3983,11 +3989,11 @@ Returns the full path after completion, or INPUT if no completion."
             "https://github.com/o/r/pull/new/main"))
 
   (it "binds branch actions in the branch keymap"
-    (expect (lookup-key remoto-embark-branch-map "u")
+    (expect (lookup-key remoto-embark-branch-map "y")
             :to-be 'remoto-embark-copy-branch-url)
-    (expect (lookup-key remoto-embark-branch-map "w")
+    (expect (lookup-key remoto-embark-branch-map "b")
             :to-be 'remoto-embark-browse-branch)
-    (expect (lookup-key remoto-embark-branch-map "c")
+    (expect (lookup-key remoto-embark-branch-map "d")
             :to-be 'remoto-embark-browse-compare)
     (expect (lookup-key remoto-embark-branch-map "n")
             :to-be 'remoto-embark-new-pr)))
@@ -4046,10 +4052,10 @@ Returns the full path after completion, or INPUT if no completion."
 
   (it "binds issue actions in the issue keymap"
     (expect (lookup-key remoto-embark-issue-map "o") :to-be 'remoto-embark-open-issue)
-    (expect (lookup-key remoto-embark-issue-map "w") :to-be 'remoto-embark-browse-issue)
-    (expect (lookup-key remoto-embark-issue-map "u") :to-be 'remoto-embark-copy-issue-url)
+    (expect (lookup-key remoto-embark-issue-map "b") :to-be 'remoto-embark-browse-issue)
+    (expect (lookup-key remoto-embark-issue-map "y") :to-be 'remoto-embark-copy-issue-url)
     (expect (lookup-key remoto-embark-issue-map "d") :to-be 'remoto-embark-browse-pr-diff)
-    (expect (lookup-key remoto-embark-issue-map "y")
+    (expect (lookup-key remoto-embark-issue-map "R")
             :to-be 'remoto-embark-copy-issue-ref)))
 
 (describe "remoto-browse Embark targets (Stage D)"

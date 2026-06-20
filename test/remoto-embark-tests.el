@@ -175,6 +175,281 @@ with that property intact and no live minibuffer."
       (expect rt :to-equal "/github:torvalds")
       (expect xform :to-equal '(remoto-owner . "/github:torvalds")))))
 
+;;; Keymap bindings (exhaustive)
+
+(describe "remoto-embark keymap bindings"
+  (it "binds every documented key in each per-type keymap"
+    (dolist (spec `((,remoto-embark-repo-map
+                     ("y" . remoto-embark-copy-url)
+                     ("b" . remoto-embark-browse-url)
+                     ("s" . remoto-embark-copy-ssh-url)
+                     ("h" . remoto-embark-copy-https-url)
+                     ("H" . remoto-embark-copy-history-url)
+                     ("c" . remoto-embark-clone))
+                    (,remoto-embark-branch-map
+                     ("y" . remoto-embark-copy-branch-url)
+                     ("b" . remoto-embark-browse-branch)
+                     ("d" . remoto-embark-browse-compare)
+                     ("n" . remoto-embark-new-pr))
+                    (,remoto-embark-dir-map
+                     ("y" . remoto-embark-copy-url)
+                     ("b" . remoto-embark-browse-url)
+                     ("H" . remoto-embark-copy-history-url))
+                    (,remoto-embark-file-map
+                     ("y" . remoto-embark-copy-url)
+                     ("b" . remoto-embark-browse-url)
+                     ("B" . remoto-embark-copy-blame-url)
+                     ("P" . remoto-embark-copy-permalink)
+                     ("r" . remoto-embark-copy-raw-url)
+                     ("H" . remoto-embark-copy-history-url))
+                    (,remoto-embark-issue-map
+                     ("o" . remoto-embark-open-issue)
+                     ("b" . remoto-embark-browse-issue)
+                     ("y" . remoto-embark-copy-issue-url)
+                     ("d" . remoto-embark-browse-pr-diff)
+                     ("R" . remoto-embark-copy-issue-ref))
+                    (,remoto-embark-owner-map
+                     ("b" . remoto-embark-browse-owner)
+                     ("y" . remoto-embark-copy-owner-url)
+                     ("r" . remoto-embark-browse-owner-repos))))
+      (let ((map (car spec)))
+        (dolist (kv (cdr spec))
+          (expect (lookup-key map (kbd (car kv))) :to-be (cdr kv)))))))
+
+;;; Target routing / classification
+
+(describe "remoto-embark target routing"
+  (it "classifies each target shape to its own type"
+    (expect (remoto--embark-classify "/github:o/r:/" 'remoto) :to-be 'remoto-repo)
+    (expect (remoto--embark-classify "/github:o/r@main:/" 'remoto) :to-be 'remoto-branch)
+    (expect (remoto--embark-classify "/github:o/r#42" 'remoto) :to-be 'remoto-issue)
+    (expect (remoto--embark-classify "/github:torvalds" 'remoto) :to-be 'remoto-owner))
+
+  (it "routes a bare owner target to the owner type (the repo-map bug)"
+    (expect (remoto--embark-transform 'remoto "/github:torvalds")
+            :to-equal '(remoto-owner . "/github:torvalds")))
+
+  (it "routes an owner candidate carrying remoto-target to the owner type"
+    (let ((cand (propertize "torvalds/" 'remoto-target "/github:torvalds")))
+      (expect (remoto--embark-transform 'remoto-repo cand)
+              :to-equal '(remoto-owner . "/github:torvalds")))))
+
+;;; Generic copy/browse on every target kind (regression for forge-nil)
+
+(describe "remoto-embark generic actions on any target kind"
+  (it "browses an owner target instead of throwing the forge-nil error"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-url "/github:torvalds")
+    (expect 'browse-url :to-have-been-called-with "https://github.com/torvalds"))
+
+  (it "copies an owner target URL"
+    (remoto-embark-copy-url "/github:torvalds")
+    (expect (car kill-ring) :to-equal "https://github.com/torvalds"))
+
+  (it "browses an issue target"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-url "/github:o/r#42")
+    (expect 'browse-url :to-have-been-called-with "https://github.com/o/r/issues/42"))
+
+  (it "copies an issue target URL"
+    (remoto-embark-copy-url "/github:o/r#42")
+    (expect (car kill-ring) :to-equal "https://github.com/o/r/issues/42"))
+
+  (it "browses a repo target"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-url "/github:o/r:/")
+    (expect 'browse-url :to-have-been-called-with "https://github.com/o/r"))
+
+  (it "signals a clear error (not forge-nil) for a repo-only action on an owner"
+    (expect (remoto-embark-copy-ssh-url "/github:torvalds") :to-throw 'user-error)))
+
+;;; Per-map functional coverage
+
+(describe "remoto-embark repo + clone actions"
+  (it "clones using the configured URL kind"
+    (spy-on 'remoto--clone)
+    (spy-on 'read-directory-name :and-return-value "/tmp/r/")
+    (let ((remoto-clone-url-type 'https))
+      (remoto-embark-clone "/github:o/r:/"))
+    (expect 'remoto--clone
+            :to-have-been-called-with "https://github.com/o/r.git" "/tmp/r/"))
+
+  (it "copies the repo history URL with HEAD when the target has no ref"
+    (remoto-embark-copy-history-url "/gh:agzam/mxp")
+    (expect (car kill-ring) :to-equal "https://github.com/agzam/mxp/commits/HEAD/")))
+
+(describe "remoto-embark branch actions"
+  (it "copies the branch tree URL"
+    (remoto-embark-copy-branch-url "/github:o/r@main:/")
+    (expect (car kill-ring) :to-equal "https://github.com/o/r/tree/main/"))
+
+  (it "browses the branch tree"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-branch "/github:o/r@main:/")
+    (expect 'browse-url :to-have-been-called-with "https://github.com/o/r/tree/main/"))
+
+  (it "browses the compare view"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-compare "/github:o/r@main:/")
+    (expect 'browse-url :to-have-been-called-with "https://github.com/o/r/compare/main"))
+
+  (it "browses the new-PR page"
+    (spy-on 'browse-url)
+    (remoto-embark-new-pr "/github:o/r@main:/")
+    (expect 'browse-url :to-have-been-called-with "https://github.com/o/r/pull/new/main")))
+
+(describe "remoto-embark directory actions"
+  (before-each
+    (spy-on 'remoto--path-context :and-return-value
+            '(:forge github :owner "o" :repo "r" :ref "main" :path "src"
+              :kind tree :type remoto-dir :line-start nil :line-end nil)))
+
+  (it "copies the directory tree URL"
+    (remoto-embark-copy-url "/github:o/r@main:/src/")
+    (expect (car kill-ring) :to-equal "https://github.com/o/r/tree/main/src"))
+
+  (it "copies the directory history URL"
+    (remoto-embark-copy-history-url "/github:o/r@main:/src/")
+    (expect (car kill-ring) :to-equal "https://github.com/o/r/commits/main/src")))
+
+(describe "remoto-embark file actions"
+  (before-each
+    (spy-on 'remoto--path-context :and-return-value
+            '(:forge github :owner "o" :repo "r" :ref "main" :path "src/a.el"
+              :kind blob :type remoto-file :line-start nil :line-end nil)))
+
+  (it "copies the file blob URL"
+    (remoto-embark-copy-url "/github:o/r@main:/src/a.el")
+    (expect (car kill-ring) :to-equal "https://github.com/o/r/blob/main/src/a.el"))
+
+  (it "browses the file blob URL"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-url "/github:o/r@main:/src/a.el")
+    (expect 'browse-url
+            :to-have-been-called-with "https://github.com/o/r/blob/main/src/a.el"))
+
+  (it "copies the blame URL"
+    (remoto-embark-copy-blame-url "/github:o/r@main:/src/a.el")
+    (expect (car kill-ring) :to-equal "https://github.com/o/r/blame/main/src/a.el"))
+
+  (it "copies the raw URL"
+    (remoto-embark-copy-raw-url "/github:o/r@main:/src/a.el")
+    (expect (car kill-ring)
+            :to-equal "https://raw.githubusercontent.com/o/r/main/src/a.el"))
+
+  (it "copies the file history URL"
+    (remoto-embark-copy-history-url "/github:o/r@main:/src/a.el")
+    (expect (car kill-ring) :to-equal "https://github.com/o/r/commits/main/src/a.el"))
+
+  (it "copies a permalink pinned to the commit SHA"
+    (spy-on 'remoto--resolve-commit-sha :and-return-value "sha123")
+    (remoto-embark-copy-permalink "/github:o/r@main:/src/a.el")
+    (expect (car kill-ring) :to-equal "https://github.com/o/r/blob/sha123/src/a.el")))
+
+(describe "remoto-embark issue actions"
+  (it "browses the issue page"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-issue "/github:o/r#42")
+    (expect 'browse-url :to-have-been-called-with "https://github.com/o/r/issues/42"))
+
+  (it "copies the issue URL"
+    (remoto-embark-copy-issue-url "/github:o/r#42")
+    (expect (car kill-ring) :to-equal "https://github.com/o/r/issues/42"))
+
+  (it "browses the PR files-diff page"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-pr-diff "/github:o/r#42")
+    (expect 'browse-url :to-have-been-called-with "https://github.com/o/r/pull/42/files"))
+
+  (it "copies the OWNER/REPO#N reference"
+    (remoto-embark-copy-issue-ref "/github:o/r#42")
+    (expect (car kill-ring) :to-equal "o/r#42"))
+
+  (it "opens an issue target via find-file"
+    (spy-on 'find-file)
+    (remoto-embark-open-issue "/github:o/r#42")
+    (expect 'find-file :to-have-been-called-with "/github:o/r#42")))
+
+(describe "remoto-embark open-in-remoto (embark-url-map R)"
+  (it "opens a forge URL as a remoto path"
+    (spy-on 'find-file)
+    (remoto-embark-open-in-remoto "https://github.com/o/r")
+    (expect 'find-file :to-have-been-called-with "/github:o/r:/")))
+
+;;; Input-form equivalence: /gh:, /github: file-name, and canonical must
+;;; all behave identically (regression for the shorthand/file-name hole).
+
+(describe "remoto--embark-canonicalize"
+  (it "normalizes shorthand and file-name forms to one canonical path"
+    (dolist (pair '(("/gh:agzam/mxp"           . "/github:agzam/mxp:/")
+                    ("/gh:agzam/mxp/"          . "/github:agzam/mxp:/")
+                    ("/github:agzam/mxp"       . "/github:agzam/mxp:/")
+                    ("/github:agzam/mxp/"      . "/github:agzam/mxp:/")
+                    ("/github:agzam/mxp:/"     . "/github:agzam/mxp:/")
+                    ("/gh:agzam/mxp/src/a.el"  . "/github:agzam/mxp:/src/a.el")
+                    ("/github:o/r@dev/sub"     . "/github:o/r@dev:/sub")
+                    ("/github:o/r@dev:/sub"    . "/github:o/r@dev:/sub")))
+      (expect (remoto--embark-canonicalize (car pair)) :to-equal (cdr pair))))
+
+  (it "leaves owner and issue/PR targets for their own parsers"
+    (expect (remoto--embark-canonicalize "/gh:torvalds") :to-equal "/github:torvalds")
+    (expect (remoto--embark-canonicalize "/gh:o/r#42") :to-equal "/github:o/r#42"))
+
+  (it "passes non-strings through unchanged"
+    (expect (remoto--embark-canonicalize nil) :to-be nil)))
+
+(describe "remoto-embark actions accept every input form"
+  (it "browses a repo identically from /gh:, /github: file-name, and canonical"
+    (dolist (tgt '("/gh:agzam/mxp" "/gh:agzam/mxp/" "/github:agzam/mxp"
+                   "/github:agzam/mxp/" "/github:agzam/mxp:/"))
+      (spy-on 'browse-url)
+      (remoto-embark-browse-url tgt)
+      (expect 'browse-url :to-have-been-called-with "https://github.com/agzam/mxp")))
+
+  (it "copies the repo URL identically across forms"
+    (dolist (tgt '("/gh:agzam/mxp" "/github:agzam/mxp/" "/github:agzam/mxp:/"))
+      (remoto-embark-copy-url tgt)
+      (expect (car kill-ring) :to-equal "https://github.com/agzam/mxp")))
+
+  (it "copies the SSH URL from the shorthand form"
+    (remoto-embark-copy-ssh-url "/gh:agzam/mxp")
+    (expect (car kill-ring) :to-equal "git@github.com:agzam/mxp.git"))
+
+  (it "clones from the shorthand form"
+    (spy-on 'remoto--clone)
+    (spy-on 'read-directory-name :and-return-value "/tmp/mxp/")
+    (let ((remoto-clone-url-type 'https))
+      (remoto-embark-clone "/gh:agzam/mxp"))
+    (expect 'remoto--clone
+            :to-have-been-called-with "https://github.com/agzam/mxp.git" "/tmp/mxp/"))
+
+  (it "browses an owner and an issue from the shorthand form"
+    (spy-on 'browse-url)
+    (remoto-embark-browse-url "/gh:torvalds")
+    (expect 'browse-url :to-have-been-called-with "https://github.com/torvalds")
+    (remoto-embark-browse-issue "/gh:o/r#42")
+    (expect 'browse-url :to-have-been-called-with "https://github.com/o/r/issues/42")))
+
+(describe "remoto-embark routing across input forms"
+  (it "classifies a repo identically regardless of prefix or form"
+    (dolist (tgt '("/gh:agzam/mxp" "/gh:agzam/mxp/" "/github:agzam/mxp"
+                   "/github:agzam/mxp/" "/github:agzam/mxp:/"))
+      (expect (remoto--embark-classify tgt 'remoto) :to-be 'remoto-repo))
+    (expect (remoto--embark-classify "/gh:torvalds" 'remoto) :to-be 'remoto-owner)
+    (expect (remoto--embark-classify "/gh:o/r#42" 'remoto) :to-be 'remoto-issue)
+    (expect (remoto--embark-classify "/gh:o/r@main:/" 'remoto) :to-be 'remoto-branch))
+
+  (it "transforms a /gh: or file-name candidate into a canonical repo target"
+    (expect (remoto--embark-transform 'remoto "/gh:agzam/mxp/")
+            :to-equal '(remoto-repo . "/github:agzam/mxp:/"))
+    (expect (remoto--embark-transform 'remoto-repo "/github:agzam/mxp")
+            :to-equal '(remoto-repo . "/github:agzam/mxp:/")))
+
+  (it "resolves a candidate's remoto-target property then canonicalizes"
+    (let ((cand (propertize "mxp/" 'remoto-target "/gh:agzam/mxp/")))
+      (expect (remoto--embark-transform 'remoto-repo cand)
+              :to-equal '(remoto-repo . "/github:agzam/mxp:/")))))
+
 (provide 'remoto-embark-tests)
 
 ;; Local Variables:

@@ -1513,9 +1513,11 @@ Derived from the path prefix, e.g. \"/github:...\" -> `github'."
 
 (defun remoto--forge-url (forge kind owner repo ref path &optional line-start line-end)
   "Build a FORGE web URL of KIND for OWNER/REPO at REF and PATH.
-KIND is one of `blob', `tree', `blame', `history', `raw'.  LINE-START
-and LINE-END add a line or line-range fragment when KIND's template
-includes one."
+KIND is one of `blob', `tree', `blame', `history', `raw'.  A nil REF
+defaults to \"HEAD\" (the forge resolves it to the default branch), so a
+repo-level target with no ref still produces a valid URL.  LINE-START and
+LINE-END add a line or line-range fragment when KIND's template includes
+one."
   (let* ((templates (or (alist-get forge remoto-forge-url-templates)
                         (user-error "Remoto: no URL templates for forge `%s'"
                                     forge)))
@@ -1532,7 +1534,7 @@ includes one."
                 (t ""))))
     (format-spec template `((?o . ,owner)
                             (?r . ,repo)
-                            (?R . ,ref)
+                            (?R . ,(or ref "HEAD"))
                             (?p . ,path)
                             (?L . ,line)))))
 

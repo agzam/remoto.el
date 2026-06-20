@@ -3,6 +3,17 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [1.8.0]
+
+** Added
+- Optional, forge-agnostic Embark integration (~remoto-embark.el~): ~embark-act~ on remoto targets (owner, repo, branch, issue, dir, file, and a forge ~url~ at point) in remoto buffers, ~dired~, and ~/github:~ minibuffer completion (including ~embark-collect~). It activates automatically when Embark is installed - an autoloaded ~(with-eval-after-load 'embark (remoto-embark-register))~ registers the keymaps the moment Embark loads, with no manual ~(require 'remoto-embark)~ (which still works for eager setup). Routing through the public ~remoto-embark-register~ instead of requiring the file avoids a load recursion when the file is loaded with Embark already present.
+
+** Fixed
+- Embark actions no longer fail with "no URL templates for forge nil" on an owner or other non-repository target reached through the repository or generic ~remoto~ keymap. The generic ~remoto-embark-copy-url~/~-browse-url~ now resolve a web URL for any target kind (issue/PR, repository, directory, file, or owner); the repository- and file-specific actions raise a clear "not a repository, directory, or file target" message instead of a cryptic forge-lookup failure.
+- Owner targets now route to ~remoto-embark-owner-map~ rather than the repository keymap: a shared classifier (~remoto--embark-classify~) derives the Embark target type from the path shape (issue, branch, owner, or repo/dir/file).
+- Embark actions now treat every input form for the same target identically. The ~/gh:~ shorthand, the file-name form ~/github:OWNER/REPO~ or ~/github:OWNER/REPO/~ (as typed at ~C-x C-f~), and the canonical ~/github:OWNER/REPO:/~ all resolve to the same target via ~remoto--embark-canonicalize~. Previously only the canonical colon form was understood, so ~embark-act~ on a typed ~/gh:agzam/mxp~ or ~/github:agzam/mxp~ failed.
+- ~remoto--forge-url~ defaults a nil ref to ~HEAD~ (which forges resolve to the default branch), so the repository-level history action (~remoto-embark-copy-history-url~ on a repo target, which has no ref) builds a valid URL instead of erroring with "Invalid format character".
+
 * [1.7.0] - 2026-05-31
 
 ** Added

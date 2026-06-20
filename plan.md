@@ -157,9 +157,13 @@ Shipped actions are marked; only genuine follow-ups remain TODO.
 ### Non-breaking (keep)
 - No `embark` in `Package-Requires`. `remoto-embark.el` uses `defvar`/`declare-function`
   for embark symbols and registers in `(with-eval-after-load 'embark ...)`.
-- Opt-in: users `(require 'remoto-embark)`. `remoto.el` carries no embark reference
-  (keeps main file package-lint clean; the lone `with-eval-after-load` lint caution
-  is confined to `remoto-embark.el`).
+- Activation: autoloaded `(with-eval-after-load 'embark (remoto-embark-register))`
+  (cookie copied into the generated autoloads) registers the moment Embark loads -
+  works off the bat, no manual `require`. Eager `(require 'remoto-embark)` still works.
+  Going through the public `remoto-embark-register` rather than `(require 'remoto-embark)`
+  avoids a load recursion when the file loads with Embark already present.
+  `remoto.el` carries no embark reference (keeps main file package-lint clean; the lone
+  `with-eval-after-load` lint caution is confined to `remoto-embark.el`).
 
 ### Per-level completion categories (Stage C core)
 - Injected today in `remoto--read-file-name-internal-a` at the `'metadata` action:
@@ -339,9 +343,13 @@ Stage D - remoto-browse surface, richer actions, polish:
   (`remoto-embark-clone`); url bridge (`remoto-embark-open-in-remoto`).
 - Keymaps: `remoto-embark-owner-map`, `-repo-map`, `-branch-map`, `-dir-map`,
   `-file-map`, `-issue-map` (+ generic `remoto` fallback -> repo map).
-- Transformers: `remoto--embark-transform` (repo/file), `-transform-ref`
-  (owner/branch/issue), `-browse-transform` (`remoto-browse`).
-- `(with-eval-after-load 'embark ...)` registration block.
+- Transformers: `remoto--embark-transform` (repo/file/generic, via
+  `remoto--embark-classify`), `-transform-ref` (owner/branch/issue),
+  `-browse-transform` (`remoto-browse`).
+- Helpers: `remoto--embark-classify` (path shape -> type), `remoto--embark-context`
+  (context or clear error), `remoto--embark-web-url` (web URL for any target kind).
+- `remoto-embark-register` (idempotent) + autoloaded
+  `(with-eval-after-load 'embark (remoto-embark-register))` activation.
 
 `SPEC.md`: "Forge-agnostic URL Layer", "Embark Integration" (keep in sync).
 `.github/workflows/run-tests.yml`: unit-tests (29.4/30.1) + integration-tests.
