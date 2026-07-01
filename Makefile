@@ -6,11 +6,17 @@ EMACS_BATCH = emacs -Q --batch \
 	--eval "(add-to-list 'package-archives '(\"melpa\" . \"https://melpa.org/packages/\"))" \
 	--eval "(package-initialize)"
 
-.PHONY: help test test-integration test-all deps check-autoloads check-compile compile clean
+EMACS_SANDBOX = emacs -Q \
+	--eval "(setq package-user-dir \"$(ELPA_DIR)\")" \
+	--eval "(require 'package)" \
+	--eval "(package-initialize)"
+
+.PHONY: help test test-integration test-all deps check-autoloads check-compile compile clean sandbox
 
 help:
 	@echo "Available commands:"
 	@echo "  make deps              Install dependencies"
+	@echo "  make sandbox           Launch emacs -Q with remoto + embark loaded"
 	@echo "  make test              Run unit tests"
 	@echo "  make test-integration  Run integration tests (needs network)"
 	@echo "  make test-all          Run all tests"
@@ -28,6 +34,14 @@ $(ELPA_DIR):
 	--eval "(package-install 'embark)"
 
 deps: $(ELPA_DIR)
+
+sandbox: $(ELPA_DIR)
+	$(EMACS_SANDBOX) --directory . \
+	--eval "(require 'embark)" \
+	--eval "(require 'remoto)" \
+	--eval "(require 'remoto-embark)" \
+	--eval "(global-set-key (kbd \"C-.\") #'embark-act)" \
+	--eval "(message \"remoto sandbox: M-x remoto-browse | C-x C-f /github:owner/repo | C-. embark-act\")"
 
 test: $(ELPA_DIR)
 	$(EMACS_BATCH) --directory . \
