@@ -5,7 +5,7 @@
 ;; Author: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: April 24, 2026
-;; Version: 1.7.0
+;; Version: 1.8.1
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
 ;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
@@ -3067,53 +3067,30 @@ Provides group-function and affixation-function for @ and # modes."
         (affixation-function . ,affix-fn))))))
 
 (defun remoto--read-file-name-internal-a (orig string pred action)
-  "Fix completion for /github: paths inside `read-file-name'.
-Re-attaches the raw prefix that `substitute-in-file-name' strips,
-so completion frameworks (Vertico, etc.) can match candidates
-against the actual minibuffer content.
-Injects completion metadata (grouping, affixation) for @ and # modes.
+  "Inject remoto completion metadata inside `read-file-name'.
+Completion itself is delegated to ORIG so candidates stay relative to the
+completion boundary.  Re-basing them to full paths makes frameworks like
+Vertico prepend the directory twice (e.g. /github: + /github:owner ->
+/github:/github:owner).  Only category/affixation metadata is added, for the
+@ (branches/tags), # (issues), and owner/repo levels.  The /gh: shorthand is
+already canonicalized by `substitute-in-file-name', so EFFECTIVE is /github:.
 Args: ORIG, STRING, PRED, ACTION."
   (let ((effective (substitute-in-file-name string)))
-    (cond
-     ;; Non-github path - pass through.
-     ((not (string-prefix-p "/github:" effective))
-      (funcall orig string pred action))
-     ;; Metadata action - inject our metadata for @ and # modes.
-     ((eq action 'metadata)
+    (if (not (and (eq action 'metadata) (string-prefix-p "/github:" effective)))
+        (funcall orig string pred action)
       (let* ((dir (or (file-name-directory effective) ""))
              (extra (remoto--completion-metadata dir))
              (base (funcall orig string pred action))
              (base-alist (and (consp base) (eq (car base) 'metadata) (cdr base))))
-              (if extra
-                  ;; Replace category so Marginalia doesn't override our annotations.
-                  ;; Use the per-level category from `remoto--completion-metadata' when
-                  ;; it provides one, else the generic `remoto'.
-                  (let ((cat (or (alist-get 'category extra) 'remoto)))
-                    (cons 'metadata (append (assq-delete-all 'category (copy-alist extra))
-                                            `((category . ,cat))
-                                            (assq-delete-all 'category (copy-alist base-alist)))))
-                (or base (cons 'metadata nil)))))
-     ;; Non-standard action (boundaries, etc.) - pass through.
-     ((not (memq action '(nil t lambda)))
-      (funcall orig string pred action))
-     ;; Standard completion action - fixup prefixes.
-     (t
-      (let* ((gh-pos (string-search "/github:" string))
-             (raw-prefix (if (and gh-pos (< 0 gh-pos))
-                             (substring string 0 gh-pos)
-                           ""))
-             (result (funcall orig effective pred action)))
-        (pcase action
-          ('t
-           (let ((full-prefix (concat raw-prefix
-                                      (or (file-name-directory effective) ""))))
-             (mapcar (lambda (c) (concat full-prefix c)) result)))
-          ('nil
-           (cond
-            ((eq result t) t)
-            ((stringp result) (concat raw-prefix result))
-            (t result)))
-          ('lambda result)))))))
+        (if extra
+            ;; Replace category so Marginalia doesn't override our annotations.
+            ;; Use the per-level category from `remoto--completion-metadata' when
+            ;; it provides one, else the generic `remoto'.
+            (let ((cat (or (alist-get 'category extra) 'remoto)))
+              (cons 'metadata (append (assq-delete-all 'category (copy-alist extra))
+                                      `((category . ,cat))
+                                      (assq-delete-all 'category (copy-alist base-alist)))))
+          (or base (cons 'metadata nil)))))))
 
 (advice-add 'read-file-name-internal :around
             #'remoto--read-file-name-internal-a)

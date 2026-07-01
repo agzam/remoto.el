@@ -3,6 +3,14 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [1.8.1] - 2026-06-30
+
+** Fixed
+- Minibuffer completion of ~/github:~ and ~/gh:~ paths no longer doubles the prefix. The ~read-file-name-internal~ advice re-based candidates to full paths (for example the repo segment ~agzam/~ became ~/github:agzam/~), so base-aware completion frameworks - Vertico, and Emacs' default completion - prepended the directory a second time: completing ~/gh:agza~ inserted ~/gh:/gh:agzam/~ instead of ~/gh:agzam/~ (and ~/gh:agza/github:agzam/~ before that). The advice now injects only the completion metadata (category and affixation for the ~@~, ~#~, and owner/repo levels) and delegates completion to the original table, so candidates stay relative to the completion boundary and are inserted exactly once. The defect affected both the ~/gh:~ shorthand and the canonical ~/github:~ form and had been latent since the advice was introduced.
+
+** Added
+- A regression test that reproduces the doubling by mirroring how a base-aware framework inserts a candidate (~string[0..base]~ concatenated with the candidate), asserting a single-prefixed result for ~/gh:~ and ~/github:~ at the owner and nested-path levels.
+
 * [1.8.0]
 
 ** Added

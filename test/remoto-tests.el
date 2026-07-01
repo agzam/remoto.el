@@ -1604,6 +1604,48 @@
     (expect (remoto-file-name-handler 'file-name-directory "/gh:foobar/zapzop")
             :to-equal "/github:foobar/"))
 
+  (it "completes /gh: and /github: without doubling the prefix"
+    ;; Regression: the `read-file-name' advice re-based candidates to full
+    ;; paths (e.g. /github:agzam/), so base-aware frameworks (Vertico, default
+    ;; completion) prepended the directory again, yielding /gh:/gh:agzam/
+    ;; (and /gh:agza/github:agzam/ before that).  Candidates must stay relative
+    ;; to the completion boundary.  This mirrors how a framework inserts:
+    ;; string[0..base] + candidate.
+    (spy-on 'remoto--handle-file-name-all-completions
+            :and-call-fake
+            (lambda (file directory)
+              (seq-filter (lambda (c) (string-prefix-p file c))
+                          (if (string-match-p "/github:[^/]+/[^/]+/" directory)
+                              '("src/") '("agzam/")))))
+    (let* ((tbl #'read-file-name-internal)
+           (insert (lambda (input)
+                     (let* ((md (completion-metadata input tbl nil))
+                            (all (completion-all-completions
+                                  input tbl nil (length input) md))
+                            (base (or (cdr (last all)) 0)))
+                       (concat (substring input 0 base)
+                               (and (consp all)
+                                    (substring-no-properties (car all))))))))
+      ;; candidate is the relative segment, not a full /github: path
+      (expect (substring-no-properties
+               (car (completion-all-completions
+                     "/github:agza" tbl nil 12
+                     (completion-metadata "/github:agza" tbl nil))))
+              :to-equal "agzam/")
+      ;; the framework insert is single-prefixed at every level
+      (expect (funcall insert "/gh:agza") :to-equal "/gh:agzam/")
+      (expect (funcall insert "/github:agza") :to-equal "/github:agzam/")
+      (expect (funcall insert "/gh:torvalds/linux/sr")
+              :to-equal "/gh:torvalds/linux/src/")))
+
+  (it "injects the same completion metadata category as /github: per level"
+    (let ((cat (lambda (s)
+                 (completion-metadata-get
+                  (completion-metadata s #'read-file-name-internal nil) 'category))))
+      (expect (funcall cat "/gh:agzam/repo@") :to-equal 'remoto-branch)
+      (expect (funcall cat "/gh:agzam/repo#") :to-equal 'remoto-issue)
+      (expect (funcall cat "/gh:agza") :to-equal (funcall cat "/github:agza"))))
+
   (it "routes /gh: through the public file API like /github:"
     (expect (file-remote-p "/gh:foobar/" 'method) :to-equal "github")
     (expect (file-remote-p "/gh:foobar/")
