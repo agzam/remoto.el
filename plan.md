@@ -8,12 +8,7 @@ here without prior chat history. Update this file as work proceeds.
 
 - Branch: `embark-integration`, PR #30 (base `main`). CI green.
 - Commits on branch:
-  - `5a213da` Add optional Embark integration on a forge-agnostic URL layer (Stage 1 + forge core).
-  - `c158704` Bind plist-get results in let* for buttercup on Emacs 29 (test fix).
-  - Stages A-D plus owner-level and the generic fallback have since landed on the
-    branch (see `git log main..HEAD`); the lists below are reconciled to that.
 - `main` (`ad0b42c`, PR #29) already has the forge-agnostic URL commands + `remoto-mode`.
-
 Done (Stage 1):
 - Forge-agnostic URL core in `remoto.el`: `remoto-forge-url-templates` (path kinds
   blob/tree/blame/history/raw + repo kinds repo/ssh/https + line/region), and a

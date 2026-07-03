@@ -15,6 +15,8 @@ Wouldn't it be nice to be able to ~C-x C-f~ and just browse any GitHub repo?
 
 remoto.el registers a virtual filesystem via ~file-name-handler-alist~ that translates standard Emacs file operations into GitHub API calls via the ~ghub~ library. The result: ~find-file~, ~dired~, tab-completion, ~dired-subtree~ - all standard Emacs file tooling works against a remote GitHub repo. Read-only.
 
+It was demoed at [[https://www.meetup.com/emacsatx/][Emacs ATX Meetup]] of July 2026. Here's the [[https://youtu.be/YV1kyVE6SvU][video]]. Link to the complete video of that meetup (~2 hrs) is in the description.
+
 * Why
 
 Sometimes you just want to look at code. Check a function signature, read a README, browse a project structure. Cloning a repo for that is overkill - it takes disk space, creates another directory to manage, and breaks your flow.
