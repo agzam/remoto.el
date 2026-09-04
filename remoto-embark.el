@@ -35,6 +35,7 @@
 (declare-function remoto--forge-issue-url "remoto" (forge owner repo number))
 (declare-function remoto--forge-owner-url "remoto" (forge owner &optional kind))
 (declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
+(declare-function magit-status-setup-buffer "magit-status" (&optional directory))
 (defvar dired-directory)
 
 ;; Embark variables this file registers into.  Declared so it byte-compiles
@@ -346,14 +347,30 @@ For an issue the forge redirects to the issue page."
   (browse-url (apply #'remoto--forge-owner-url
                      (append (remoto--embark-owner-parts target) '(owner-repos)))))
 
+(defun remoto--clone-directory ()
+  "Return a local directory to run a clone in and resolve it against."
+  (if (file-remote-p default-directory)
+      (expand-file-name "~/")
+    default-directory))
+
+(defun remoto--clone-finished (dest event)
+  "Report EVENT for the clone into DEST, and visit DEST once it succeeded."
+  (message "remoto clone %s: %s" dest (string-trim event))
+  (when (string-prefix-p "finished" event)
+    (if (require 'magit nil t)
+        (magit-status-setup-buffer dest)
+      (dired dest))))
+
 (defun remoto--clone (url dest)
   "Clone URL into DEST asynchronously, showing progress in a buffer."
-  (let ((buffer (get-buffer-create "*remoto-clone*")))
+  (let* ((default-directory (remoto--clone-directory))
+         (dest (expand-file-name dest))
+         (buffer (get-buffer-create "*remoto-clone*")))
     (with-current-buffer buffer
       (let ((inhibit-read-only t)) (erase-buffer)))
     (set-process-sentinel
      (start-process "remoto-clone" buffer "git" "clone" url dest)
-     (lambda (_proc event) (message "remoto clone %s: %s" dest (string-trim event))))
+     (lambda (_proc event) (remoto--clone-finished dest event)))
     (display-buffer buffer)))
 
 (defun remoto-embark-clone (target)
@@ -362,8 +379,8 @@ The clone URL kind is governed by `remoto-clone-url-type'."
   (interactive "sRemoto repo: ")
   (let* ((ctx (remoto--embark-context target))
          (url (remoto--context-url ctx remoto-clone-url-type))
-         (dest (read-directory-name "Clone into: " nil nil nil
-                                    (plist-get ctx :repo))))
+         (dest (read-directory-name "Clone into: " (remoto--clone-directory)
+                                    nil nil (plist-get ctx :repo))))
     (remoto--clone url dest)))
 
 ;;;; Keymaps

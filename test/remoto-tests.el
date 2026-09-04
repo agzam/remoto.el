@@ -3915,16 +3915,67 @@ Returns the full path after completion, or INPUT if no completion."
               "git@github.com:o/r.git" "/tmp/r/")))
 
   (it "is bound in the repo keymap"
-    (expect (lookup-key remoto-embark-repo-map "c") :to-be 'remoto-embark-clone)))
+    (expect (lookup-key remoto-embark-repo-map "c") :to-be 'remoto-embark-clone))
+
+  (it "prompts from a local directory when acting in a remoto buffer"
+    (spy-on 'remoto--clone)
+    (spy-on 'read-directory-name :and-return-value "/tmp/r/")
+    (let ((default-directory "/github:o/r:/"))
+      (remoto-embark-clone "/github:o/r:/"))
+    (expect (nth 1 (spy-calls-args-for 'read-directory-name 0))
+            :to-equal (expand-file-name "~/"))))
 
 (describe "remoto--clone"
-  (it "launches git clone with the url and dest"
+  (before-each
     (spy-on 'start-process :and-return-value nil)
     (spy-on 'set-process-sentinel)
-    (spy-on 'display-buffer)
+    (spy-on 'display-buffer))
+
+  (it "launches git clone with the url and dest"
     (remoto--clone "https://github.com/o/r.git" "/tmp/r/")
     (expect (nthcdr 2 (spy-calls-args-for 'start-process 0))
-            :to-equal '("git" "clone" "https://github.com/o/r.git" "/tmp/r/"))))
+            :to-equal '("git" "clone" "https://github.com/o/r.git" "/tmp/r/")))
+
+  (it "expands a tilde dest, which git would take literally"
+    (remoto--clone "https://github.com/o/r.git" "~/GitHub/agzam/r/")
+    (expect (nth 5 (spy-calls-args-for 'start-process 0))
+            :to-equal (expand-file-name "~/GitHub/agzam/r/")))
+
+  (it "resolves a relative dest against a local dir, not the remoto one"
+    (let ((default-directory "/github:o/r:/"))
+      (remoto--clone "https://github.com/o/r.git" "r/"))
+    (expect (nth 5 (spy-calls-args-for 'start-process 0))
+            :to-equal (expand-file-name "r/" (expand-file-name "~/"))))
+
+  (it "reports the clone through its sentinel"
+    (remoto--clone "https://github.com/o/r.git" "/tmp/r/")
+    (expect (functionp (nth 1 (spy-calls-args-for 'set-process-sentinel 0)))
+            :to-be-truthy)))
+
+(describe "remoto--clone-finished"
+  (let (visited)
+    (before-each (setq visited nil))
+
+    (it "opens magit-status on the clone when it succeeded"
+      (cl-letf (((symbol-function 'require) (lambda (f &rest _) (eq f 'magit)))
+                ((symbol-function 'magit-status-setup-buffer)
+                 (lambda (dir) (setq visited (cons 'magit dir)))))
+        (remoto--clone-finished "/tmp/r/" "finished\n"))
+      (expect visited :to-equal '(magit . "/tmp/r/")))
+
+    (it "falls back to dired when magit is unavailable"
+      (cl-letf (((symbol-function 'require) (lambda (&rest _) nil))
+                ((symbol-function 'dired) (lambda (dir) (setq visited (cons 'dired dir)))))
+        (remoto--clone-finished "/tmp/r/" "finished\n"))
+      (expect visited :to-equal '(dired . "/tmp/r/")))
+
+    (it "visits nothing when the clone failed"
+      (cl-letf (((symbol-function 'require) (lambda (f &rest _) (eq f 'magit)))
+                ((symbol-function 'magit-status-setup-buffer)
+                 (lambda (dir) (setq visited (cons 'magit dir))))
+                ((symbol-function 'dired) (lambda (dir) (setq visited (cons 'dired dir)))))
+        (remoto--clone-finished "/tmp/r/" "exited abnormally with code 128\n"))
+      (expect visited :to-be nil))))
 
 (describe "owner-level repo completion targets (Stage C)"
   (it "reports the remoto-repo category at owner level"

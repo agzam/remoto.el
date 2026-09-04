@@ -3,6 +3,15 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [1.9.0] - 2026-09-04
+
+** Fixed
+- Cloning from ~embark-act~ now clones into the directory you choose. ~read-directory-name~ hands back a tilde-abbreviated path (~~/code/repo/~) and ~start-process~ runs git without a shell, so git read ~~~ as an ordinary directory name and created ~./~/code/repo~ under its own working directory. The destination is expanded before git sees it.
+- The clone runs in a real local directory, and the "Clone into:" prompt starts there. A remoto buffer's ~default-directory~ names a repository on the forge, so it can be neither the working directory of a local process nor the base of a relative destination.
+
+** Added
+- A finished clone opens the Magit status buffer for it, or ~dired~ when Magit is not installed. Magit stays optional and is loaded only after a successful clone.
+
 * [1.8.1] - 2026-06-30
 
 ** Fixed
