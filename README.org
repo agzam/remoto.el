@@ -121,7 +121,7 @@ Each target type has its own keymap of actions that reuse remoto's forge-agnosti
 | ~remoto-dir~    | ~/github:torvalds/linux@master:/fs~     | ~remoto-embark-dir-map~    |
 | ~remoto-file~   | ~/github:torvalds/linux@master:/README~ | ~remoto-embark-file-map~   |
 
-Run ~embark-act~ on a target to see its actions and keys. Cloning honors ~remoto-clone-url-type~, and Embark's built-in ~url~ target gains ~R~ to open a forge URL at point as a remoto path.
+Run ~embark-act~ on a target to see its actions and keys. Cloning honors ~remoto-clone-url-type~ and opens the clone's Magit status buffer when it finishes (~dired~ without Magit), and Embark's built-in ~url~ target gains ~R~ to open a forge URL at point as a remoto path.
 
 ** How does it work
 
