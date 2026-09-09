@@ -36,6 +36,9 @@ jobs:
       - name: Run embark integration tests
         run: make test-embark
 
+      - name: Lint
+        run: make lint
+
       - name: Check byte-compilation
         run: make check-compile
 

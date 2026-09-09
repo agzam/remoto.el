@@ -18,12 +18,37 @@
 
 (require 'buttercup)
 (require 'embark)
+(require 'loaddefs-gen)
 (require 'remoto)
 (require 'remoto-embark)
+
+;; Installed users get this from the autoloads; a bare `require' does not.
+(remoto-embark-register)
+
+(defmacro remoto-embark-test-with-autoloads (var &rest body)
+  "Bind VAR to a freshly generated autoloads file of the package and run BODY.
+The file sits in its own temporary directory: `loaddefs-generate' skips
+every source older than an existing output file, so it must not exist."
+  (declare (indent 1))
+  `(let ((,var (expand-file-name "remoto-autoloads.el"
+                                 (make-temp-file "remoto-autoloads" t))))
+     (unwind-protect
+         (progn
+           (loaddefs-generate (file-name-directory (locate-library "remoto-embark")) ,var)
+           ,@body)
+       (delete-directory (file-name-directory ,var) t))))
 
 ;;; Registration
 
 (describe "remoto-embark registration"
+  (it "is autoloaded together with the hook that runs it once Embark loads"
+    (remoto-embark-test-with-autoloads file
+      (let ((text (with-temp-buffer
+                    (insert-file-contents file)
+                    (buffer-string))))
+        (expect text :to-match "(autoload 'remoto-embark-register \"[^\"]*remoto-embark\"")
+        (expect text :to-match "(with-eval-after-load 'embark (remoto-embark-register))"))))
+
   (it "registers the per-type keymaps in embark-keymap-alist"
     (expect (assoc 'remoto-repo embark-keymap-alist)
             :to-equal '(remoto-repo remoto-embark-repo-map))

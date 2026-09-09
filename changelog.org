@@ -3,6 +3,16 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [1.9.2] - 2026-09-09
+
+** Changed
+- The Embark hook is now a one-line ~;;;###autoload~ cookie instead of a ~with-eval-after-load~ form in the body of ~remoto-embark.el~. Installed users see no difference - the generated autoloads carry the form either way - but a session that loads ~remoto-embark.el~ by hand must call ~remoto-embark-register~ itself. package-lint rejects the form as code.
+- Character sets in ~rx~ forms use the ~in~ spelling rather than its synonym ~any~. Emacs 31.1 added a function called ~any~, and package-lint reads every ~(any ...)~ in the sources as a call to it.
+
+** Added
+- ~remoto-embark.el~ and ~remoto-topic.el~ carry an ~SPDX-License-Identifier~ and a maintainer, all three files carry an ~Assisted-by~ line, and ~remoto-topic.el~ declares ~remoto.el~ as its package-lint main file.
+- ~make lint~ runs package-lint and checkdoc over the three package files, and CI runs it on every push.
+
 * [1.9.1] - 2026-09-09
 
 ** Fixed

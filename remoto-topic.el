@@ -1,9 +1,13 @@
 ;;; remoto-topic.el --- Issue and PR display for remoto -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Ag Ibragimov
-;; Author: Ag Ibragimov
+;; Author: Ag Ibragimov <agzam.ibragimov@gmail.com>
+;; Assisted-by: ECA:claude-opus-5
+;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 
-;; This file is NOT part of GNU Emacs.
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
+;; This file is not part of GNU Emacs.
 
 ;;; Commentary:
 
@@ -149,7 +153,7 @@ Returns PR alist with merge status, diff stats, review state."
 ;;;; Rendering
 
 (defun remoto-topic--render-header (data is-pr)
-  "Render the header section for DATA. IS-PR if pull request."
+  "Render the header section for DATA.  IS-PR if pull request."
   (let* ((number (alist-get 'number data))
          (title (or (alist-get 'title data) ""))
          (state (or (alist-get 'state data) "unknown"))
@@ -263,8 +267,8 @@ Returns PR alist with merge status, diff stats, review state."
 (defun remoto-topic--parse-repo-path (repo-path)
   "Extract owner and repo from REPO-PATH.
 Returns (OWNER . REPO) or nil."
-  (when (string-match (rx "/github:" (group (+ (not (any "/@#"))))
-                          "/" (group (+ (not (any "/@#")))))
+  (when (string-match (rx "/github:" (group (+ (not (in "/@#"))))
+                          "/" (group (+ (not (in "/@#")))))
                       repo-path)
     (cons (match-string 1 repo-path)
           (match-string 2 repo-path))))
@@ -309,4 +313,8 @@ Detects whether NUMBER is a PR and renders accordingly."
         buf))))
 
 (provide 'remoto-topic)
+
+;; Local Variables:
+;; package-lint-main-file: "remoto.el"
+;; End:
 ;;; remoto-topic.el ends here

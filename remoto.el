@@ -3,9 +3,10 @@
 ;; Copyright (C) 2026 Ag Ibragimov
 ;;
 ;; Author: Ag Ibragimov <agzam.ibragimov@gmail.com>
+;; Assisted-by: ECA:claude-opus-5
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: April 24, 2026
-;; Version: 1.9.1
+;; Version: 1.9.2
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
 ;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
@@ -37,10 +38,10 @@
 
 (defconst remoto--path-regexp
   (rx bos "/github:"
-      (group (+ (not (any "/@"))))      ; owner
+      (group (+ (not (in "/@"))))       ; owner
       "/"
-      (group (+ (not (any "/@:"))))     ; repo
-      (? "@" (group (+ (not (any ":/"))))) ; ref (optional)
+      (group (+ (not (in "/@:"))))      ; repo
+      (? "@" (group (+ (not (in ":/"))))) ; ref (optional)
       ":"
       (group (* anything))              ; path
       eos)
@@ -382,7 +383,7 @@ Stores lightweight directory listings from Contents API.")
 (defun remoto--fetch-dir-children-light (owner repo ref dir-path)
   "Fetch direct children of DIR-PATH in OWNER/REPO@REF via Contents API.
 Returns a list of (NAME . PLIST) pairs, capped at 20 entries.
-Uses cache when available. Much faster than recursive tree fetch."
+Uses cache when available.  Much faster than recursive tree fetch."
   (let* ((key (format "%s/%s@%s:%s" owner repo ref (or dir-path "")))
          (entry (gethash key remoto--dir-contents-cache))
          (now (float-time)))
@@ -534,44 +535,44 @@ triggering variable `confirm-nonexistent-file-or-buffer' on RET."
    ;; /github: and /github:owner/ - directory-like, exist for navigation
    ((string-match (rx bos "/github:" (? "/") eos) filename) t)
    ((string-match (rx bos "/github:"
-                      (+ (not (any "/:@#")))
+                      (+ (not (in "/:@#")))
                       "/" eos)
                   filename) t)
    ;; /github:owner/repo/ - openable as dired on default branch
    ((string-match (rx bos "/github:"
-                      (+ (not (any "/:@#")))
+                      (+ (not (in "/:@#")))
                       "/"
-                      (+ (not (any "/:@#")))
+                      (+ (not (in "/:@#")))
                       "/")
                   filename) t)
    ;; /github:owner/repo#NUM - specific issue ref, openable
    ((string-match (rx bos "/github:"
-                      (+ (not (any "/:@#")))
+                      (+ (not (in "/:@#")))
                       "/"
-                      (+ (not (any "/:@#")))
+                      (+ (not (in "/:@#")))
                       "#"
                       (+ digit) eos)
                   filename) t)
    ;; /github:owner/repo (bare) - NOT openable, still needs delimiter
    ((string-match (rx bos "/github:"
-                      (+ (not (any "/:@#")))
+                      (+ (not (in "/:@#")))
                       "/"
-                      (+ (not (any "/:@#")))
+                      (+ (not (in "/:@#")))
                       eos)
                   filename)
     nil)
    ;; /github:owner/repo# or /github:owner/repo@ - delimiter without selection
    ((string-match (rx bos "/github:"
-                      (+ (not (any "/:@#")))
+                      (+ (not (in "/:@#")))
                       "/"
-                      (+ (not (any "/:@#")))
-                      (any "@#") eos)
+                      (+ (not (in "/:@#")))
+                      (in "@#") eos)
                   filename)
     nil)
    ;; /github:owner# or /github:owner@ - no repo, invalid
    ((and (string-prefix-p "/github:" filename)
          (not (remoto--parse-path filename))
-         (string-match (rx (any "@#") eos) filename))
+         (string-match (rx (in "@#") eos) filename))
     nil)
    ;; Full canonical path - check tree
    (t
@@ -691,9 +692,9 @@ Levels: `root', `owner', `repo' (branches/tags), `files-default', `issues'."
       (list :level 'root :owner nil))
      ;; /github:owner/repo# - issues level (repo must contain no /:@#)
      ((string-match (rx bos "/github:"
-                        (group (+ (not (any "/:@#"))))
+                        (group (+ (not (in "/:@#"))))
                         "/"
-                        (group (+ (not (any "/:@#"))))
+                        (group (+ (not (in "/:@#"))))
                         "#" eos)
                     directory)
       (list :level 'issues
@@ -701,9 +702,9 @@ Levels: `root', `owner', `repo' (branches/tags), `files-default', `issues'."
             :repo (match-string 2 directory)))
      ;; /github:owner/repo@ - branches/tags level
      ((string-match (rx bos "/github:"
-                        (group (+ (not (any "/:@#"))))
+                        (group (+ (not (in "/:@#"))))
                         "/"
-                        (group (+ (not (any "/:@#"))))
+                        (group (+ (not (in "/:@#"))))
                         "@" (? "/") eos)
                     directory)
       (list :level 'repo
@@ -711,9 +712,9 @@ Levels: `root', `owner', `repo' (branches/tags), `files-default', `issues'."
             :repo (match-string 2 directory)))
      ;; /github:owner/repo/ or /github:owner/repo/subdir/ - files-default
      ((string-match (rx bos "/github:"
-                        (group (+ (not (any "/:@#"))))
+                        (group (+ (not (in "/:@#"))))
                         "/"
-                        (group (+ (not (any ":@#"))))
+                        (group (+ (not (in ":@#"))))
                         "/" eos)
                     directory)
       ;; Distinguish owner/ (level=owner) from owner/repo/ (level=files-default)
@@ -733,7 +734,7 @@ Levels: `root', `owner', `repo' (branches/tags), `files-default', `issues'."
                 :repo rest))))
      ;; /github:owner/ - owner level
      ((string-match (rx bos "/github:"
-                        (group (+ (not (any "/:@#"))))
+                        (group (+ (not (in "/:@#"))))
                         "/" eos)
                     directory)
       (list :level 'owner :owner (match-string 1 directory))))))
@@ -765,7 +766,7 @@ and that probe must not turn the deeper path into a search query."
                            (error input)))
               ((string-prefix-p directory effective))
               (rest (substring effective (length directory)))
-              ((not (string-match-p (rx (any "/@#:")) rest))))
+              ((not (string-match-p (rx (in "/@#:")) rest))))
     rest))
 
 (defun remoto--minibuffer-query (directory)
@@ -918,9 +919,9 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
            (when (and (stringp branch) (not (equal branch t)))
              ;; Extract subpath from directory after owner/repo/
              (let* ((repo-end (string-match
-                               (rx (+ (not (any "/:@#")))
+                               (rx (+ (not (in "/:@#")))
                                    "/"
-                                   (+ (not (any "/:@#")))
+                                   (+ (not (in "/:@#")))
                                    "/")
                                directory
                                (length "/github:")))
@@ -1106,9 +1107,9 @@ Handles partial paths including # and files-default short forms."
    ((and (string-prefix-p "/github:" filename)
          (not (remoto--parse-path filename))
          (string-match (rx bos "/github:"
-                           (+ (not (any "/:@#")))
+                           (+ (not (in "/:@#")))
                            "/"
-                           (+ (not (any "/:@#")))
+                           (+ (not (in "/:@#")))
                            "#")
                        filename))
     (match-string 0 filename))
@@ -1116,9 +1117,9 @@ Handles partial paths including # and files-default short forms."
    ((and (string-prefix-p "/github:" filename)
          (not (remoto--parse-path filename))
          (string-match (rx bos "/github:"
-                           (+ (not (any "/:@#")))
+                           (+ (not (in "/:@#")))
                            "/"
-                           (+ (not (any "/:@#")))
+                           (+ (not (in "/:@#")))
                            "@")
                        filename))
     (match-string 0 filename))
@@ -1126,9 +1127,9 @@ Handles partial paths including # and files-default short forms."
    ((and (string-prefix-p "/github:" filename)
          (not (remoto--parse-path filename))
          (string-match (rx bos "/github:"
-                           (+ (not (any "/:@#")))
+                           (+ (not (in "/:@#")))
                            "/"
-                           (+ (not (any "/:@#")))
+                           (+ (not (in "/:@#")))
                            "/")
                        filename))
     (if (string-suffix-p "/" filename)
@@ -1142,7 +1143,7 @@ Handles partial paths including # and files-default short forms."
    ((and (string-prefix-p "/github:" filename)
          (not (remoto--parse-path filename))
          (string-match (rx bos "/github:"
-                           (+ (not (any "/:@#")))
+                           (+ (not (in "/:@#")))
                            "/")
                        filename))
     (match-string 0 filename))
@@ -1178,9 +1179,9 @@ Handles partial paths including # and files-default short forms."
    ((and (string-prefix-p "/github:" filename)
          (not (remoto--parse-path filename))
          (string-match (rx bos "/github:"
-                           (+ (not (any "/:@#")))
+                           (+ (not (in "/:@#")))
                            "/"
-                           (+ (not (any "/:@#")))
+                           (+ (not (in "/:@#")))
                            "#"
                            (group (* anything)) eos)
                        filename))
@@ -1189,9 +1190,9 @@ Handles partial paths including # and files-default short forms."
    ((and (string-prefix-p "/github:" filename)
          (not (remoto--parse-path filename))
          (string-match (rx bos "/github:"
-                           (+ (not (any "/:@#")))
+                           (+ (not (in "/:@#")))
                            "/"
-                           (+ (not (any "/:@#")))
+                           (+ (not (in "/:@#")))
                            "@" eos)
                        filename))
     "")
@@ -1199,11 +1200,11 @@ Handles partial paths including # and files-default short forms."
    ((and (string-prefix-p "/github:" filename)
          (not (remoto--parse-path filename))
          (string-match (rx bos "/github:"
-                           (+ (not (any "/:@#")))
+                           (+ (not (in "/:@#")))
                            "/"
-                           (+ (not (any "/:@#")))
+                           (+ (not (in "/:@#")))
                            "@"
-                           (group (+ (not (any "/:@"))))
+                           (group (+ (not (in "/:@"))))
                            eos)
                        filename))
     (match-string 1 filename))
@@ -1211,9 +1212,9 @@ Handles partial paths including # and files-default short forms."
    ((and (string-prefix-p "/github:" filename)
          (not (remoto--parse-path filename))
          (string-match (rx bos "/github:"
-                           (+ (not (any "/:@#")))
+                           (+ (not (in "/:@#")))
                            "/"
-                           (+ (not (any "/:@#")))
+                           (+ (not (in "/:@#")))
                            "/")
                        filename))
     ;; After repo/, extract the last component without re-entering handler
@@ -1231,8 +1232,8 @@ Handles partial paths including # and files-default short forms."
    ;; /github:owner/repo (bare, no delimiter) -> "repo"
    ((and (string-prefix-p "/github:" filename)
          (not (remoto--parse-path filename))
-         (string-match (rx bos "/github:" (+ (not (any "/:@#"))) "/"
-                           (group (+ (not (any "/:@#")))) eos)
+         (string-match (rx bos "/github:" (+ (not (in "/:@#"))) "/"
+                           (group (+ (not (in "/:@#")))) eos)
                        filename))
     (match-string 1 filename))
    ;; /github:query - everything after /github: is the query (owner or owner#, etc.)
@@ -1426,7 +1427,7 @@ Pass DIR-FLAG and SUFFIX through to `make-temp-file'."
 (defun remoto--handle-copy-file (file newname
                                       &optional ok-if-already-exists keep-time
                                       preserve-uid-gid preserve-permissions)
-  "Copy FILE to NEWNAME. Works when destination is outside remoto.
+  "Copy FILE to NEWNAME.  Works when destination is outside remoto.
 OK-IF-ALREADY-EXISTS, KEEP-TIME, PRESERVE-UID-GID, and
 PRESERVE-PERMISSIONS are passed through to `copy-file'."
   (if (string-match-p remoto--path-regexp newname)
@@ -1456,7 +1457,7 @@ PRESERVE-PERMISSIONS are passed through to `copy-file'."
      (rx bos "https://github.com/"
          (group (+ (not "/")))
          "/"
-         (group (+ (not (any "/#"))))
+         (group (+ (not (in "/#"))))
          (? "/" (or "tree" "blob") "/"
             (group (+ (not "/")))
             (? "/" (group (+ (not "#")))))
@@ -1472,8 +1473,8 @@ PRESERVE-PERMISSIONS are passed through to `copy-file'."
      (rx bos "https://github.com/"
          (group (+ (not "/")))
          "/"
-         (group (+ (not (any "/#. "))))
-         (* (any "/."))
+         (group (+ (not (in "/#. "))))
+         (* (in "/."))
          eos)
      input)
     (remoto-path-create
@@ -1488,7 +1489,7 @@ PRESERVE-PERMISSIONS are passed through to `copy-file'."
          (rx bos "git@github.com:"
              (group (+ (not "/")))
              "/"
-             (group (+ (not (any "/ "))))
+             (group (+ (not (in "/ "))))
              eos)
          input)
     (let ((repo (match-string 2 input)))
@@ -1504,9 +1505,9 @@ PRESERVE-PERMISSIONS are passed through to `copy-file'."
   "Parse owner/repo INPUT into a `remoto-path' struct."
   (when (string-match
          (rx bos
-             (group (+ (not (any "/@"))))
+             (group (+ (not (in "/@"))))
              "/"
-             (group (+ (not (any "/@"))))
+             (group (+ (not (in "/@"))))
              (? "@" (group (+ nonl)))
              eos)
          input)
@@ -1587,7 +1588,7 @@ an entry here and teaching `remoto--parse-path' the new path prefix.")
   "Return the forge symbol for remoto PATH, or nil when undetermined.
 Derived from the path prefix, e.g. \"/github:...\" -> `github'."
   (when (and (stringp path)
-             (string-match (rx bos "/" (group (+ (not (any "/:")))) ":") path))
+             (string-match (rx bos "/" (group (+ (not (in "/:")))) ":") path))
     (let ((prefix (match-string 1 path)))
       (if (member prefix '("github" "gh")) 'github (intern prefix)))))
 
@@ -2137,8 +2138,8 @@ ALIST maps filename -> first line of commit message.")
 (defun remoto--fetch-file-commits (owner repo ref dir-path children)
   "Fetch last commit message for each file in CHILDREN.
 DIR-PATH is the directory path within OWNER/REPO at REF.
-CHILDREN is a list of filenames. Returns alist of (name . msg).
-Cached per `remoto-search-cache-ttl'. Capped at 20 API calls."
+CHILDREN is a list of filenames.  Returns alist of (name . msg).
+Cached per `remoto-search-cache-ttl'.  Capped at 20 API calls."
   (let* ((key (format "%s/%s@%s:%s" owner repo ref dir-path))
          (entry (gethash key remoto--file-commits-cache))
          (now (float-time)))
@@ -2185,7 +2186,7 @@ Returns propertized login strings with type and description."
 
 (defun remoto--search-users (prefix)
   "Search GitHub users/orgs matching PREFIX, never blocking.
-Returns cached or locally-narrowed results immediately. On cache
+Returns cached or locally-narrowed results immediately.  On cache
 miss, schedules a debounced async fetch and returns nil; the
 completion UI refreshes when results arrive.
 Requires at least `remoto-min-search-chars' characters."
@@ -2243,7 +2244,7 @@ Requires at least `remoto-min-search-chars' characters."
 
 (defun remoto--prefetch-owner-repos (owner)
   "Pre-fetch recent repos for OWNER asynchronously.
-Cancels any previously scheduled pre-fetch. Uses the async API
+Cancels any previously scheduled pre-fetch.  Uses the async API
 so it never blocks typing."
   (when remoto--prefetch-timer
     (cancel-timer remoto--prefetch-timer))
@@ -2267,7 +2268,7 @@ so it never blocks typing."
 
 (defun remoto--recent-owner-repos (owner)
   "Return cached recent repos for OWNER, scheduling async refresh.
-Uses `remoto-repo-cache-ttl' for longer caching. Returns cached
+Uses `remoto-repo-cache-ttl' for longer caching.  Returns cached
 results immediately (may be nil on first access); an async fetch
 updates the cache and refreshes the completion UI."
   (let* ((cache-key (format "\0repos-recent:%s" (downcase owner))))
@@ -2309,7 +2310,7 @@ NAME-KEY selects the JSON field for the repo name (default `name')."
 
 (defun remoto--search-owner-repos (owner query)
   "Search OWNER's repos matching QUERY, never blocking.
-Returns cached or locally-narrowed results immediately. On cache
+Returns cached or locally-narrowed results immediately.  On cache
 miss, schedules a debounced async fetch and returns nil.
 Requires at least `remoto-min-search-chars' characters in QUERY.
 Also narrows from the recent-repos cache when available."
@@ -2510,22 +2511,22 @@ OWNER+REPO are non-nil for @ and # modes.
 QUERY is the text after the delimiter."
   (cond
    ;; owner/repo#query - issues mode
-   ((string-match (rx bos (group (+ (not (any "/@#"))))
-                      "/" (group (+ (not (any "/@#"))))
+   ((string-match (rx bos (group (+ (not (in "/@#"))))
+                      "/" (group (+ (not (in "/@#"))))
                       "#" (group (* anything)) eos)
                   string)
     (list 'issues (match-string 1 string)
           (match-string 2 string) (match-string 3 string)))
    ;; owner/repo@query - branches mode
-   ((string-match (rx bos (group (+ (not (any "/@#"))))
-                      "/" (group (+ (not (any "/@#"))))
+   ((string-match (rx bos (group (+ (not (in "/@#"))))
+                      "/" (group (+ (not (in "/@#"))))
                       "@" (group (* anything)) eos)
                   string)
     (list 'branches (match-string 1 string)
           (match-string 2 string) (match-string 3 string)))
    ;; owner/repo/[subpath] - files mode
-   ((string-match (rx bos (group (+ (not (any "/@#"))))
-                      "/" (group (+ (not (any "/@#"))))
+   ((string-match (rx bos (group (+ (not (in "/@#"))))
+                      "/" (group (+ (not (in "/@#"))))
                       "/" (group (* anything)) eos)
                   string)
     (list 'files (match-string 1 string)
@@ -2729,8 +2730,8 @@ to search GitHub repositories."
   (remoto--with-fetch-indicator
     (cond
      ;; Issue/PR mode: owner/repo#NUM
-     ((string-match (rx bos (group (+ (not (any "/@#"))))
-                        "/" (group (+ (not (any "/@#"))))
+     ((string-match (rx bos (group (+ (not (in "/@#"))))
+                        "/" (group (+ (not (in "/@#"))))
                         "#" (group (+ digit)) eos)
                     input)
       (let ((owner (match-string 1 input))
@@ -2739,8 +2740,8 @@ to search GitHub repositories."
         (remoto--require-topic)
         (remoto-topic-display number (format "/github:%s/%s" owner repo))))
      ;; Files mode: owner/repo/[subpath]
-     ((string-match (rx bos (group (+ (not (any "/@#"))))
-                        "/" (group (+ (not (any "/@#"))))
+     ((string-match (rx bos (group (+ (not (in "/@#"))))
+                        "/" (group (+ (not (in "/@#"))))
                         "/" (group (* anything)) eos)
                     input)
       (let* ((owner (match-string 1 input))
@@ -2757,8 +2758,8 @@ to search GitHub repositories."
           (find-file canonical))))
      ;; Branch mode or plain repo
      (t
-      (let* ((clean (if (string-match (rx bos (group (+ (not (any "/@#")))
-                                                     "/" (+ (not (any "/@#"))))
+      (let* ((clean (if (string-match (rx bos (group (+ (not (in "/@#")))
+                                                     "/" (+ (not (in "/@#"))))
                                           "@" (group (+ nonl)) eos)
                                       input)
                         (format "%s@%s" (match-string 1 input)
@@ -2789,10 +2790,10 @@ to search GitHub repositories."
 Returns a `remoto-path' struct or nil."
   (cond
    ((string-match (rx bos "/github:"
-                      (group (+ (not (any "/:@#"))))
+                      (group (+ (not (in "/:@#"))))
                       "/"
-                      (group (+ (not (any "/:@#"))))
-                      (? "@" (group (+ (not (any "/:")))))
+                      (group (+ (not (in "/:@#"))))
+                      (? "@" (group (+ (not (in "/:")))))
                       eos)
                   input)
     (remoto-path-create
@@ -2802,10 +2803,10 @@ Returns a `remoto-path' struct or nil."
      :path "/"))
    ;; Also handle with trailing /
    ((string-match (rx bos "/github:"
-                      (group (+ (not (any "/:@#"))))
+                      (group (+ (not (in "/:@#"))))
                       "/"
-                      (group (+ (not (any "/:@#"))))
-                      (? "@" (group (+ (not (any "/:")))))
+                      (group (+ (not (in "/:@#"))))
+                      (? "@" (group (+ (not (in "/:")))))
                       "/" eos)
                   input)
     (remoto-path-create
@@ -2825,9 +2826,9 @@ Otherwise return INPUT unchanged."
    ((and (string-prefix-p "/github:" input)
          (not (remoto--parse-path input))
          (string-match (rx bos "/github:"
-                           (group (+ (not (any "/:@#"))))
+                           (group (+ (not (in "/:@#"))))
                            "/"
-                           (group (+ (not (any "/:@#"))))
+                           (group (+ (not (in "/:@#"))))
                            "/" (group (* anything)) eos)
                        input))
     (let* ((owner (match-string 1 input))
@@ -2882,7 +2883,7 @@ Call ORIG-FN with DIR-OR-LIST and ARGS after any rewrite."
 Intercepts #NUM patterns to display issues instead of file operations.
 Call ORIG-FN with FILENAME and ARGS after any rewrite."
   ;; Check for #NUM BEFORE rewrite (rewrite would mangle the # delimiter)
-  (if (string-match (rx "/github:" (+ (not (any "/@#"))) "/" (+ (not (any "/@#")))
+  (if (string-match (rx "/github:" (+ (not (in "/@#"))) "/" (+ (not (in "/@#")))
                         (group "#") (group (+ digit)) eos)
                     filename)
       (progn
@@ -3068,7 +3069,7 @@ Uses display property for alignment (works in any completion UI)."
 Provides group-function and affixation-function for @ and # modes."
   (cond
    ;; Issues mode: /github:OWNER/REPO#
-   ((string-match (rx (+ (not (any "/:@#"))) "/" (+ (not (any "/:@#"))) "#" eos)
+   ((string-match (rx (+ (not (in "/:@#"))) "/" (+ (not (in "/:@#"))) "#" eos)
                   directory)
     (let ((group-fn (lambda (candidate transform)
                       (if transform candidate
@@ -3089,7 +3090,7 @@ Provides group-function and affixation-function for @ and # modes."
         (group-function . ,group-fn)
         (affixation-function . ,affix-fn))))
    ;; Branches/tags mode: /github:OWNER/REPO@
-   ((string-match (rx (+ (not (any "/:@#"))) "/" (+ (not (any "/:@#"))) "@" eos)
+   ((string-match (rx (+ (not (in "/:@#"))) "/" (+ (not (in "/:@#"))) "@" eos)
                   directory)
     (let ((group-fn (lambda (candidate transform)
                       (if transform candidate
@@ -3099,9 +3100,9 @@ Provides group-function and affixation-function for @ and # modes."
       `((category . remoto-branch)
         (group-function . ,group-fn))))
    ;; File mode: canonical path or files-default (owner/repo/ with optional subpath)
-   ((or (string-match (rx "@" (+ (not (any ":"))) ":" (? "/")) directory)
-        (string-match (rx "/github:" (+ (not (any "/:@#"))) "/"
-                          (+ (not (any "/:@#"))) "/" (* nonl) eos)
+   ((or (string-match (rx "@" (+ (not (in ":"))) ":" (? "/")) directory)
+        (string-match (rx "/github:" (+ (not (in "/:@#"))) "/"
+                          (+ (not (in "/:@#"))) "/" (* nonl) eos)
                       directory))
     (let ((affix-fn (lambda (candidates)
                       (remoto--affixate
@@ -3112,7 +3113,7 @@ Provides group-function and affixation-function for @ and # modes."
       `((category . remoto-file)
         (affixation-function . ,affix-fn))))
    ;; Owner mode: /github:OWNER/ - repo descriptions
-   ((string-match (rx "/github:" (+ (not (any "/:@#"))) "/" eos) directory)
+   ((string-match (rx "/github:" (+ (not (in "/:@#"))) "/" eos) directory)
     (let ((affix-fn (lambda (candidates)
                       (remoto--affixate
                        (mapcar (lambda (c)

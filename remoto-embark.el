@@ -1,16 +1,22 @@
 ;;; remoto-embark.el --- Embark integration for remoto -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Ag Ibragimov
-;; Author: Ag Ibragimov
+;; Author: Ag Ibragimov <agzam.ibragimov@gmail.com>
+;; Assisted-by: ECA:claude-opus-5
+;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 
-;; This file is NOT part of GNU Emacs.
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
+;; This file is not part of GNU Emacs.
 
 ;;; Commentary:
 
 ;; Optional Embark integration for remoto.  An autoloaded hook activates it
 ;; automatically once Embark is loaded (see the registration at the end of
 ;; this file), and it has no hard dependency on Embark, so users without it
-;; are unaffected.
+;; are unaffected.  The hook lives in the generated autoloads, so a session
+;; that loads this file by hand instead of installing the package must call
+;; `remoto-embark-register' itself.
 ;; It defines forge-agnostic Embark target types - `remoto-repo',
 ;; `remoto-dir', `remoto-file' - for remoto file and Dired buffers, with
 ;; keymaps of actions that copy or open the corresponding web and clone
@@ -125,10 +131,10 @@ non-strings and unrecognized strings are returned as-is."
        ((remoto--parse-path path) path)
        ((string-match-p (rx "#" (+ digit) eos) path) path)
        ((string-match (rx bos "/github:"
-                          (group (+ (not (any "/@:#"))))           ; owner
+                          (group (+ (not (in "/@:#"))))            ; owner
                           "/"
-                          (group (+ (not (any "/@:#"))))           ; repo
-                          (group (? "@" (+ (not (any "/:#")))))    ; @ref
+                          (group (+ (not (in "/@:#"))))            ; repo
+                          (group (? "@" (+ (not (in "/:#")))))     ; @ref
                           (group (* nonl))                         ; rest
                           eos)
                       path)
@@ -279,9 +285,9 @@ This routes to the remoto-topic display via `find-file'."
 (defun remoto-embark-copy-issue-ref (target)
   "Copy the OWNER/REPO#N reference for the remoto issue/PR TARGET."
   (interactive "sRemoto issue: ")
-  (if (string-match (rx "/" (+ (not (any ":"))) ":"
-                        (group (+ (not (any "/")))) "/"
-                        (group (+ (not (any "#")))) "#" (group (+ digit)))
+  (if (string-match (rx "/" (+ (not (in ":"))) ":"
+                        (group (+ (not (in "/")))) "/"
+                        (group (+ (not (in "#")))) "#" (group (+ digit)))
                     target)
       (remoto--kill-url (format "%s/%s#%s"
                                 (match-string 1 target)
@@ -291,9 +297,9 @@ This routes to the remoto-topic display via `find-file'."
 
 (defun remoto--embark-issue-parts (target)
   "Return (FORGE OWNER REPO NUMBER) for an issue TARGET like /github:O/R#N."
-  (when (string-match (rx "/" (+ (not (any ":"))) ":"
-                          (group (+ (not (any "/")))) "/"
-                          (group (+ (not (any "#")))) "#" (group (+ digit)))
+  (when (string-match (rx "/" (+ (not (in ":"))) ":"
+                          (group (+ (not (in "/")))) "/"
+                          (group (+ (not (in "#")))) "#" (group (+ digit)))
                       target)
     ;; Bind the match strings before `remoto--forge-type', which runs its
     ;; own `string-match' and would otherwise clobber the match data.
@@ -322,8 +328,8 @@ For an issue the forge redirects to the issue page."
 
 (defun remoto--embark-owner-parts (target)
   "Return (FORGE OWNER) for an account TARGET like /github:OWNER."
-  (when (string-match (rx "/" (+ (not (any ":"))) ":"
-                          (group (+ (not (any "/")))) (? "/") eos)
+  (when (string-match (rx "/" (+ (not (in ":"))) ":"
+                          (group (+ (not (in "/")))) (? "/") eos)
                       target)
     ;; Bind the owner before `remoto--forge-type', whose own `string-match'
     ;; would otherwise clobber the match data.
@@ -458,16 +464,13 @@ calling it more than once is harmless."
   (add-to-list 'embark-transformer-alist '(remoto-browse . remoto--embark-browse-transform))
   (define-key embark-url-map "R" #'remoto-embark-open-in-remoto))
 
-;; Activate as soon as Embark is available.  The cookie copies this form into
-;; the generated autoloads, so the integration works off the bat for anyone
-;; who has Embark - with no manual `require' - while Embark stays a
-;; non-runtime dependency: nothing here loads until Embark itself loads.
-;; Going through the autoloaded `remoto-embark-register' (rather than
-;; `(require 'remoto-embark)') avoids a load recursion when this file is
-;; itself loaded with Embark already present.
-;;;###autoload
-(with-eval-after-load 'embark
-  (remoto-embark-register))
+;; Copied verbatim into the generated autoloads, so the integration works off
+;; the bat for anyone who has Embark - with no manual `require' - while Embark
+;; stays a non-runtime dependency: nothing here loads until Embark itself
+;; loads.  Going through the autoloaded `remoto-embark-register' (rather than
+;; `(require 'remoto-embark)') avoids a load recursion when this file is itself
+;; loaded with Embark already present.
+;;;###autoload (with-eval-after-load 'embark (remoto-embark-register))
 
 (provide 'remoto-embark)
 
