@@ -754,11 +754,11 @@ Preserves OWNER's text properties (used for affixation) and attaches a
     (minibuffer-contents-no-properties)))
 
 (defun remoto--input-query (input directory)
-  "Text that INPUT holds after DIRECTORY, or nil when INPUT is elsewhere.
-INPUT goes through `substitute-in-file-name' first, the normalization
-`read-file-name' applies, so a shadowed prefix such as \"~/x//github:o/\"
-and the /gh: shorthand both resolve to DIRECTORY.  Nil as well when the
-text after DIRECTORY holds a level delimiter: `partial-completion'
+  "Return the text of INPUT after DIRECTORY, or nil when INPUT is elsewhere.
+Normalize INPUT with `substitute-in-file-name' first, the way
+`read-file-name' does, so a shadowed prefix such as \"~/x//github:o/\"
+and the /gh: shorthand both resolve to DIRECTORY.  Return nil as well when
+the text after DIRECTORY carries a level delimiter: `partial-completion'
 probes parent levels with an empty FILE while the input sits deeper,
 and that probe must not turn the deeper path into a search query."
   (when-let* ((effective (condition-case nil
@@ -980,7 +980,7 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
              (let* ((candidates
                      (mapcar (lambda (i)
                                (let* ((num (number-to-string (alist-get 'number i)))
-                                      (is-pr (not (null (alist-get 'pull_request i))))
+                                      (is-pr (and (alist-get 'pull_request i) t))
                                       (title (or (alist-get 'title i) ""))
                                       (state (or (alist-get 'state i) "")))
                                  (propertize num
@@ -1793,7 +1793,7 @@ pointing at the same content even after the branch advances."
     (message "Browsing: %s" url)))
 
 ;;;###autoload
-(define-obsolete-function-alias 'remoto-copy-github-url 'remoto-copy-url "1.8.0")
+(define-obsolete-function-alias 'remoto-copy-github-url #'remoto-copy-url "1.8.0")
 
 ;;;; Repository search
 
@@ -2562,7 +2562,7 @@ Handles search, branch, and issue modes."
            (let ((candidates
                   (mapcar (lambda (i)
                             (let* ((num (number-to-string (alist-get 'number i)))
-                                   (is-pr (not (null (alist-get 'pull_request i))))
+                                   (is-pr (and (alist-get 'pull_request i) t))
                                    (title (or (alist-get 'title i) ""))
                                    (state (or (alist-get 'state i) "")))
                               (propertize (concat prefix num)
@@ -2990,7 +2990,7 @@ Bind it as a unit under a prefix of your choice, e.g.:
 
   (with-eval-after-load \\='remoto
     (keymap-set remoto-mode-map \"C-c g\" remoto-command-map))")
-(fset 'remoto-command-map remoto-command-map)
+(defalias 'remoto-command-map remoto-command-map)
 
 (defvar remoto-mode-map (make-sparse-keymap)
   "Keymap for `remoto-mode'.
@@ -3193,6 +3193,7 @@ Adds the package directory to `load-path' if needed."
   (advice-remove 'read-file-name-internal #'remoto--read-file-name-internal-a)
   (remove-hook 'find-file-hook #'remoto--maybe-enable-mode)
   (remove-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
+  (remove-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
   (clrhash remoto--tree-cache)
   (clrhash remoto--default-branch-cache)
   (clrhash remoto--branches-cache)

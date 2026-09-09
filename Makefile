@@ -76,6 +76,7 @@ lint: $(ELPA_DIR)
 	-f package-lint-batch-and-exit remoto.el remoto-embark.el remoto-topic.el
 	$(EMACS_BATCH) \
 	--eval "(require 'checkdoc)" \
+	--eval "(setq checkdoc-verb-check-experimental-flag t)" \
 	--eval "(dolist (f '(\"remoto.el\" \"remoto-embark.el\" \"remoto-topic.el\")) \
 	           (with-current-buffer (find-file-noselect f) \
 	             (check-parens) \

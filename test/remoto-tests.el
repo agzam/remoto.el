@@ -4583,6 +4583,32 @@ of `completion-all-completions'; Vertico inserts a candidate as
               :to-equal '("agzam/remoto.el"))
       (expect 'remoto--search-repos :to-have-been-called-with "agzam/rem"))))
 
+;;; Unloading
+
+(describe "remoto-unload-function"
+  ;; Everything remoto installs at load time is put back, so the rest of
+  ;; the suite runs against a loaded remoto.
+  (it "removes the handler, the hooks and the advice"
+    (let ((handlers file-name-handler-alist))
+      (unwind-protect
+          (progn
+            (remoto-unload-function)
+            (expect (assoc remoto--handler-regexp file-name-handler-alist)
+                    :to-be nil)
+            (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be nil)
+            (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be nil)
+            (expect (memq 'remoto--minibuffer-exit-cleanup minibuffer-exit-hook)
+                    :to-be nil)
+            (expect (advice-member-p #'remoto--read-file-name-internal-a
+                                     'read-file-name-internal)
+                    :to-be nil))
+        (setq file-name-handler-alist handlers)
+        (add-hook 'find-file-hook #'remoto--maybe-enable-mode)
+        (add-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
+        (add-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
+        (advice-add 'read-file-name-internal :around
+                    #'remoto--read-file-name-internal-a)))))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:

@@ -285,7 +285,7 @@ Detects whether NUMBER is a PR and renders accordingly."
            (issue (remoto--fetch-issue owner repo number)))
       (unless issue
         (user-error "Remoto: not found: %s/%s#%s" owner repo number))
-      (let* ((is-pr (not (null (alist-get 'pull_request issue))))
+      (let* ((is-pr (and (alist-get 'pull_request issue) t))
              (pr-data (when is-pr
                         (remoto-topic--fetch-pr owner repo number)))
              (reviews (when is-pr
