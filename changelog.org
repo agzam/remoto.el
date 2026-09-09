@@ -3,6 +3,19 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [1.9.1] - 2026-09-09
+
+** Fixed
+- Selecting a candidate right after the colon of a canonical path (~/github:o/r@main:~, what picking a branch leaves in the minibuffer, or a hand-typed ~/github:o/r:~) no longer appends it to the typed text: typing ~t~ and choosing ~test/~ gave ~/github:o/r@main:ttest/~. ~file-name-directory~ synthesized a ~/~ after the colon, so its result was one character longer than the real prefix, and ~completion-file-name-table~ derives the completion boundary from that length; the boundary landed past the typed text and every completion UI inserted the candidate after it. The directory now comes back exactly as typed, the way TRAMP returns ~/ssh:host:~ for ~/ssh:host:t~.
+- Completion under ~orderless~ (or any style that filters through ~completion-regexp-list~) now filters. Such styles hand the table only the text up to the completion boundary and express the typed text as regexps the table is expected to apply, as the built-in ~file-name-all-completions~ and TRAMP do. The handler ignored them and returned every candidate, so the wanted entry sat at the bottom of an unfiltered list. Files, branches, tags, repos, issues (matched on number and title), and accounts now honor ~completion-regexp-list~, with case folding per ~completion-ignore-case~.
+- The search levels (accounts at ~/github:~, repos at ~/github:OWNER/~, issues at ~/github:OWNER/REPO#~) and ~remoto-browse~ received an empty query under those styles, so they showed "recent" or "top" lists and never searched for what was typed. When the table is asked with an empty FILE, the query now comes from the active minibuffer, so a repo outside the recent list, an issue found by title, and a ~remoto-browse~ search all work under orderless as they do under ~basic~.
+
+** Changed
+- remoto no longer writes ~completion-category-overrides~. That variable belongs to the user, and a ~setq~ in a user config that runs after remoto loads (common with orderless setups) wiped the entries anyway, which is how the unfiltered lists above appeared. With the table style-agnostic, the user's own ~completion-styles~ apply inside remoto as everywhere else: substring and multi-component matching under orderless, prefix matching under ~basic~. The ~remoto-*~ completion categories stay in the metadata for annotations, grouping, and Embark.
+
+** Added
+- ~orderless~ as a test dependency, with end-to-end specs that run ~completion-all-completions~ under the orderless style for every level and for ~remoto-browse~, boundary specs for the canonical no-slash forms, and regexp-filter specs per level.
+
 * [1.9.0] - 2026-09-04
 
 ** Fixed

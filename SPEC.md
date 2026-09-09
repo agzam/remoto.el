@@ -308,7 +308,7 @@ Each level provides annotations via completion metadata `affixation-function`. A
 | files-default, canonical | Last commit message per file (up to 20 API calls, cached) |
 | issues | PR/Issue prefix + title + state; group-function: "Pull Request" vs "Issue" |
 
-PRs are sorted before issues. Completion category is set to `remoto` (with `partial-completion` style) to prevent Marginalia from overriding.
+PRs are sorted before issues. Completion category is set to a `remoto-*` category so Marginalia does not override the annotations. remoto sets no completion style for those categories: the file-name handler honors `completion-regexp-list` (as the built-in primitive and TRAMP do) and reads the typed query from the minibuffer when a style such as orderless passes an empty FILE, so the user's own `completion-styles` apply.
 
 #### Path normalization on RET
 
