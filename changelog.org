@@ -11,6 +11,7 @@ Changes to the project, following Keep a Changelog conventions.
 
 ** Fixed
 - ~remoto-unload-function~ removes the ~minibuffer-exit-hook~ entry too, so ~unload-feature~ leaves nothing of remoto behind.
+- Guard clauses in ~if-let*~ and ~when-let*~ no longer bind ~_~. Emacs 29 rejects a bound ~_~ that the macro then reads, so the package failed to byte-compile there. ~make check-compile~ ignored the return value of ~byte-compile-file~, which is why CI stayed green over it.
 
 ** Added
 - ~remoto-embark.el~ and ~remoto-topic.el~ carry an ~SPDX-License-Identifier~ and a maintainer, all three files carry an ~Assisted-by~ line, and ~remoto-topic.el~ declares ~remoto.el~ as its package-lint main file.

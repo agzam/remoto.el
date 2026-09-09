@@ -515,7 +515,7 @@ The /gh: shorthand in ARGS is normalized to /github: first, so every
 resolved handler receives only canonical paths."
   (let ((args (mapcar #'remoto--normalize-shorthand args)))
     (if-let* ((handler (intern-soft (format "remoto--handle-%s" operation)))
-              (_ (fboundp handler)))
+              ((fboundp handler)))
         (apply handler args)
       ;; Fall through to default handler
       (let ((inhibit-file-name-handlers
@@ -1162,7 +1162,7 @@ Handles partial paths including # and files-default short forms."
    ;; normalizes "" to "/".
    (t
     (when-let* ((prefix (remoto--file-name-prefix filename))
-                (_ (remoto--parse-path filename)))
+                ((remoto--parse-path filename)))
       (let* ((path (substring filename (length prefix)))
              (dir (if (string-suffix-p "/" path)
                       path
@@ -2869,7 +2869,7 @@ Otherwise return INPUT unchanged."
   "Rewrite GitHub URLs to canonical remoto paths for Dired.
 Call ORIG-FN with DIR-OR-LIST and ARGS after any rewrite."
   (if-let* ((dir (if (consp dir-or-list) (car dir-or-list) dir-or-list))
-            (_ (remoto--github-input-p dir)))
+            ((remoto--github-input-p dir)))
       (let ((canonical (remoto--maybe-rewrite dir)))
         (apply orig-fn
                (if (consp dir-or-list)

@@ -103,7 +103,7 @@
   (interactive)
   (when-let* ((number remoto-topic--number)
               (path remoto-topic--repo-path)
-              (_ (string-match (rx "/github:" (group (+ nonl))) path))
+              ((string-match (rx "/github:" (group (+ nonl))) path))
               (slug (match-string 1 path))
               (type (if remoto-topic--is-pr "pull" "issues")))
     (browse-url (format "https://github.com/%s/%s/%s" slug type number))))
