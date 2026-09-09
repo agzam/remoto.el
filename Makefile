@@ -31,7 +31,8 @@ $(ELPA_DIR):
 	--eval "(package-refresh-contents)" \
 	--eval "(package-install 'ghub)" \
 	--eval "(package-install 'buttercup)" \
-	--eval "(package-install 'embark)"
+	--eval "(package-install 'embark)" \
+	--eval "(package-install 'orderless)"
 
 deps: $(ELPA_DIR)
 

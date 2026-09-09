@@ -5,7 +5,7 @@
 ;; Author: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: April 24, 2026
-;; Version: 1.9.0
+;; Version: 1.9.1
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
 ;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
@@ -747,46 +747,120 @@ Preserves OWNER's text properties (used for affixation) and attaches a
   (propertize (concat owner "/")
               'remoto-target (concat "/github:" (substring-no-properties owner))))
 
+(defun remoto--minibuffer-input ()
+  "Contents of the current buffer when it is an active completion minibuffer."
+  (when (and (minibufferp) minibuffer-completion-table)
+    (minibuffer-contents-no-properties)))
+
+(defun remoto--input-query (input directory)
+  "Text that INPUT holds after DIRECTORY, or nil when INPUT is elsewhere.
+INPUT goes through `substitute-in-file-name' first, the normalization
+`read-file-name' applies, so a shadowed prefix such as \"~/x//github:o/\"
+and the /gh: shorthand both resolve to DIRECTORY.  Nil as well when the
+text after DIRECTORY holds a level delimiter: `partial-completion'
+probes parent levels with an empty FILE while the input sits deeper,
+and that probe must not turn the deeper path into a search query."
+  (when-let* ((effective (condition-case nil
+                             (substitute-in-file-name input)
+                           (error input)))
+              ((string-prefix-p directory effective))
+              (rest (substring effective (length directory)))
+              ((not (string-match-p (rx (any "/@#:")) rest))))
+    rest))
+
+(defun remoto--minibuffer-query (directory)
+  "What the user typed after DIRECTORY in the active minibuffer, or nil.
+Completion styles that express the typed text as `completion-regexp-list'
+\(orderless) hand the table only the text up to the completion boundary,
+so FILE in `file-name-all-completions' arrives empty; the search levels
+need the typed text as their API query."
+  (when-let* ((input (remoto--minibuffer-input)))
+    (remoto--input-query input directory)))
+
+(defun remoto--completion-query (file directory)
+  "Search query for FILE in DIRECTORY: FILE, or the minibuffer text if empty."
+  (if (string-empty-p file)
+      (or (remoto--minibuffer-query directory) file)
+    file))
+
+(defun remoto--candidate-match-text (candidate)
+  "Text that `completion-regexp-list' is matched against for CANDIDATE.
+The bare number of an issue and the bare name of a repo or account are
+rarely what the user types, so the title or description joins the
+name.  The trailing / or : delimiter stays out, as the built-in file
+name primitives match names without it."
+  (let ((name (string-trim-right candidate "[/:]"))
+        (extra (or (remoto--get-prop candidate 'remoto-topic-title)
+                   (remoto--get-prop candidate 'remoto-repo-desc)
+                   (remoto--get-prop candidate 'remoto-acct-desc))))
+    (if (and (stringp extra) (not (string-empty-p extra)))
+        (concat name " " extra)
+      name)))
+
+(defun remoto--filter-by-completion-regexps (candidates)
+  "Drop the CANDIDATES that `completion-regexp-list' rejects.
+Completion styles rely on the table applying `completion-regexp-list'
+itself: the built-in `file-name-all-completions' and TRAMP both do, and
+orderless never filters on its own.  Case folding follows
+`completion-ignore-case', as in the built-in primitives."
+  (if (null completion-regexp-list)
+      candidates
+    (let ((case-fold-search completion-ignore-case))
+      (seq-filter (lambda (c)
+                    (let ((text (remoto--candidate-match-text c)))
+                      (seq-every-p (lambda (re) (string-match-p re text))
+                                   completion-regexp-list)))
+                  candidates))))
+
 (defun remoto--handle-file-name-all-completions (file directory)
   "Return completions for FILE in remote DIRECTORY.
+Applies `completion-regexp-list' like the built-in primitive does."
+  (remoto--filter-by-completion-regexps
+   (remoto--file-name-completions file directory)))
+
+(defun remoto--file-name-completions (file directory)
+  "Return unfiltered completions for FILE in remote DIRECTORY.
 Handles multiple levels: user search at /github:, repo listing at
 /github:OWNER/, branch/tag at /github:OWNER/REPO@, files at
 /github:OWNER/REPO/, issues at /github:OWNER/REPO#, and file
 listing within a repo.  Search-level calls (user, repo) are
 non-blocking: cached results are returned immediately while async
-fetches populate the cache in the background."
+fetches populate the cache in the background.
+An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
   (if-let* ((partial (remoto--parse-partial-github-path directory)))
       (pcase (plist-get partial :level)
         ('root
          ;; Empty query + authenticated: show user + orgs
-         ;; Non-empty: search users/orgs matching FILE (non-blocking)
-         (if (string-empty-p file)
-             (when-let* ((user remoto--authenticated-user))
-               (let* ((orgs (remoto--fetch-user-orgs user))
-                      (all (cons (propertize user 'remoto-acct-type "User") orgs)))
-                 (mapcar #'remoto--owner-candidate all)))
-           (when-let* ((result (remoto--search-users file)))
-             (let ((filtered (seq-filter (lambda (u) (string-prefix-p file u))
-                                         result)))
-               ;; Pre-fetch repos for the top match so the cache is
-               ;; warm by the time the user types "/"
-               (when-let* ((top (car filtered)))
-                 (remoto--prefetch-owner-repos top))
-               (mapcar #'remoto--owner-candidate filtered)))))
+         ;; Non-empty: search users/orgs matching the query (non-blocking)
+         (let ((query (remoto--completion-query file directory)))
+           (if (string-empty-p query)
+               (when-let* ((user remoto--authenticated-user))
+                 (let* ((orgs (remoto--fetch-user-orgs user))
+                        (all (cons (propertize user 'remoto-acct-type "User") orgs)))
+                   (mapcar #'remoto--owner-candidate all)))
+             (when-let* ((result (remoto--search-users query)))
+               (let ((filtered (seq-filter (lambda (u) (string-prefix-p file u))
+                                           result)))
+                 ;; Pre-fetch repos for the top match so the cache is
+                 ;; warm by the time the user types "/"
+                 (when-let* ((top (car filtered)))
+                   (remoto--prefetch-owner-repos top))
+                 (mapcar #'remoto--owner-candidate filtered))))))
         ('owner
          ;; Repo completion at /github:OWNER/
          ;; Try cached/async results first; on cold-cache nil, fall
          ;; back to a synchronous fetch that yields to user input.
          (let* ((owner (plist-get partial :owner))
-                (repos (if (string-empty-p file)
+                (query (remoto--completion-query file directory))
+                (repos (if (string-empty-p query)
                            (remoto--recent-owner-repos owner)
-                         (remoto--search-owner-repos owner file))))
+                         (remoto--search-owner-repos owner query))))
            (unless repos
              (let ((sync (while-no-input
-                           (if (string-empty-p file)
+                           (if (string-empty-p query)
                                (remoto--recent-owner-repos-sync owner)
-                             (when (<= remoto-min-search-chars (length file))
-                               (remoto--search-owner-repos-sync owner file))))))
+                             (when (<= remoto-min-search-chars (length query))
+                               (remoto--search-owner-repos-sync owner query))))))
                (when (consp sync)
                  (setq repos sync))))
            (mapcar (lambda (r)
@@ -878,18 +952,19 @@ fetches populate the cache in the background."
          ;; Issue/PR completion at /github:OWNER/REPO#
          (let* ((owner (plist-get partial :owner))
                 (repo (plist-get partial :repo))
+                (query (remoto--completion-query file directory))
                 (issues
                  (cond
                   ;; Empty query: show top open issues
-                  ((string-empty-p file)
+                  ((string-empty-p query)
                    (while-no-input
                      (remoto--fetch-issues owner repo)))
                   ;; Numeric query: direct fetch + filter cached
-                  ((string-match-p (rx bos (+ digit) eos) file)
+                  ((string-match-p (rx bos (+ digit) eos) query)
                    (let* ((cached (while-no-input
                                     (remoto--fetch-issues owner repo)))
                           (direct (while-no-input
-                                    (remoto--fetch-issue owner repo file)))
+                                    (remoto--fetch-issue owner repo query)))
                           (results (if (listp cached) cached nil)))
                      (if direct
                          (cl-remove-duplicates
@@ -899,7 +974,7 @@ fetches populate the cache in the background."
                   ;; Text query: search
                   (t
                    (while-no-input
-                     (remoto--search-issues owner repo file))))))
+                     (remoto--search-issues owner repo query))))))
            (when (listp issues)
              (let* ((candidates
                      (mapcar (lambda (i)
@@ -1078,15 +1153,20 @@ Handles partial paths including # and files-default short forms."
     (if (string-match (rx bos "/github:" eos) filename)
         "/github:"
       "/github:"))
-   ;; Full canonical path
+   ;; Full canonical path.  The result must be a prefix of FILENAME:
+   ;; `completion-file-name-table' derives the completion boundary from
+   ;; its length, so a synthesized "/" after the colon would push the
+   ;; boundary past the text being completed and make the UI append the
+   ;; candidate to it.  Hence the raw path, not the parsed one, which
+   ;; normalizes "" to "/".
    (t
-    (when-let* ((parsed (remoto--parse-path filename))
-                (prefix (remoto--file-name-prefix filename)))
-      (let* ((path (remoto-path-path parsed))
+    (when-let* ((prefix (remoto--file-name-prefix filename))
+                (_ (remoto--parse-path filename)))
+      (let* ((path (substring filename (length prefix)))
              (dir (if (string-suffix-p "/" path)
                       path
                     (file-name-directory path))))
-        (concat prefix (or dir "/")))))))
+        (concat prefix (or dir "")))))))
 
 (defun remoto--handle-file-name-nondirectory (filename)
   "Return non-directory part of remote FILENAME.
@@ -2614,10 +2694,18 @@ Handles search, branch, and issue modes."
   "Programmed completion table for GitHub repos, branches, and issues.
 STRING is the current minibuffer input, PRED a filter predicate,
 ACTION the completion action dispatched by `completing-read'.
-Detects @ and # delimiters to switch between modes."
-  (if (eq action 'metadata)
-      (remoto--browse-metadata string)
-    (complete-with-action action (remoto--browse-completions string) string pred)))
+Detects @ and # delimiters to switch between modes.
+Styles that filter by `completion-regexp-list' pass an empty STRING (the
+table has no boundaries); the minibuffer then supplies the query, and
+`complete-with-action' applies the regexps to the resulting list."
+  (cond
+   ((eq action 'metadata) (remoto--browse-metadata string))
+   ((eq (car-safe action) 'boundaries) nil)
+   (t (let ((input (if (string-empty-p string)
+                       (or (remoto--minibuffer-input) string)
+                     string)))
+        (complete-with-action action (remoto--browse-completions input)
+                              string pred)))))
 
 (defun remoto--read-repo ()
   "Read a GitHub repo from the minibuffer with search completion.
@@ -2880,23 +2968,6 @@ Matches the canonical /github: prefix and its /gh: shorthand alias.")
 ;; Clear the fetch indicator and reset in-flight state whenever a
 ;; minibuffer exits.  `add-hook' is idempotent, so reloading is safe.
 (add-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
-
-;; Register completion styles for our category so filtering works
-;; like file-name completion (partial-completion understands path
-;; separators).  Uses overrides (highest priority) so that a global
-;; orderless in completion-styles does not interfere.
-(add-to-list 'completion-category-overrides
-             '(remoto (styles partial-completion basic)))
-(add-to-list 'completion-category-overrides
-             '(remoto-repo (styles partial-completion basic)))
-(add-to-list 'completion-category-overrides
-             '(remoto-file (styles partial-completion basic)))
-(add-to-list 'completion-category-overrides
-             '(remoto-branch (styles partial-completion basic)))
-(add-to-list 'completion-category-overrides
-             '(remoto-issue (styles partial-completion basic)))
-(add-to-list 'completion-category-overrides
-             '(remoto-owner (styles partial-completion basic)))
 
 ;;;; Minor mode
 

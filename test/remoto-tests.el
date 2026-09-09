@@ -1867,12 +1867,12 @@
       (remoto--handle-file-name-all-completions "li" "/github:torvalds/")
       (expect 'remoto--search-owner-repos-sync :not :to-have-been-called))))
 
-(describe "completion-category-overrides registration"
-  (it "registers remoto category with partial-completion style"
-    (let ((entry (assq 'remoto completion-category-overrides)))
-      (expect entry :to-be-truthy)
-      (expect (cdr (assq 'styles (cdr entry)))
-              :to-equal '(partial-completion basic)))))
+(describe "completion style registration"
+  (it "leaves the user's completion-category-overrides alone"
+    (dolist (cat '(remoto remoto-repo remoto-file remoto-branch
+                   remoto-issue remoto-owner remoto-browse))
+      (expect (assq cat completion-category-overrides) :to-be nil)
+      (expect (assq cat completion-category-defaults) :to-be nil))))
 
 (describe "remoto--get-authenticated-user"
   (it "returns login from /user endpoint"
@@ -1971,16 +1971,17 @@
                     "s" "/github:testowner/testrepo@main:/")))
         (expect (member "src/" files) :to-be-truthy))))
 
-  (it "orderless-style: searches then filters client-side"
-    ;; This simulates what orderless does with the new search-based approach
+  (it "orderless-style: empty FILE, query from the minibuffer, regexps applied"
+    ;; orderless hands the table only the boundary prefix and expresses
+    ;; the typed text as `completion-regexp-list'.
     (spy-on 'remoto--search-owner-repos :and-return-value
             '("linux" "libdc-for-dirk"))
-    ;; orderless calls with a query, gets matching repos
-    (let ((all (remoto--handle-file-name-all-completions "li" "/github:torvalds/")))
-      (expect (length all) :to-equal 2)
-      ;; Then filters client-side (prefix still matches through trailing /)
-      (let ((filtered (seq-filter (lambda (r) (string-prefix-p "lin" r)) all)))
-        (expect filtered :to-equal '("linux/"))))))
+    (spy-on 'remoto--minibuffer-input :and-return-value "/github:torvalds/lin")
+    (let ((completion-regexp-list '("lin")))
+      (expect (remoto--handle-file-name-all-completions "" "/github:torvalds/")
+              :to-equal '("linux/"))
+      (expect 'remoto--search-owner-repos
+              :to-have-been-called-with "torvalds" "lin"))))
 
 ;;; Pre-repo completions
 
@@ -3983,10 +3984,6 @@ Returns the full path after completion, or INPUT if no completion."
            (cat (alist-get 'category meta)))
       (expect cat :to-be 'remoto-repo)))
 
-  (it "registers a completion-category-override for remoto-repo"
-    (let ((override (assq 'remoto-repo completion-category-overrides)))
-      (expect override :to-be-truthy)))
-
   (it "attaches the full remoto path as a remoto-target property on candidates"
     (spy-on 'remoto--recent-owner-repos :and-return-value
             (list (propertize "remoto.el" 'remoto-repo-desc "desc")))
@@ -4006,10 +4003,6 @@ Returns the full path after completion, or INPUT if no completion."
     (let* ((meta (remoto--completion-metadata "/github:o/r/"))
            (cat (alist-get 'category meta)))
       (expect cat :to-be 'remoto-file)))
-
-  (it "registers a completion-category-override for remoto-file"
-    (let ((override (assq 'remoto-file completion-category-overrides)))
-      (expect override :to-be-truthy)))
 
   (it "attaches remoto-target on files-default candidates"
     (spy-on 'remoto--default-branch :and-return-value "main")
@@ -4050,10 +4043,6 @@ Returns the full path after completion, or INPUT if no completion."
     (let* ((meta (remoto--completion-metadata "/github:o/r@"))
            (cat (alist-get 'category meta)))
       (expect cat :to-be 'remoto-branch)))
-
-  (it "registers a completion-category-override for remoto-branch"
-    (let ((override (assq 'remoto-branch completion-category-overrides)))
-      (expect override :to-be-truthy)))
 
   (it "attaches remoto-target on branch candidates"
     (spy-on 'remoto--fetch-branches :and-return-value '("main" "dev"))
@@ -4096,10 +4085,6 @@ Returns the full path after completion, or INPUT if no completion."
     (let* ((meta (remoto--completion-metadata "/github:o/r#"))
            (cat (alist-get 'category meta)))
       (expect cat :to-be 'remoto-issue)))
-
-  (it "registers a completion-category-override for remoto-issue"
-    (let ((override (assq 'remoto-issue completion-category-overrides)))
-      (expect override :to-be-truthy)))
 
   (it "attaches remoto-target on issue candidates"
     (spy-on 'remoto--fetch-issues :and-return-value
@@ -4253,6 +4238,350 @@ Returns the full path after completion, or INPUT if no completion."
                                  remoto-owner remoto-browse))
         (let ((rt (funcall survives cat)))
           (expect rt :to-equal "/github:x/y:/"))))))
+
+;;; Completion boundaries and style-agnostic filtering
+
+(defun remoto-test--all-completions (input &optional styles table)
+  "Candidates and base for INPUT under STYLES, as a completion UI computes them.
+TABLE defaults to `read-file-name-internal'.  The base is the last cdr
+of `completion-all-completions'; Vertico inserts a candidate as
+\(concat (substring INPUT 0 base) candidate)."
+  (let* ((completion-styles (or styles '(basic)))
+         (completion-category-overrides nil)
+         (completion-category-defaults nil)
+         (all (completion-all-completions input (or table #'read-file-name-internal)
+                                          nil (length input)))
+         (base (or (when-let* ((z (last all))) (prog1 (cdr z) (setcdr z nil))) 0)))
+    (cons (mapcar #'substring-no-properties all) base)))
+
+(describe "completion boundary after the colon"
+  (it "file-name-directory of a canonical path is a prefix of it"
+    (dolist (input '("/github:o/r@main:s" "/github:o/r:s" "/github:o/r@main:"
+                     "/github:o/r@main:/" "/github:o/r@main:/s"
+                     "/github:o/r@main:src/m"))
+      (expect (string-prefix-p (remoto--handle-file-name-directory input) input)
+              :to-be-truthy)))
+
+  (it "returns the typed prefix when the path has no directory part"
+    (expect (remoto--handle-file-name-directory "/github:o/r@main:s")
+            :to-equal "/github:o/r@main:")
+    (expect (remoto--handle-file-name-directory "/github:o/r:s")
+            :to-equal "/github:o/r:")
+    (expect (remoto--handle-file-name-directory "/github:o/r@main:")
+            :to-equal "/github:o/r@main:"))
+
+  (it "keeps the slash when it was typed"
+    (expect (remoto--handle-file-name-directory "/github:o/r@main:/")
+            :to-equal "/github:o/r@main:/")
+    (expect (remoto--handle-file-name-directory "/github:o/r@main:/src/m")
+            :to-equal "/github:o/r@main:/src/")
+    (expect (remoto--handle-file-name-directory "/github:o/r@main:src/m")
+            :to-equal "/github:o/r@main:src/"))
+
+  (it "puts the completion field after the colon, not at the end of the input"
+    (expect (completion-boundaries "/github:o/r@main:s" #'read-file-name-internal nil "")
+            :to-equal '(17 . 0))
+    (expect (completion-boundaries "/github:o/r:s" #'read-file-name-internal nil "")
+            :to-equal '(12 . 0)))
+
+  (it "replaces the typed text with the selected candidate after a branch pick"
+    (remoto-test-with-cache
+      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (pcase-let ((`(,cands . ,base)
+                   (remoto-test--all-completions "/github:testowner/testrepo@main:s")))
+        (expect cands :to-equal '("src/"))
+        (expect (concat (substring "/github:testowner/testrepo@main:s" 0 base) "src/")
+                :to-equal "/github:testowner/testrepo@main:src/"))
+      (pcase-let ((`(,_ . ,base)
+                   (remoto-test--all-completions "/github:testowner/testrepo:s")))
+        (expect (concat (substring "/github:testowner/testrepo:s" 0 base) "src/")
+                :to-equal "/github:testowner/testrepo:src/"))))
+
+  (it "resolves the slash-less canonical path that results"
+    (remoto-test-with-cache
+      (expect (remoto--handle-file-exists-p "/github:testowner/testrepo@main:src/main.el")
+              :to-be-truthy)
+      (expect (remoto--handle-file-directory-p "/github:testowner/testrepo@main:src/")
+              :to-be-truthy)
+      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (expect (remoto--handle-file-name-all-completions "" "/github:testowner/testrepo@main:src/")
+              :to-equal '("main.el" "utils.el")))))
+
+(describe "completion-regexp-list in file-name-all-completions"
+  (it "applies every regexp, like the built-in primitive"
+    (remoto-test-with-cache
+      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (let ((completion-regexp-list '("s")))
+        (expect (remoto--handle-file-name-all-completions "" "/github:testowner/testrepo@main:/")
+                :to-equal '("src/")))
+      (let ((completion-regexp-list '("R" "md")))
+        (expect (remoto--handle-file-name-all-completions "" "/github:testowner/testrepo@main:/")
+                :to-equal '("README.md")))
+      (let ((completion-regexp-list '("nothing")))
+        (expect (remoto--handle-file-name-all-completions "" "/github:testowner/testrepo@main:/")
+                :to-be nil))))
+
+  (it "returns everything when no regexps are set"
+    (remoto-test-with-cache
+      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (let ((completion-regexp-list nil))
+        (expect (remoto--handle-file-name-all-completions "" "/github:testowner/testrepo@main:/")
+                :to-equal '("README.md" "bin/" "src/")))))
+
+  (it "matches the name without the trailing slash"
+    (remoto-test-with-cache
+      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (let ((completion-regexp-list '("src$")))
+        (expect (remoto--handle-file-name-all-completions "" "/github:testowner/testrepo@main:/")
+                :to-equal '("src/")))))
+
+  (it "follows completion-ignore-case"
+    (remoto-test-with-cache
+      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (let ((completion-regexp-list '("readme")))
+        (let ((completion-ignore-case nil))
+          (expect (remoto--handle-file-name-all-completions "" "/github:testowner/testrepo@main:/")
+                  :to-be nil))
+        (let ((completion-ignore-case t))
+          (expect (remoto--handle-file-name-all-completions "" "/github:testowner/testrepo@main:/")
+                  :to-equal '("README.md"))))))
+
+  (it "filters the files-default listing"
+    (spy-on 'remoto--default-branch :and-return-value "main")
+    (spy-on 'remoto--fetch-dir-children-light :and-return-value
+            '(("README.md" . ((type . "blob"))) ("src" . ((type . "tree")))))
+    (let ((completion-regexp-list '("sr")))
+      (expect (remoto--handle-file-name-all-completions "" "/github:o/r/")
+              :to-equal '("src/"))))
+
+  (it "filters branches and tags by name without the colon"
+    (spy-on 'remoto--fetch-branches :and-return-value '("main" "develop"))
+    (spy-on 'remoto--fetch-tags :and-return-value '("v1.0"))
+    (let ((completion-regexp-list '("v")))
+      (expect (remoto--handle-file-name-all-completions "" "/github:o/r@")
+              :to-equal '("develop:" "v1.0:")))
+    (let ((completion-regexp-list '("main$")))
+      (expect (remoto--handle-file-name-all-completions "" "/github:o/r@")
+              :to-equal '("main:"))))
+
+  (it "matches issues by number or title"
+    (spy-on 'remoto--fetch-issues :and-return-value
+            '(((number . 42) (title . "forty-two") (state . "open"))
+              ((number . 10) (title . "ten") (state . "open"))))
+    (let ((completion-regexp-list '("forty")))
+      (expect (remoto--handle-file-name-all-completions "" "/github:o/r#")
+              :to-equal '("42")))
+    (let ((completion-regexp-list '("1")))
+      (expect (remoto--handle-file-name-all-completions "" "/github:o/r#")
+              :to-equal '("10"))))
+
+  (it "matches repos by name or description"
+    (spy-on 'remoto--recent-owner-repos :and-return-value
+            (list (propertize "dotfiles" 'remoto-repo-desc "my emacs config")
+                  (propertize "remoto.el" 'remoto-repo-desc "browse github")))
+    (let ((completion-regexp-list '("emacs")))
+      (expect (remoto--handle-file-name-all-completions "" "/github:agzam/")
+              :to-equal '("dotfiles/")))
+    (let ((completion-regexp-list '("remoto")))
+      (expect (remoto--handle-file-name-all-completions "" "/github:agzam/")
+              :to-equal '("remoto.el/"))))
+
+  (it "matches accounts by login or description"
+    (let ((remoto--authenticated-user "me"))
+      (spy-on 'remoto--fetch-user-orgs :and-return-value
+              (list (propertize "acme" 'remoto-acct-type "Organization"
+                                'remoto-acct-desc "Rockets")))
+      (let ((completion-regexp-list '("rock"))
+            (completion-ignore-case t))
+        (expect (remoto--handle-file-name-all-completions "" "/github:")
+                :to-equal '("acme/")))
+      (let ((completion-regexp-list '("me")))
+        (expect (remoto--handle-file-name-all-completions "" "/github:")
+                :to-equal '("me/" "acme/"))))))
+
+(describe "typed query recovery for regexp-filtering styles"
+  (it "extracts the text after DIRECTORY from the input"
+    (expect (remoto--input-query "/github:torvalds/lin" "/github:torvalds/") :to-equal "lin")
+    (expect (remoto--input-query "/github:tor" "/github:") :to-equal "tor")
+    (expect (remoto--input-query "/github:o/r#bug" "/github:o/r#") :to-equal "bug"))
+
+  (it "normalizes the /gh: shorthand and a shadowed prefix"
+    (expect (remoto--input-query "/gh:torvalds/lin" "/github:torvalds/") :to-equal "lin")
+    (expect (remoto--input-query "~/x//github:torvalds/lin" "/github:torvalds/")
+            :to-equal "lin"))
+
+  (it "returns nil when the input is not under DIRECTORY"
+    (expect (remoto--input-query "/github:other/lin" "/github:torvalds/") :to-be nil)
+    (expect (remoto--input-query "/tmp/x" "/github:torvalds/") :to-be nil))
+
+  (it "returns nil when the input sits at a deeper level than DIRECTORY"
+    (expect (remoto--input-query "/github:kn66/repo@" "/github:") :to-be nil)
+    (expect (remoto--input-query "/github:kn66/repo@" "/github:kn66/") :to-be nil)
+    (expect (remoto--input-query "/github:o/r#12" "/github:o/") :to-be nil)
+    (expect (remoto--input-query "/github:o/r@main:/src" "/github:o/r@") :to-be nil))
+
+  (it "does not turn a parent-level probe into a search"
+    ;; partial-completion probes /github: and /github:kn66/ with FILE ""
+    ;; while the minibuffer holds /github:kn66/repo@.
+    (spy-on 'remoto--minibuffer-input :and-return-value "/github:kn66/repo@")
+    (spy-on 'remoto--search-users)
+    (spy-on 'remoto--search-owner-repos)
+    (spy-on 'remoto--recent-owner-repos :and-return-value '("repo"))
+    (let ((remoto--authenticated-user nil))
+      (expect (remoto--handle-file-name-all-completions "" "/github:") :to-be nil))
+    (expect (remoto--handle-file-name-all-completions "" "/github:kn66/")
+            :to-equal '("repo/"))
+    (expect 'remoto--search-users :not :to-have-been-called)
+    (expect 'remoto--search-owner-repos :not :to-have-been-called))
+
+  (it "prefers a non-empty FILE over the minibuffer"
+    (spy-on 'remoto--minibuffer-input :and-return-value "/github:torvalds/other")
+    (expect (remoto--completion-query "lin" "/github:torvalds/") :to-equal "lin"))
+
+  (it "falls back to the minibuffer text when FILE is empty"
+    (spy-on 'remoto--minibuffer-input :and-return-value "/github:torvalds/lin")
+    (expect (remoto--completion-query "" "/github:torvalds/") :to-equal "lin"))
+
+  (it "yields an empty query outside a completion minibuffer"
+    (expect (remoto--minibuffer-input) :to-be nil)
+    (expect (remoto--completion-query "" "/github:torvalds/") :to-equal ""))
+
+  (it "reads the real minibuffer when it is current"
+    (with-current-buffer (window-buffer (minibuffer-window))
+      (unwind-protect
+          (let ((minibuffer-completion-table #'read-file-name-internal))
+            (insert "/github:torvalds/lin")
+            (expect (remoto--minibuffer-input) :to-equal "/github:torvalds/lin")
+            (expect (remoto--minibuffer-query "/github:torvalds/") :to-equal "lin"))
+        (erase-buffer))))
+
+  (it "ignores a minibuffer that is not completing"
+    (with-current-buffer (window-buffer (minibuffer-window))
+      (unwind-protect
+          (let ((minibuffer-completion-table nil))
+            (insert "/github:torvalds/lin")
+            (expect (remoto--minibuffer-input) :to-be nil))
+        (erase-buffer))))
+
+  (it "searches users with the minibuffer text at the root"
+    (spy-on 'remoto--minibuffer-input :and-return-value "/github:tor")
+    (spy-on 'remoto--search-users :and-return-value '("torvalds"))
+    (expect (remoto--handle-file-name-all-completions "" "/github:")
+            :to-equal '("torvalds/"))
+    (expect 'remoto--search-users :to-have-been-called-with "tor"))
+
+  (it "searches issues with the minibuffer text"
+    (spy-on 'remoto--minibuffer-input :and-return-value "/github:o/r#bug")
+    (spy-on 'remoto--search-issues :and-return-value
+            '(((number . 7) (title . "a bug") (state . "open"))))
+    (expect (remoto--handle-file-name-all-completions "" "/github:o/r#")
+            :to-equal '("7"))
+    (expect 'remoto--search-issues :to-have-been-called-with "o" "r" "bug"))
+
+  (it "fetches an issue by number from the minibuffer text"
+    (spy-on 'remoto--minibuffer-input :and-return-value "/github:o/r#42")
+    (spy-on 'remoto--fetch-issues :and-return-value nil)
+    (spy-on 'remoto--fetch-issue :and-return-value
+            '((number . 42) (title . "x") (state . "open")))
+    (expect (remoto--handle-file-name-all-completions "" "/github:o/r#")
+            :to-equal '("42"))
+    (expect 'remoto--fetch-issue :to-have-been-called-with "o" "r" "42")))
+
+(describe "remoto--repo-completion-table under regexp-filtering styles"
+  (it "takes the query from the minibuffer when STRING is empty"
+    (spy-on 'remoto--minibuffer-input :and-return-value "agzam/rem")
+    (spy-on 'remoto--search-repos :and-return-value '("agzam/remoto.el"))
+    (let ((completion-regexp-list '("rem")))
+      (expect (remoto--repo-completion-table "" nil t) :to-equal '("agzam/remoto.el")))
+    (expect 'remoto--search-repos :to-have-been-called-with "agzam/rem"))
+
+  (it "still applies the regexps to the candidates"
+    (spy-on 'remoto--minibuffer-input :and-return-value "agzam/rem")
+    (spy-on 'remoto--search-repos :and-return-value '("agzam/remoto.el" "agzam/other"))
+    (let ((completion-regexp-list '("remoto")))
+      (expect (remoto--repo-completion-table "" nil t) :to-equal '("agzam/remoto.el"))))
+
+  (it "does not search for the boundaries action"
+    (spy-on 'remoto--search-repos)
+    (expect (remoto--repo-completion-table "agzam/rem" nil '(boundaries . "")) :to-be nil)
+    (expect 'remoto--search-repos :not :to-have-been-called))
+
+  (it "uses STRING when it is non-empty"
+    (spy-on 'remoto--minibuffer-input :and-return-value "ignored")
+    (spy-on 'remoto--search-repos :and-return-value '("agzam/remoto.el"))
+    (expect (remoto--repo-completion-table "agzam/rem" nil t) :to-equal '("agzam/remoto.el"))
+    (expect 'remoto--search-repos :to-have-been-called-with "agzam/rem")))
+
+(require 'orderless)
+
+(describe "end-to-end under the orderless completion style"
+  (it "filters the file listing to the typed text"
+    (remoto-test-with-cache
+      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (let ((input "/github:testowner/testrepo@main:/s"))
+        (spy-on 'remoto--minibuffer-input :and-return-value input)
+        (expect (remoto-test--all-completions input '(orderless))
+                :to-equal '(("src/") . 33)))))
+
+  (it "matches anywhere in the name, as orderless does elsewhere"
+    (remoto-test-with-cache
+      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (let ((input "/github:testowner/testrepo@main:/md"))
+        (spy-on 'remoto--minibuffer-input :and-return-value input)
+        (expect (car (remoto-test--all-completions input '(orderless)))
+                :to-equal '("README.md")))))
+
+  (it "runs the owner repo search with the typed text"
+    (let ((input "/github:torvalds/lin"))
+      (spy-on 'remoto--minibuffer-input :and-return-value input)
+      (spy-on 'remoto--search-owner-repos :and-return-value '("linux" "libdc-for-dirk"))
+      (expect (remoto-test--all-completions input '(orderless))
+              :to-equal '(("linux/") . 17))
+      (expect 'remoto--search-owner-repos :to-have-been-called-with "torvalds" "lin")))
+
+  (it "runs the user search with the typed text at the root"
+    (let ((input "/github:tor"))
+      (spy-on 'remoto--minibuffer-input :and-return-value input)
+      (spy-on 'remoto--search-users :and-return-value '("torvalds"))
+      (expect (remoto-test--all-completions input '(orderless))
+              :to-equal '(("torvalds/") . 8))
+      (expect 'remoto--search-users :to-have-been-called-with "tor")))
+
+  (it "finds issues by title"
+    (let ((input "/github:o/r#forty"))
+      (spy-on 'remoto--minibuffer-input :and-return-value input)
+      (spy-on 'remoto--search-issues :and-return-value
+              '(((number . 42) (title . "forty-two") (state . "open"))))
+      (expect (remoto-test--all-completions input '(orderless))
+              :to-equal '(("42") . 12))
+      (expect 'remoto--search-issues :to-have-been-called-with "o" "r" "forty")))
+
+  (it "filters branches and tags"
+    (let ((input "/github:o/r@dev"))
+      (spy-on 'remoto--minibuffer-input :and-return-value input)
+      (spy-on 'remoto--fetch-branches :and-return-value '("main" "develop"))
+      (spy-on 'remoto--fetch-tags :and-return-value '("v1.0"))
+      (expect (remoto-test--all-completions input '(orderless))
+              :to-equal '(("develop:") . 12))))
+
+  (it "inserts the candidate in place of the typed text after a branch pick"
+    (remoto-test-with-cache
+      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (let ((input "/github:testowner/testrepo@main:s"))
+        (spy-on 'remoto--minibuffer-input :and-return-value input)
+        (pcase-let ((`(,cands . ,base) (remoto-test--all-completions input '(orderless))))
+          (expect cands :to-equal '("src/"))
+          (expect (concat (substring input 0 base) "src/")
+                  :to-equal "/github:testowner/testrepo@main:src/")))))
+
+  (it "runs the repo search in remoto-browse with the typed text"
+    (let ((input "agzam/rem"))
+      (spy-on 'remoto--minibuffer-input :and-return-value input)
+      (spy-on 'remoto--search-repos :and-return-value '("agzam/remoto.el" "agzam/other"))
+      (expect (car (remoto-test--all-completions
+                    input '(orderless) #'remoto--repo-completion-table))
+              :to-equal '("agzam/remoto.el"))
+      (expect 'remoto--search-repos :to-have-been-called-with "agzam/rem"))))
 
 (provide 'remoto-tests)
 
