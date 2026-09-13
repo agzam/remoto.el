@@ -6,7 +6,7 @@
 ;; Assisted-by: ECA:claude-opus-5
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: April 24, 2026
-;; Version: 1.9.2
+;; Version: 2.0.0
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
 ;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
@@ -22,10 +22,18 @@
 ;; via `file-name-handler-alist' that translates Emacs file operations into
 ;; GitHub API calls via the `ghub' library.
 ;;
+;; Loading this file defines things and changes nothing.  `global-remoto-mode'
+;; is the switch: it installs the file-name handler, the `find-file' and
+;; `dired' URL rewriting, the completion metadata, and the auto-enabling of
+;; `remoto-mode' in remoto buffers, and removes all of them when turned off.
+;;
 ;; Usage:
+;;   (global-remoto-mode 1)
+;;   C-x C-f /github:torvalds/linux RET
 ;;   M-x remoto-browse RET https://github.com/torvalds/linux RET
 ;;
-;; Supports pasting any GitHub URL, git remote URL, or owner/repo shorthand.
+;; `remoto-browse' turns the mode on itself when it is off.  Supports pasting
+;; any GitHub URL, git remote URL, or owner/repo shorthand.
 
 ;;; Code:
 
@@ -2725,8 +2733,12 @@ INPUT can be any GitHub URL, git remote URL, or owner/repo shorthand.
 Supports owner/repo#NUM to view issues/PRs and owner/repo@ref for
 specific branches/tags.
 With interactive use, provides search completion - type 3+ characters
-to search GitHub repositories."
-  (interactive (list (remoto--read-repo)))
+to search GitHub repositories.
+Turns on `global-remoto-mode' when it is off: the buffers this command
+opens need the file-name handler for as long as they live."
+  (interactive (progn (remoto--ensure-global-mode)
+                      (list (remoto--read-repo))))
+  (remoto--ensure-global-mode)
   (remoto--with-fetch-indicator
     (cond
      ;; Issue/PR mode: owner/repo#NUM
@@ -2893,11 +2905,6 @@ Call ORIG-FN with FILENAME and ARGS after any rewrite."
          (substring filename 0 (match-beginning 1))))
     (apply orig-fn (remoto--maybe-rewrite filename) args)))
 
-(unless (advice-member-p #'remoto--dired-around-a 'dired)
-  (advice-add 'dired :around #'remoto--dired-around-a))
-(unless (advice-member-p #'remoto--find-file-around-a 'find-file-noselect)
-  (advice-add 'find-file-noselect :around #'remoto--find-file-around-a))
-
 ;;;; Eager auth warm-up
 
 (defun remoto--find-github-token ()
@@ -2914,8 +2921,20 @@ hosts (api.github.com vs github.com) and package suffixes (^forge,
         (dolist (host hosts)
           (dolist (pkg packages)
             (let* ((user (if pkg (format "%s^%s" username pkg) username))
-                   (results (ignore-errors
-                              (auth-source-search :host host :user user :max 1)))
+                   (results (condition-case err
+                                (auth-source-search :host host :user user :max 1)
+                              ;; A broken backend (say, a .authinfo.gpg that
+                              ;; does not decrypt) fails the same way for
+                              ;; every combination and for every later API
+                              ;; call, which would repeat this lookup.  Report
+                              ;; it once, go unauthenticated, and leave the
+                              ;; retry to `remoto-reset-auth'.
+                              (error
+                               (setq remoto--auth-failed t)
+                               (message "Remoto: auth-source lookup failed (%s); \
+using unauthenticated access until M-x remoto-reset-auth"
+                                        (error-message-string err))
+                               (throw 'found nil))))
                    (secret (plist-get (car results) :secret))
                    (token (if (functionp secret) (funcall secret) secret)))
               (when (and token (not (string-empty-p token)))
@@ -2948,11 +2967,16 @@ using unauthenticated access"
       ;; No token found yet - don't set auth-failed so remoto--api
       ;; can still try ghub's own auth-source resolution on demand.
       ;; The warm-up is opportunistic; failing here should not lock
-      ;; out the session permanently.
-      (message "Remoto: no token found during warm-up; \
-will try ghub auth on first API call"))))
+      ;; out the session permanently.  A backend failure inside the
+      ;; lookup has already set auth-failed and said so.
+      (unless remoto--auth-failed
+        (message "Remoto: no token found during warm-up; \
+will try ghub auth on first API call")))))
 
-(run-with-idle-timer 2 nil #'remoto--warm-auth)
+(defvar remoto--warm-auth-timer nil
+  "Pending idle timer for `remoto--warm-auth', or nil.
+Held so turning `global-remoto-mode' off before the timer fires can
+cancel it.")
 
 ;;;; Handler registration
 
@@ -2960,15 +2984,6 @@ will try ghub auth on first API call"))))
   (rx bos "/" (or "github" "gh") ":")
   "Regexp matching remoto file paths.
 Matches the canonical /github: prefix and its /gh: shorthand alias.")
-
-(unless (equal (cdr (assoc remoto--handler-regexp file-name-handler-alist))
-               #'remoto-file-name-handler)
-  (push (cons remoto--handler-regexp #'remoto-file-name-handler)
-        file-name-handler-alist))
-
-;; Clear the fetch indicator and reset in-flight state whenever a
-;; minibuffer exits.  `add-hook' is idempotent, so reloading is safe.
-(add-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
 
 ;;;; Minor mode
 
@@ -3006,15 +3021,16 @@ or directory shown in the current buffer.  The commands work the same in
 file buffers and in Dired, and adapt to the forge behind the path (only
 GitHub today, but designed for more).
 
-`remoto-mode' is enabled automatically when visiting a remoto path.  Its
-keymap is empty by default; the commands are grouped in the variable
-`remoto-command-map', which you can bind to a prefix of your choosing."
+While `global-remoto-mode' is on, `remoto-mode' is enabled automatically
+when visiting a remoto path.  Its keymap is empty by default; the
+commands are grouped in the variable `remoto-command-map', which you can
+bind to a prefix of your choosing."
   :lighter " Remoto"
   :keymap remoto-mode-map)
 
 (defun remoto--maybe-enable-mode ()
   "Enable `remoto-mode' when the current buffer is a remoto buffer.
-Intended for `find-file-hook' and `dired-mode-hook'."
+`global-remoto-mode' runs it from `find-file-hook' and `dired-mode-hook'."
   (let ((file (or buffer-file-name
                   (and (derived-mode-p 'dired-mode)
                        (if (listp dired-directory)
@@ -3023,9 +3039,6 @@ Intended for `find-file-hook' and `dired-mode-hook'."
     (when (and (stringp file)
                (string-match-p remoto--handler-regexp file))
       (remoto-mode 1))))
-
-(add-hook 'find-file-hook #'remoto--maybe-enable-mode)
-(add-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
 
 (defun remoto--get-prop (candidate prop)
   "Get text property PROP from CANDIDATE.
@@ -3164,8 +3177,68 @@ Args: ORIG, STRING, PRED, ACTION."
                                       (assq-delete-all 'category (copy-alist base-alist)))))
           (or base (cons 'metadata nil)))))))
 
-(advice-add 'read-file-name-internal :around
-            #'remoto--read-file-name-internal-a)
+;;;; Global mode
+
+(defun remoto--install ()
+  "Install the handler, the advice, the hooks and the auth warm-up timer.
+Each step is idempotent, so a second call while on is a no-op."
+  (unless (equal (cdr (assoc remoto--handler-regexp file-name-handler-alist))
+                 #'remoto-file-name-handler)
+    (push (cons remoto--handler-regexp #'remoto-file-name-handler)
+          file-name-handler-alist))
+  (advice-add 'dired :around #'remoto--dired-around-a)
+  (advice-add 'find-file-noselect :around #'remoto--find-file-around-a)
+  (advice-add 'read-file-name-internal :around
+              #'remoto--read-file-name-internal-a)
+  (add-hook 'find-file-hook #'remoto--maybe-enable-mode)
+  (add-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
+  ;; Clear the fetch indicator and reset in-flight state whenever a
+  ;; minibuffer exits.
+  (add-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
+  (unless (timerp remoto--warm-auth-timer)
+    (setq remoto--warm-auth-timer
+          (run-with-idle-timer 2 nil #'remoto--warm-auth))))
+
+(defun remoto--uninstall ()
+  "Remove the handler, the advice, the hooks and the auth warm-up timer."
+  (setq file-name-handler-alist
+        (assoc-delete-all remoto--handler-regexp file-name-handler-alist))
+  (advice-remove 'dired #'remoto--dired-around-a)
+  (advice-remove 'find-file-noselect #'remoto--find-file-around-a)
+  (advice-remove 'read-file-name-internal #'remoto--read-file-name-internal-a)
+  (remove-hook 'find-file-hook #'remoto--maybe-enable-mode)
+  (remove-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
+  (remove-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
+  (when (timerp remoto--warm-auth-timer)
+    (cancel-timer remoto--warm-auth-timer))
+  (setq remoto--warm-auth-timer nil))
+
+;;;###autoload
+(define-minor-mode global-remoto-mode
+  "Toggle remoto's virtual filesystem for GitHub repositories.
+
+When on, `/github:OWNER/REPO...' and `/gh:...' paths work in `find-file',
+`dired', and every other file operation, GitHub URLs typed at those
+prompts are rewritten to remoto paths, `find-file' completion inside a
+remoto path shows remoto's annotations, `remoto-mode' turns on in remoto
+buffers, and a GitHub token is looked up once Emacs is idle.  When off,
+all of that is removed again.
+
+Loading remoto does not turn this mode on.  Enable it in your init file,
+or let `remoto-browse' do it on first use."
+  :global t
+  :group 'remoto
+  (if global-remoto-mode
+      (remoto--install)
+    (remoto--uninstall)))
+
+(defun remoto--ensure-global-mode ()
+  "Turn on `global-remoto-mode' when it is off, and say so.
+For remoto's own entry commands: the buffers they open need the
+file-name handler for as long as they live, so the mode has to stay on."
+  (unless global-remoto-mode
+    (global-remoto-mode 1)
+    (message "Remoto: `global-remoto-mode' enabled")))
 
 ;;;; Issue display (see remoto-topic.el for full implementation)
 
@@ -3185,15 +3258,9 @@ Adds the package directory to `load-path' if needed."
 ;;;; Unload
 
 (defun remoto-unload-function ()
-  "Remove handler and advice installed by remoto."
-  (setq file-name-handler-alist
-        (assoc-delete-all remoto--handler-regexp file-name-handler-alist))
-  (advice-remove 'dired #'remoto--dired-around-a)
-  (advice-remove 'find-file-noselect #'remoto--find-file-around-a)
-  (advice-remove 'read-file-name-internal #'remoto--read-file-name-internal-a)
-  (remove-hook 'find-file-hook #'remoto--maybe-enable-mode)
-  (remove-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
-  (remove-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
+  "Turn `global-remoto-mode' off and drop the caches."
+  (when global-remoto-mode
+    (global-remoto-mode -1))
   (clrhash remoto--tree-cache)
   (clrhash remoto--default-branch-cache)
   (clrhash remoto--branches-cache)

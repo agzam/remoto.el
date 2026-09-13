@@ -28,13 +28,16 @@ For now it works only with GitHub repos. Future plans include support for other 
 * How
 ** use-package + straight
 
-You need to load the package so it can register its file handler and advice.
+Loading the package defines things and changes nothing. ~global-remoto-mode~ is the switch: it installs the file handler, the URL rewriting in ~find-file~ and ~dired~, and the completion metadata, and removes them all when turned off. Turn it on in your config:
 
 #+begin_src emacs-lisp
 (use-package remoto
   :straight (:host github :repo "agzam/remoto.el")
-  :demand t)
+  :demand t
+  :config (global-remoto-mode 1))
 #+end_src
+
+~remoto-browse~ and the Embark open actions turn the mode on themselves, so ~M-x remoto-browse~ works without that line. A ~/gh:~ path typed into ~C-x C-f~ before anything else needs it.
 
 The package is not on MELPA yet. Maybe upvote the [[https://github.com/melpa/melpa/pull/10219][submission PR]], who knows, perhaps it gets accepted faster.
 
@@ -52,7 +55,7 @@ M-x remoto-browse RET torvalds/linux RET
 
 *** C-x d / C-x C-f
 
-GitHub URLs are detected automatically in ~dired~ and ~find-file~:
+With ~global-remoto-mode~ on, GitHub URLs are detected automatically in ~dired~ and ~find-file~:
 
 #+begin_src emacs-lisp
 C-x C-f /github:torvalds/linux RET
@@ -100,11 +103,12 @@ Keybindings in the display buffer: ~b~ (open in browser), ~g~ (refresh).
 
 *** Commands
 
-| Command                | Description                                            |
-|------------------------+--------------------------------------------------------|
-| ~remoto-browse~          | Prompt for a repo, open dired at root                  |
-| ~remoto-refresh~         | Clear tree cache for current repo, re-fetch            |
-| ~remoto-copy-github-url~ | Copy ~github.com~ URL for current file/line to kill ring |
+| Command              | Description                                                   |
+|----------------------+---------------------------------------------------------------|
+| ~global-remoto-mode~ | Turn the file handler, URL rewriting and completion on or off |
+| ~remoto-browse~      | Prompt for a repo, open dired at root                         |
+| ~remoto-refresh~     | Clear tree cache for current repo, re-fetch                   |
+| ~remoto-copy-url~    | Copy ~github.com~ URL for current file/line to kill ring      |
 
 ** Embark integration
 

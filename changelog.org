@@ -3,6 +3,19 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [2.0.0] - 2026-09-13
+
+** Changed
+- Loading remoto no longer changes Emacs. The file-name handler, the URL rewriting in ~find-file~ and ~dired~, the completion metadata, the hooks that turn on ~remoto-mode~ in remoto buffers, and the auth warm-up timer are now installed by ~global-remoto-mode~ and removed when it is turned off. Add ~(global-remoto-mode 1)~ to your init file. ~remoto-browse~, ~remoto-embark-open-in-remoto~ and ~remoto-embark-open-issue~ turn the mode on themselves, so a session that starts from ~M-x remoto-browse~ or an Embark action works as before; a ~/gh:~ path typed into ~C-x C-f~ before that needs the init line. This follows the Emacs Lisp coding convention that loading a package must not change editing behaviour, raised in the MELPA review.
+- ~remoto-unload-function~ turns the mode off instead of removing each hook and advice by hand.
+- A failing auth-source backend (a ~.authinfo.gpg~ that does not decrypt, say) is reported once in the echo area, the token search stops, and remoto runs unauthenticated until ~M-x remoto-reset-auth~. It used to swallow the failure for every host and user combination, retry the lookup on every API call, and have the warm-up report that no token was found.
+- The Embark target finder and classifier swallow only the ~user-error~ that remoto's API layer signals for a failed forge lookup. Any other error propagates.
+
+** Fixed
+- ~remoto-embark.el~ and ~remoto-topic.el~ declared functions of ~remoto.el~ with the wrong arglists (~remoto--api~, ~remoto--forge-issue-url~), which ~check-declare~ flagged. Both files ~require~ remoto, so the declarations are gone.
+- ~remoto--clone-finished~ checks ~fboundp~ for the Magit entry point instead of carrying a forward declaration.
+- The README Commands table named ~remoto-copy-github-url~, obsolete since 1.8.0; it now names ~remoto-copy-url~.
+
 * [1.9.2] - 2026-09-09
 
 ** Changed

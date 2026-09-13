@@ -27,21 +27,7 @@
 
 (require 'remoto)
 
-(declare-function remoto--path-context "remoto" (path &optional line-start line-end))
-(declare-function remoto--context-url "remoto" (ctx kind &optional ref))
-(declare-function remoto--context-web-url "remoto" (ctx))
-(declare-function remoto--kill-url "remoto" (url))
-(declare-function remoto--require-blob "remoto" (ctx what))
-(declare-function remoto--resolve-commit-sha "remoto" (owner repo ref))
-(declare-function remoto--parse-input "remoto" (input))
-(declare-function remoto--canonical-path "remoto" (parsed))
-(declare-function remoto--parse-path "remoto" (filename))
-(declare-function remoto--normalize-shorthand "remoto" (path))
-(declare-function remoto--forge-type "remoto" (path))
-(declare-function remoto--forge-issue-url "remoto" (forge owner repo number))
-(declare-function remoto--forge-owner-url "remoto" (forge owner &optional kind))
 (declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
-(declare-function magit-status-setup-buffer "magit-status" (&optional directory))
 (defvar dired-directory)
 
 ;; Embark variables this file registers into.  Declared so it byte-compiles
@@ -62,6 +48,17 @@
 
 ;;;; Target detection
 
+(defun remoto--embark-context-or-nil (path)
+  "Return the remoto context plist for PATH, or nil when it cannot be built.
+Classifying a non-root path asks the forge for its tree, and remoto's API
+layer reports every lookup failure as a `user-error'.  A target finder or
+transformer runs inside `embark-act', which must keep working when the
+forge is unreachable, so that one condition means \"no remoto target\".
+Any other error is a bug and propagates."
+  (condition-case nil
+      (remoto--path-context path)
+    (user-error nil)))
+
 (defun remoto--embark-target-at-point ()
   "Return (TYPE . PATH) for the remoto target in the current buffer, or nil.
 TYPE is one of `remoto-repo', `remoto-dir', `remoto-file'.  Works in remoto
@@ -70,7 +67,7 @@ file buffers and in Dired (the entry at point, else the directory)."
                         (or (dired-get-filename nil t)
                             (and (stringp dired-directory) dired-directory))
                       buffer-file-name))
-              (ctx (ignore-errors (remoto--path-context path))))
+              (ctx (remoto--embark-context-or-nil path)))
     (cons (plist-get ctx :type) path)))
 
 (defun remoto--embark-target-finder ()
@@ -156,7 +153,7 @@ classify like the canonical one."
      ((string-match-p (rx "#" (+ digit) eos) path) 'remoto-issue)
      ((string-match-p (rx "@" (+ nonl) ":/" eos) path) 'remoto-branch)
      ((remoto--embark-owner-parts path) 'remoto-owner)
-     (t (let ((ctx (ignore-errors (remoto--path-context path))))
+     (t (let ((ctx (remoto--embark-context-or-nil path)))
           (or (and ctx (plist-get ctx :type)) fallback))))))
 
 (defun remoto--embark-context (target)
@@ -252,8 +249,10 @@ TARGET may be a repository, directory, file, issue/PR, or owner."
 (defun remoto-embark-open-in-remoto (url)
   "Open the forge URL (or `owner/repo' shorthand) URL in remoto.
 Parses URL with `remoto--parse-input' and visits the canonical remoto
-path; a directory opens Dired and the ref resolves lazily."
+path; a directory opens Dired and the ref resolves lazily.  Turns on
+`global-remoto-mode' when it is off, as `remoto-browse' does."
   (interactive "sForge URL: ")
+  (remoto--ensure-global-mode)
   (find-file (remoto--canonical-path (remoto--parse-input url))))
 
 (defun remoto-embark-copy-branch-url (target)
@@ -278,8 +277,10 @@ path; a directory opens Dired and the ref resolves lazily."
 
 (defun remoto-embark-open-issue (target)
   "Open the remoto issue/PR TARGET (a /github:OWNER/REPO#N path) in remoto.
-This routes to the remoto-topic display via `find-file'."
+This routes to the remoto-topic display via `find-file', which needs
+`global-remoto-mode' on; the mode is turned on when it is off."
   (interactive "sRemoto issue: ")
+  (remoto--ensure-global-mode)
   (find-file target))
 
 (defun remoto-embark-copy-issue-ref (target)
@@ -363,7 +364,8 @@ For an issue the forge redirects to the issue page."
   "Report EVENT for the clone into DEST, and visit DEST once it succeeded."
   (message "remoto clone %s: %s" dest (string-trim event))
   (when (string-prefix-p "finished" event)
-    (if (require 'magit nil t)
+    (require 'magit nil t)
+    (if (fboundp 'magit-status-setup-buffer)
         (magit-status-setup-buffer dest)
       (dired dest))))
 

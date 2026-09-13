@@ -13,6 +13,10 @@
 ;; until then, keeping the rest of the suite runnable.
 (require 'remoto-embark nil t)
 
+;; Loading remoto installs nothing.  The suite exercises the handler, the
+;; advice and the hooks, so flip the switch the way an init file does.
+(global-remoto-mode 1)
+
 ;;; Helpers
 
 (defvar remoto-test--mock-tree
@@ -1185,6 +1189,28 @@
             "42" "/github:foo/bar")
     (kill-buffer "*test*"))
 
+  (it "turns global-remoto-mode on when it is off"
+    (spy-on 'remoto-topic-display)
+    (spy-on 'remoto--require-topic)
+    (spy-on 'message)
+    (unwind-protect
+        (progn
+          (global-remoto-mode -1)
+          (remoto-browse "foo/bar#42")
+          (expect global-remoto-mode :to-be-truthy)
+          (expect 'message :to-have-been-called-with
+                  "Remoto: `global-remoto-mode' enabled"))
+      (global-remoto-mode 1)))
+
+  (it "leaves global-remoto-mode alone when it is already on"
+    (spy-on 'remoto-topic-display)
+    (spy-on 'remoto--require-topic)
+    (spy-on 'message)
+    (remoto-browse "foo/bar#42")
+    (expect global-remoto-mode :to-be-truthy)
+    (expect 'message :not :to-have-been-called-with
+            "Remoto: `global-remoto-mode' enabled"))
+
   (it "opens dired for plain owner/repo"
     (let ((remoto--default-branch-cache (make-hash-table :test 'equal))
           (remoto--tree-cache (make-hash-table :test 'equal)))
@@ -1392,7 +1418,23 @@
   (it "returns nil when username cannot be determined"
     (spy-on 'ghub--username :and-call-fake
             (lambda (&rest _) (error "Cannot determine username")))
-    (expect (remoto--find-github-token) :to-be nil)))
+    (expect (remoto--find-github-token) :to-be nil))
+
+  (it "reports a failing auth-source backend once, stops, and marks auth failed"
+    (let ((remoto--auth-failed nil))
+      (spy-on 'ghub--username :and-return-value "testuser")
+      (spy-on 'auth-source-search :and-call-fake
+              (lambda (&rest _) (error "Decryption failed")))
+      (spy-on 'message)
+      (expect (remoto--find-github-token) :to-be nil)
+      (expect 'auth-source-search :to-have-been-called-times 1)
+      (expect 'message :to-have-been-called-times 1)
+      (expect (apply #'format (spy-calls-args-for 'message 0))
+              :to-equal "Remoto: auth-source lookup failed (Decryption failed); \
+using unauthenticated access until M-x remoto-reset-auth")
+      ;; Every API call retries the lookup while this is nil, and each
+      ;; retry would repeat the message.
+      (expect remoto--auth-failed :to-be t))))
 
 (describe "remoto--warm-auth"
   (it "caches authenticated user and token on success"
@@ -1419,6 +1461,17 @@
       ;; auth permanently - remoto--api will try ghub's own resolution.
       (expect remoto--auth-failed :to-be nil)
       (expect remoto--authenticated-user :to-be nil)))
+
+  (it "adds no message of its own after the lookup reported a backend failure"
+    (let ((remoto--authenticated-user nil)
+          (remoto--auth-failed nil)
+          (remoto--effective-auth nil)
+          (remoto-github-auth nil))
+      (spy-on 'remoto--find-github-token :and-call-fake
+              (lambda () (setq remoto--auth-failed t) nil))
+      (spy-on 'message)
+      (remoto--warm-auth)
+      (expect 'message :not :to-have-been-called)))
 
   (it "sets auth-failed when API call fails with found token"
     (let ((remoto--authenticated-user nil)
@@ -3806,7 +3859,25 @@ Returns the full path after completion, or INPUT if no completion."
   (it "returns nil outside remoto buffers"
     (with-temp-buffer
       (setq-local buffer-file-name "/home/me/x.el")
-      (expect (remoto--embark-target-at-point) :to-be nil))))
+      (expect (remoto--embark-target-at-point) :to-be nil)))
+
+  (it "treats a failed forge lookup as no target"
+    (with-temp-buffer
+      (setq-local buffer-file-name "/github:testowner/testrepo@main:/src/main.el")
+      (spy-on 'remoto--path-context :and-throw-error 'user-error)
+      (expect (remoto--embark-target-at-point) :to-be nil)))
+
+  (it "lets a programming error propagate"
+    (with-temp-buffer
+      (setq-local buffer-file-name "/github:testowner/testrepo@main:/src/main.el")
+      (spy-on 'remoto--path-context :and-throw-error 'wrong-type-argument)
+      (expect (remoto--embark-target-at-point) :to-throw 'wrong-type-argument))))
+
+(describe "remoto--embark-classify"
+  (it "falls back to the given type when the forge lookup fails"
+    (spy-on 'remoto--path-context :and-throw-error 'user-error)
+    (expect (remoto--embark-classify "/github:o/r@main:/src" 'remoto-file)
+            :to-be 'remoto-file)))
 
 (describe "remoto-embark actions"
   (it "copies the repo web URL from a repo target (no network)"
@@ -3896,7 +3967,30 @@ Returns the full path after completion, or INPUT if no completion."
 
   (it "errors on a non-forge URL"
     (expect (remoto-embark-open-in-remoto "https://example.com/foo")
-            :to-throw 'user-error)))
+            :to-throw 'user-error))
+
+  (it "turns global-remoto-mode on when it is off"
+    (spy-on 'find-file)
+    (spy-on 'message)
+    (unwind-protect
+        (progn
+          (global-remoto-mode -1)
+          (remoto-embark-open-in-remoto "https://github.com/o/r")
+          (expect global-remoto-mode :to-be-truthy)
+          (expect 'find-file :to-have-been-called-with "/github:o/r:/"))
+      (global-remoto-mode 1))))
+
+(describe "remoto-embark-open-issue"
+  (it "turns global-remoto-mode on and visits the issue path"
+    (spy-on 'find-file)
+    (spy-on 'message)
+    (unwind-protect
+        (progn
+          (global-remoto-mode -1)
+          (remoto-embark-open-issue "/github:o/r#42")
+          (expect global-remoto-mode :to-be-truthy)
+          (expect 'find-file :to-have-been-called-with "/github:o/r#42"))
+      (global-remoto-mode 1))))
 
 (describe "remoto-embark-clone"
   (it "clones with the HTTPS URL and chosen dir by default"
@@ -3965,7 +4059,10 @@ Returns the full path after completion, or INPUT if no completion."
       (expect visited :to-equal '(magit . "/tmp/r/")))
 
     (it "falls back to dired when magit is unavailable"
+      ;; Unbind the Magit entry point too: an installed Magit leaves it
+      ;; autoloaded, and the fallback keys on `fboundp'.
       (cl-letf (((symbol-function 'require) (lambda (&rest _) nil))
+                ((symbol-function 'magit-status-setup-buffer) nil)
                 ((symbol-function 'dired) (lambda (dir) (setq visited (cons 'dired dir)))))
         (remoto--clone-finished "/tmp/r/" "finished\n"))
       (expect visited :to-equal '(dired . "/tmp/r/")))
@@ -4583,31 +4680,92 @@ of `completion-all-completions'; Vertico inserts a candidate as
               :to-equal '("agzam/remoto.el"))
       (expect 'remoto--search-repos :to-have-been-called-with "agzam/rem"))))
 
+;;; The global switch
+
+(describe "global-remoto-mode"
+  ;; The suite runs with the mode on; every spec here puts it back.
+  (it "installs the handler, the advice and the hooks"
+    (global-remoto-mode 1)
+    (expect (cdr (assoc remoto--handler-regexp file-name-handler-alist))
+            :to-be 'remoto-file-name-handler)
+    (expect (advice-member-p #'remoto--dired-around-a 'dired) :to-be-truthy)
+    (expect (advice-member-p #'remoto--find-file-around-a 'find-file-noselect)
+            :to-be-truthy)
+    (expect (advice-member-p #'remoto--read-file-name-internal-a
+                             'read-file-name-internal)
+            :to-be-truthy)
+    (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be-truthy)
+    (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be-truthy)
+    (expect (memq 'remoto--minibuffer-exit-cleanup minibuffer-exit-hook)
+            :to-be-truthy))
+
+  (it "removes all of them when turned off"
+    (unwind-protect
+        (progn
+          (global-remoto-mode -1)
+          (expect (assoc remoto--handler-regexp file-name-handler-alist)
+                  :to-be nil)
+          (expect (advice-member-p #'remoto--dired-around-a 'dired) :to-be nil)
+          (expect (advice-member-p #'remoto--find-file-around-a 'find-file-noselect)
+                  :to-be nil)
+          (expect (advice-member-p #'remoto--read-file-name-internal-a
+                                   'read-file-name-internal)
+                  :to-be nil)
+          (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be nil)
+          (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be nil)
+          (expect (memq 'remoto--minibuffer-exit-cleanup minibuffer-exit-hook)
+                  :to-be nil))
+      (global-remoto-mode 1)))
+
+  (it "schedules the auth warm-up on idle and cancels it when turned off"
+    (unwind-protect
+        (progn
+          (global-remoto-mode -1)
+          (global-remoto-mode 1)
+          (let ((timer remoto--warm-auth-timer))
+            (expect (memq timer timer-idle-list) :to-be-truthy)
+            (expect (timer--function timer) :to-be #'remoto--warm-auth)
+            (global-remoto-mode -1)
+            (expect (memq timer timer-idle-list) :to-be nil)
+            (expect remoto--warm-auth-timer :to-be nil)))
+      (global-remoto-mode 1)))
+
+  (it "registers the handler once however often it is turned on"
+    (global-remoto-mode 1)
+    (global-remoto-mode 1)
+    (expect (cl-count remoto--handler-regexp file-name-handler-alist
+                      :key #'car :test #'equal)
+            :to-equal 1)
+    (expect (cl-count 'remoto--maybe-enable-mode find-file-hook) :to-equal 1))
+
+  (it "makes a remoto path reach the handler only while on"
+    (unwind-protect
+        (progn
+          (expect (find-file-name-handler "/github:o/r:/" 'file-exists-p)
+                  :to-be 'remoto-file-name-handler)
+          (global-remoto-mode -1)
+          (expect (find-file-name-handler "/github:o/r:/" 'file-exists-p)
+                  :not :to-be 'remoto-file-name-handler))
+      (global-remoto-mode 1))))
+
 ;;; Unloading
 
 (describe "remoto-unload-function"
-  ;; Everything remoto installs at load time is put back, so the rest of
-  ;; the suite runs against a loaded remoto.
-  (it "removes the handler, the hooks and the advice"
-    (let ((handlers file-name-handler-alist))
-      (unwind-protect
-          (progn
-            (remoto-unload-function)
-            (expect (assoc remoto--handler-regexp file-name-handler-alist)
-                    :to-be nil)
-            (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be nil)
-            (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be nil)
-            (expect (memq 'remoto--minibuffer-exit-cleanup minibuffer-exit-hook)
-                    :to-be nil)
-            (expect (advice-member-p #'remoto--read-file-name-internal-a
-                                     'read-file-name-internal)
-                    :to-be nil))
-        (setq file-name-handler-alist handlers)
-        (add-hook 'find-file-hook #'remoto--maybe-enable-mode)
-        (add-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
-        (add-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
-        (advice-add 'read-file-name-internal :around
-                    #'remoto--read-file-name-internal-a)))))
+  ;; Runs last: it empties the real caches.
+  (it "turns global-remoto-mode off and empties the caches"
+    (unwind-protect
+        (progn
+          (puthash "o/r" "main" remoto--default-branch-cache)
+          (remoto-unload-function)
+          (expect global-remoto-mode :to-be nil)
+          (expect (assoc remoto--handler-regexp file-name-handler-alist)
+                  :to-be nil)
+          (expect (advice-member-p #'remoto--read-file-name-internal-a
+                                   'read-file-name-internal)
+                  :to-be nil)
+          (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be nil)
+          (expect (hash-table-count remoto--default-branch-cache) :to-equal 0))
+      (global-remoto-mode 1))))
 
 (provide 'remoto-tests)
 

@@ -24,6 +24,8 @@
 
 ;; Installed users get this from the autoloads; a bare `require' does not.
 (remoto-embark-register)
+;; And their init file turns the switch on; loading remoto does not.
+(global-remoto-mode 1)
 
 (defmacro remoto-embark-test-with-autoloads (var &rest body)
   "Bind VAR to a freshly generated autoloads file of the package and run BODY.
@@ -48,6 +50,16 @@ every source older than an existing output file, so it must not exist."
                     (buffer-string))))
         (expect text :to-match "(autoload 'remoto-embark-register \"[^\"]*remoto-embark\"")
         (expect text :to-match "(with-eval-after-load 'embark (remoto-embark-register))"))))
+
+  (it "autoloads global-remoto-mode, so an init file can turn it on unloaded"
+    (remoto-embark-test-with-autoloads file
+      (let ((text (with-temp-buffer
+                    (insert-file-contents file)
+                    (buffer-string))))
+        (expect text :to-match "(defvar global-remoto-mode nil")
+        (expect text :to-match "(autoload 'global-remoto-mode \"[^\"]*remoto\"")
+        ;; The autoloads only define; they never flip the switch.
+        (expect text :not :to-match "^(global-remoto-mode"))))
 
   (it "registers the per-type keymaps in embark-keymap-alist"
     (expect (assoc 'remoto-repo embark-keymap-alist)

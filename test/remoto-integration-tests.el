@@ -18,6 +18,9 @@
 (require 'buttercup)
 (require 'remoto)
 
+;; Loading remoto installs nothing; the specs below go through the handler.
+(global-remoto-mode 1)
+
 ;; Use API token from environment when available (CI).
 ;; Bypasses ghub's auth-source lookup entirely.
 (if-let* ((tok (getenv "REMOTO_TEST_TOKEN")))
