@@ -89,7 +89,11 @@ or file-name candidate becomes a canonical path.  Falls back to TYPE."
                (or (and (< 0 (length target))
                         (get-text-property 0 'remoto-target target))
                    target))))
-    (cons (remoto--embark-classify path type) path)))
+    (cons (remoto--embark-classify
+           path type
+           (and (< 0 (length target))
+                (get-text-property 0 'remoto-ref-type target)))
+          path)))
 
 (defun remoto--embark-transform-ref (type target)
   "Embark transformer for ref targets: resolve TARGET's path, keep TYPE.
@@ -141,17 +145,20 @@ non-strings and unrecognized strings are returned as-is."
                   (if (string-empty-p rest) "/" rest))))
        (t path)))))
 
-(defun remoto--embark-classify (path fallback)
+(defun remoto--embark-classify (path fallback &optional ref)
   "Return the Embark target type for the remoto PATH string, else FALLBACK.
-Classifies by shape: an issue/PR (a trailing `#N'), a branch/tag (a bare
-`@REF' root), an account/owner (`/FORGE:OWNER'), otherwise the repo,
-directory, or file type from the context layer.  PATH is normalized with
-`remoto--embark-canonicalize' first, so the shorthand and file-name forms
-classify like the canonical one."
+Classifies by shape: an issue/PR (a trailing `#N'), an account/owner
+\(`/FORGE:OWNER'), otherwise the repo, directory, or file type from the
+context layer.  A bare `@REF' root is the branch or tag only when REF is
+non-nil, which a branch or tag completion candidate provides; the same
+path from a Dired buffer is the repository at that ref, whose actions
+\(clone, remote URLs, history) are the useful ones there.  PATH is
+normalized with `remoto--embark-canonicalize' first, so the shorthand and
+file-name forms classify like the canonical one."
   (let ((path (remoto--embark-canonicalize path)))
     (cond
      ((string-match-p (rx "#" (+ digit) eos) path) 'remoto-issue)
-     ((string-match-p (rx "@" (+ nonl) ":/" eos) path) 'remoto-branch)
+     ((and ref (string-match-p (rx "@" (+ nonl) ":/" eos) path)) 'remoto-branch)
      ((remoto--embark-owner-parts path) 'remoto-owner)
      (t (let ((ctx (remoto--embark-context-or-nil path)))
           (or (and ctx (plist-get ctx :type)) fallback))))))

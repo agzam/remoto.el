@@ -30,6 +30,11 @@
     ("/" ((type . "tree") (size . 0) (sha . "") (mode . "040000"))))
   "Mock tree data for tests.")
 
+(defvar remoto-test--png-bytes
+  (unibyte-string #x89 ?P ?N ?G ?\r ?\n #x1a ?\n 0 0 0 13 ?I ?H ?D ?R
+                  0 0 0 1 0 0 0 1 8 6 0 0 0 #xff #xfe)
+  "The head of a PNG file: signature, IHDR chunk, NUL and high bytes.")
+
 (defun remoto-test--install-mock-tree ()
   "Install mock tree into the cache."
   (let ((table (make-hash-table :test 'equal)))
@@ -432,6 +437,43 @@
            "/github:testowner/testrepo@main:/README.md")
           (expect (point) :to-equal pt)
           (expect (buffer-string) :to-equal "line one\nline two\nline three\n")))))
+
+  (it "insert-file-contents keeps a binary file as bytes under no-conversion"
+    ;; `image-mode' takes the data from a remote buffer by encoding it
+    ;; with `buffer-file-coding-system', so the bytes must round-trip.
+    (remoto-test-with-cache
+      (puthash "logo.png" '((type . "blob") (size . 31) (sha . "ggg") (mode . "100644"))
+               (gethash "testowner/testrepo@main" remoto--tree-cache))
+      (spy-on 'remoto--fetch-file-content :and-return-value remoto-test--png-bytes)
+      (with-temp-buffer
+        (let* ((result (insert-file-contents "/github:testowner/testrepo@main:/logo.png" t))
+               (data (encode-coding-string (buffer-string) buffer-file-coding-system)))
+          (expect (cadr result) :to-equal (length remoto-test--png-bytes))
+          (expect buffer-file-coding-system :to-be 'no-conversion)
+          (expect data :to-equal remoto-test--png-bytes)
+          (expect (image-type-from-data data) :to-be 'png)))))
+
+  (it "insert-file-contents decodes a UTF-8 text file"
+    (remoto-test-with-cache
+      (spy-on 'remoto--fetch-file-content
+              :and-return-value (encode-coding-string "# Título\n— ünïcödé\n" 'utf-8))
+      (with-temp-buffer
+        (let ((result (insert-file-contents "/github:testowner/testrepo@main:/README.md" t)))
+          (expect (buffer-string) :to-equal "# Título\n— ünïcödé\n")
+          (expect (cadr result) :to-equal (length "# Título\n— ünïcödé\n"))
+          (expect (coding-system-base buffer-file-coding-system) :to-be 'utf-8)))))
+
+  (it "file-local-copy writes a binary file byte for byte"
+    (remoto-test-with-cache
+      (spy-on 'remoto--fetch-file-content :and-return-value remoto-test--png-bytes)
+      (let ((copy (file-local-copy "/github:testowner/testrepo@main:/logo.png")))
+        (unwind-protect
+            (expect (with-temp-buffer
+                      (set-buffer-multibyte nil)
+                      (insert-file-contents-literally copy)
+                      (buffer-string))
+                    :to-equal remoto-test--png-bytes)
+          (delete-file copy)))))
 
   (it "insert-file-contents signals file-missing for a path absent from the tree"
     ;; `find-file-noselect' only treats a `file-error' as a nonexistent
@@ -1215,6 +1257,26 @@
           (remoto--require-topic)
           (expect loaded :to-be t))))))
 
+(describe "remoto--parse-topic-url"
+  (it "reads owner, repo and number from pull request and issue URLs"
+    (expect (remoto--parse-topic-url "https://github.com/o/r/pull/42")
+            :to-equal '("o" "r" "42"))
+    (expect (remoto--parse-topic-url "https://github.com/o/r/issues/7")
+            :to-equal '("o" "r" "7"))
+    (expect (remoto--parse-topic-url "github.com/o/r/pull/42/files")
+            :to-equal '("o" "r" "42"))
+    (expect (remoto--parse-topic-url "/github.com/o/r/issues/7#issuecomment-99")
+            :to-equal '("o" "r" "7"))
+    (expect (remoto--parse-topic-url "https://github.com/o/r/pull/42?diff=split")
+            :to-equal '("o" "r" "42")))
+
+  (it "returns nil for repository, tree and blob URLs and other input"
+    (expect (remoto--parse-topic-url "https://github.com/o/r") :to-be nil)
+    (expect (remoto--parse-topic-url "https://github.com/o/r/pulls") :to-be nil)
+    (expect (remoto--parse-topic-url "https://github.com/o/r/blob/main/pull/42") :to-be nil)
+    (expect (remoto--parse-topic-url "/github:o/r#42") :to-be nil)
+    (expect (remoto--parse-topic-url "o/r#42") :to-be nil)))
+
 (describe "remoto-browse issue dispatch"
   (it "calls remoto-topic-display for #NUM input"
     (spy-on 'remoto-topic-display :and-return-value (generate-new-buffer "*test*"))
@@ -1223,6 +1285,14 @@
     (expect 'remoto-topic-display :to-have-been-called-with
             "42" "/github:foo/bar")
     (kill-buffer "*test*"))
+
+  (it "calls remoto-topic-display for a pull request or issue web URL"
+    (spy-on 'remoto-topic-display)
+    (spy-on 'remoto--require-topic)
+    (remoto-browse "https://github.com/foo/bar/pull/42")
+    (expect 'remoto-topic-display :to-have-been-called-with "42" "/github:foo/bar")
+    (remoto-browse "https://github.com/foo/bar/issues/7#issuecomment-1")
+    (expect 'remoto-topic-display :to-have-been-called-with "7" "/github:foo/bar"))
 
   (it "turns global-remoto-mode on when it is off"
     (spy-on 'remoto-topic-display)
@@ -1480,6 +1550,101 @@
     (remoto-test--ghub-fails-with 500)
     (expect (remoto-test--ghub-get-message)
             :to-match "\\`Remoto: API error: HTTP Error: 500")))
+
+(defvar remoto-test--reply nil
+  "The callback and errorback of the last faked callback request.")
+
+(defun remoto-test--ghub-answers-later ()
+  "Fake `ghub-get' as a callback request: return a live buffer, keep the callbacks.
+The test delivers the reply through `remoto-test--reply' when it decides."
+  (spy-on 'ghub-get :and-call-fake
+          (lambda (_resource _params &rest args)
+            (setq remoto-test--reply (list (plist-get args :callback)
+                                           (plist-get args :errorback)))
+            (generate-new-buffer " *remoto-test-http*"))))
+
+(describe "remoto--ghub-get under while-no-input"
+  ;; `while-no-input' binds `throw-on-input'; a synchronous wait that it
+  ;; throws past leaves the url buffer behind, so the call goes through a
+  ;; callback request that ghub cleans up itself.
+  (before-each
+    (setq remoto-test--reply nil)
+    (clrhash remoto--pending-requests))
+
+  (after-each
+    (dolist (buf (buffer-list))
+      (when (string-prefix-p " *remoto-test-http*" (buffer-name buf))
+        (kill-buffer buf))))
+
+  (it "calls ghub synchronously when input cannot interrupt"
+    (let ((throw-on-input nil) callback)
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource _params &rest args)
+                (setq callback (plist-get args :callback))
+                '((name . "main"))))
+      (expect (remoto--ghub-get "/repos/o/r" 'none "repos/o/r")
+              :to-equal '((name . "main")))
+      (expect callback :to-be nil)))
+
+  (it "waits for the callback reply and returns it"
+    (let ((throw-on-input 'remoto-test-input))
+      (remoto-test--ghub-answers-later)
+      (run-at-time 0.01 nil (lambda () (funcall (car remoto-test--reply) '((name . "main")))))
+      (expect (remoto--ghub-get "/repos/o/r" 'none "repos/o/r")
+              :to-equal '((name . "main")))
+      (expect (hash-table-count remoto--pending-requests) :to-equal 0)))
+
+  (it "hands the reply of an abandoned request to the next call"
+    (let ((throw-on-input 'remoto-test-input))
+      (remoto-test--ghub-answers-later)
+      ;; A timer plays the keystroke that makes `while-no-input' throw.
+      (expect (catch 'remoto-test-input
+                (run-at-time 0.01 nil (lambda () (throw 'remoto-test-input 'typed)))
+                (remoto--ghub-get "/repos/o/r" 'none "repos/o/r"))
+              :to-be 'typed)
+      (funcall (car remoto-test--reply) '((name . "main")))
+      (expect (remoto--ghub-get "/repos/o/r" 'none "repos/o/r")
+              :to-equal '((name . "main")))
+      (expect 'ghub-get :to-have-been-called-times 1)
+      (expect (hash-table-count remoto--pending-requests) :to-equal 0)))
+
+  (it "waits on the pending request of an abandoned call instead of starting another"
+    (let ((throw-on-input 'remoto-test-input))
+      (remoto-test--ghub-answers-later)
+      (catch 'remoto-test-input
+        (run-at-time 0.01 nil (lambda () (throw 'remoto-test-input 'typed)))
+        (remoto--ghub-get "/repos/o/r" 'none "repos/o/r"))
+      (run-at-time 0.01 nil (lambda () (funcall (car remoto-test--reply) '((name . "main")))))
+      (expect (remoto--ghub-get "/repos/o/r" 'none "repos/o/r")
+              :to-equal '((name . "main")))
+      (expect 'ghub-get :to-have-been-called-times 1)))
+
+  (it "keeps requests with different auth apart"
+    (let ((throw-on-input 'remoto-test-input))
+      (remoto-test--ghub-answers-later)
+      (catch 'remoto-test-input
+        (run-at-time 0.01 nil (lambda () (throw 'remoto-test-input 'typed)))
+        (remoto--ghub-get "/repos/o/r" 'none "repos/o/r"))
+      (run-at-time 0.01 nil (lambda () (funcall (car remoto-test--reply) '((name . "private")))))
+      (expect (remoto--ghub-get "/repos/o/r" "ghp_token" "repos/o/r")
+              :to-equal '((name . "private")))
+      (expect 'ghub-get :to-have-been-called-times 2)))
+
+  (it "reports a failed reply like the synchronous call and forgets it"
+    (let ((throw-on-input 'remoto-test-input))
+      (remoto-test--ghub-answers-later)
+      (run-at-time 0.01 nil (lambda () (funcall (cadr remoto-test--reply) '(error http 404 nil))))
+      (expect (remoto-test--ghub-get-message) :to-equal "Remoto: not found: repos/o/r")
+      (expect (hash-table-count remoto--pending-requests) :to-equal 0)))
+
+  (it "gives up when the reply buffer dies without a reply"
+    (let ((throw-on-input 'remoto-test-input) buffer)
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (&rest _)
+                (setq buffer (generate-new-buffer " *remoto-test-http*"))))
+      (run-at-time 0.01 nil (lambda () (kill-buffer buffer)))
+      (expect (remoto--ghub-get "/repos/o/r" 'none "repos/o/r") :to-throw 'error)
+      (expect (hash-table-count remoto--pending-requests) :to-equal 0))))
 
 (describe "remoto--find-github-token"
   (it "finds token at api.github.com with ^forge suffix"
@@ -3007,6 +3172,16 @@ Returns the full path after completion, or INPUT if no completion."
     (expect 'remoto-topic-display :to-have-been-called-with "42" "/github:testowner/testrepo")
     (kill-buffer "*test*"))
 
+  (it "routes a pull request or issue web URL to remoto-topic-display"
+    (spy-on 'remoto-topic-display)
+    (spy-on 'remoto--require-topic)
+    (spy-on 'remoto--maybe-rewrite)
+    (remoto--find-file-around-a #'ignore "https://github.com/testowner/testrepo/pull/42/files")
+    (expect 'remoto-topic-display :to-have-been-called-with "42" "/github:testowner/testrepo")
+    (remoto--find-file-around-a #'ignore "https://github.com/testowner/testrepo/issues/7#issuecomment-1")
+    (expect 'remoto-topic-display :to-have-been-called-with "7" "/github:testowner/testrepo")
+    (expect 'remoto--maybe-rewrite :not :to-have-been-called))
+
   (it "rewrites the /gh: short form before calling the original"
     (remoto-test-with-cache
       (expect (remoto--find-file-around-a (lambda (f &rest _) f)
@@ -4434,7 +4609,10 @@ Returns the full path after completion, or INPUT if no completion."
       (expect result :to-equal '(remoto-issue . "/github:foo/bar#42"))))
 
   (it "classifies a branch browse target"
+    ;; The browse table marks its branch and tag candidates with
+    ;; `remoto-ref-type'; without it the same root is the repository.
     (let* ((cand (propertize "foo/bar@main"
+                             'remoto-ref-type "branch"
                              'remoto-target "/github:foo/bar@main:/"))
            (result (remoto--embark-browse-transform 'remoto-browse cand)))
       (expect result :to-equal '(remoto-branch . "/github:foo/bar@main:/"))))

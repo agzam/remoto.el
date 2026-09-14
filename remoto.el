@@ -170,6 +170,68 @@ across different ghub and url.el versions."
              :false-object nil)
           (json-error nil))))))
 
+(cl-defstruct (remoto--request (:constructor remoto--request-create))
+  "A GitHub request started under `while-no-input'."
+  (status 'pending)
+  buffer
+  value)
+
+(defvar remoto--pending-requests (make-hash-table :test 'equal)
+  "Requests started under `while-no-input', keyed by (RESOURCE . AUTH).
+Such a request outlives the completion call that started it: the reply
+lands in its `remoto--request', and the next call for the same key
+waits on that request or reads the landed reply instead of asking
+GitHub again.  A failed request leaves the table, so the next call
+retries.")
+
+(defun remoto--request-condition (err resource)
+  "Turn ERR, as ghub hands it to an errorback, into the condition ghub signals.
+RESOURCE names the request in the condition data."
+  (pcase err
+    (`(error http ,code . ,rest)
+     (list 'ghub-http-error code (nth 2 (assq code url-http-codes))
+           (concat "https://api.github.com" resource) (car rest)))
+    (`(error . ,data) (cons 'ghub-error data))
+    (_ err)))
+
+(defun remoto--request-start (key resource auth)
+  "Start a callback request for RESOURCE with AUTH and register it under KEY."
+  (let ((req (remoto--request-create)))
+    (setf (remoto--request-buffer req)
+          (ghub-get resource nil
+                    :auth auth
+                    :reader #'remoto--json-reader
+                    :host "api.github.com"
+                    :callback (lambda (value &rest _)
+                                (setf (remoto--request-value req) value
+                                      (remoto--request-status req) 'done))
+                    :errorback (lambda (err &rest _)
+                                 (remhash key remoto--pending-requests)
+                                 (setf (remoto--request-value req)
+                                       (remoto--request-condition err resource)
+                                       (remoto--request-status req) 'error))))
+    (puthash key req remoto--pending-requests)
+    req))
+
+(defun remoto--ghub-get-interruptible (resource auth)
+  "GET RESOURCE with AUTH through a callback, waiting in a way input can end.
+`url-retrieve-synchronously' leaves its buffer behind when `while-no-input'
+throws past it, and the reply nobody reads keeps the buffer alive; ghub
+kills the buffer of a callback request itself once the reply is handled.
+Return the value or signal the condition the synchronous call would."
+  (let* ((key (cons resource auth))
+         (req (or (gethash key remoto--pending-requests)
+                  (remoto--request-start key resource auth))))
+    (while (and (eq (remoto--request-status req) 'pending)
+                (buffer-live-p (remoto--request-buffer req)))
+      (accept-process-output nil 0.1))
+    (remhash key remoto--pending-requests)
+    (pcase (remoto--request-status req)
+      ('done (remoto--request-value req))
+      ('error (let ((err (remoto--request-value req)))
+                (signal (car err) (cdr err))))
+      (_ (error "Remoto: no reply for %s" resource)))))
+
 (defun remoto--ghub-get (resource auth endpoint)
   "Call `ghub-get' on RESOURCE with AUTH, translating errors.
 ENDPOINT is used in error messages for context.  Always passes
@@ -178,10 +240,14 @@ resolution can resolve to github.com (HTML) instead of the
 JSON API endpoint."
   (condition-case err
       (let ((inhibit-message (not ghub-debug)))
-        (ghub-get resource nil
-                 :auth auth
-                 :reader #'remoto--json-reader
-                 :host "api.github.com"))
+        ;; `while-no-input' binds `throw-on-input'; only then can input
+        ;; abandon the call, and only then is the callback path needed.
+        (if throw-on-input
+            (remoto--ghub-get-interruptible resource auth)
+          (ghub-get resource nil
+                    :auth auth
+                    :reader #'remoto--json-reader
+                    :host "api.github.com")))
     ;; ghub signals every HTTP failure as (ghub-http-error CODE MESSAGE URL
     ;; PAYLOAD); there are no per-status error symbols to match on.
     (ghub-http-error
@@ -1269,11 +1335,12 @@ Handles partial paths including # and files-default short forms."
   (if (string-prefix-p "/" path) (substring path 1) path))
 
 (defvar remoto--content-cache (make-hash-table :test 'equal)
-  "Cache: sha -> decoded file content string.")
+  "Cache: sha -> raw file bytes as a unibyte string.")
 
 (defun remoto--fetch-file-content (owner repo path ref)
-  "Fetch content of file at PATH in OWNER/REPO@REF.
-Uses Contents API for files under 1MB, Blobs API otherwise."
+  "Fetch the raw bytes of the file at PATH in OWNER/REPO@REF.
+Uses Contents API for files under 1MB, Blobs API otherwise.
+Return a unibyte string; the caller decides how to decode it."
   (let* ((endpoint (format "repos/%s/%s/contents/%s?ref=%s"
                            owner repo
                            (url-hexify-string path) ref))
@@ -1285,22 +1352,18 @@ Uses Contents API for files under 1MB, Blobs API otherwise."
                (content
                 (if (equal encoding "base64")
                     (let ((raw (alist-get 'content data)))
-                      (decode-coding-string
-                       (base64-decode-string (string-replace "\n" "" raw))
-                       'utf-8))
+                      (base64-decode-string (string-replace "\n" "" raw)))
                   ;; Too large - use Blobs API
                   (remoto--fetch-blob owner repo sha))))
           (puthash sha content remoto--content-cache)
           content))))
 
 (defun remoto--fetch-blob (owner repo sha)
-  "Fetch a git blob by SHA from OWNER/REPO.  Return decoded content."
+  "Fetch a git blob by SHA from OWNER/REPO.  Return its raw bytes."
   (let* ((endpoint (format "repos/%s/%s/git/blobs/%s" owner repo sha))
          (data (remoto--api endpoint))
          (raw (alist-get 'content data)))
-    (decode-coding-string
-     (base64-decode-string (string-replace "\n" "" raw))
-     'utf-8)))
+    (base64-decode-string (string-replace "\n" "" raw))))
 
 (defun remoto--handle-insert-file-contents
     (filename &optional visit beg end replace)
@@ -1321,19 +1384,28 @@ VISIT, BEG, END, REPLACE as per `insert-file-contents'."
               (list "Opening input file" "No such file or directory" filename)))
     (let* ((resolved (remoto--resolve-ref parsed))
            (path (remoto--relative-path (remoto-path-path resolved)))
-           (content (remoto--fetch-file-content
-                     (remoto-path-owner resolved)
-                     (remoto-path-repo resolved)
-                     path
-                     (remoto-path-ref resolved))))
+           (bytes (remoto--fetch-file-content
+                   (remoto-path-owner resolved)
+                   (remoto-path-repo resolved)
+                   path
+                   (remoto-path-ref resolved))))
       (when replace (erase-buffer))
-      (let* ((text (if (and beg end)
-                       (substring content (1- beg) (1- end))
-                     content))
-             (len (length text)))
-        (let ((pt (point)))
-          (insert text)
-          (goto-char pt))
+      (let ((pt (point))
+            len)
+        ;; Insert the bytes and decode them in place, so the file gets the
+        ;; coding the primitive would pick from disk: cookies and
+        ;; `auto-coding-alist' by name, then detection.  A binary such as
+        ;; an image stays raw bytes under `no-conversion', which is how
+        ;; `image-mode' recovers the data from a remote buffer.  The
+        ;; primitive sets `buffer-file-coding-system' from the result once
+        ;; this handler returns the decoded length.
+        (save-restriction
+          (narrow-to-region pt pt)
+          (insert (if (or beg end) (substring bytes (or beg 0) end) bytes))
+          (decode-coding-inserted-region (point-min) (point-max) filename
+                                         visit beg end replace)
+          (setq len (- (point-max) (point-min))))
+        (goto-char pt)
         (when visit
           (setq buffer-file-name filename)
           (setq buffer-read-only t)
@@ -1391,9 +1463,9 @@ Use FULL-DIRECTORY-P to force directory-style output."
                         path
                         (remoto-path-ref resolved))))
     (let* ((ext (file-name-extension path t))
-           (temp (make-temp-file "remoto-" nil ext)))
-      (with-temp-file temp
-        (insert content))
+           (temp (make-temp-file "remoto-" nil ext))
+           (coding-system-for-write 'no-conversion))
+      (write-region content nil temp nil 0)
       temp)))
 
 (defun remoto--handle-make-nearby-temp-file (prefix &optional dir-flag suffix)
@@ -1507,6 +1579,20 @@ PRESERVE-PERMISSIONS are passed through to `copy-file'."
      :repo (match-string 2 input)
      :ref nil
      :path "/"))))
+
+(defun remoto--parse-topic-url (input)
+  "Return (OWNER REPO NUMBER) for a pull request or issue web URL INPUT.
+Accepts the https and bare github.com forms.  Whatever follows the
+number is ignored: /files, /commits, an #issuecomment fragment, a query.
+Return nil for any other input."
+  (when (string-match (rx bos (? "/") (? "https://") "github.com/"
+                          (group (+ (not (in "/#?")))) "/"
+                          (group (+ (not (in "/#?")))) "/"
+                          (or "pull" "issues") "/"
+                          (group (+ digit))
+                          (or eos (in "/#?")))
+                      input)
+    (list (match-string 1 input) (match-string 2 input) (match-string 3 input))))
 
 (defun remoto--parse-git-remote (input)
   "Parse git remote INPUT into a `remoto-path' struct."
@@ -2760,6 +2846,10 @@ opens need the file-name handler for as long as they live."
   (interactive (progn (remoto--ensure-global-mode)
                       (list (remoto--read-repo))))
   (remoto--ensure-global-mode)
+  ;; A pull request or issue web URL is the topic, not the repository root
+  ;; the URL parser would make of it.
+  (when-let* ((topic (remoto--parse-topic-url input)))
+    (setq input (apply #'format "%s/%s#%s" topic)))
   (remoto--with-fetch-indicator
     (cond
      ;; Issue/PR mode: owner/repo#NUM
@@ -2920,6 +3010,10 @@ Call ORIG-FN with DIR-OR-LIST and ARGS after any rewrite."
 Intercepts #NUM patterns to display issues instead of file operations.
 Call ORIG-FN with FILENAME and ARGS after any rewrite."
   (setq filename (remoto--normalize-shorthand filename))
+  ;; A pull request or issue web URL is the topic, not the repository root
+  ;; the URL parser would make of it.
+  (when-let* ((topic (remoto--parse-topic-url filename)))
+    (setq filename (apply #'format "/github:%s/%s#%s" topic)))
   ;; Check for #NUM BEFORE rewrite (rewrite would mangle the # delimiter)
   (if (string-match (rx "/github:" (+ (not (in "/@#"))) "/" (+ (not (in "/@#")))
                         (group "#") (group (+ digit)) eos)
@@ -3301,6 +3395,7 @@ Adds the package directory to `load-path' if needed."
   (clrhash remoto--issues-cache)
   (clrhash remoto--file-commits-cache)
   (clrhash remoto--dir-contents-cache)
+  (clrhash remoto--pending-requests)
   nil)
 
 (provide 'remoto)
