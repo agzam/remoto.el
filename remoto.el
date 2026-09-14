@@ -182,14 +182,16 @@ JSON API endpoint."
                  :auth auth
                  :reader #'remoto--json-reader
                  :host "api.github.com"))
-    (ghub-404
-     (user-error "Remoto: not found: %s" endpoint))
-    (ghub-403
-     (user-error "Remoto: access denied (rate limit or permissions): %s" endpoint))
-    (ghub-401
-     (user-error "Remoto: authentication failed; configure ghub token in auth-source"))
+    ;; ghub signals every HTTP failure as (ghub-http-error CODE MESSAGE URL
+    ;; PAYLOAD); there are no per-status error symbols to match on.
     (ghub-http-error
-     (user-error "Remoto: API error: %s" (error-message-string err)))
+     (pcase (cadr err)
+       (404 (user-error "Remoto: not found: %s" endpoint))
+       (403 (user-error "Remoto: access denied (rate limit or permissions): %s"
+                        endpoint))
+       (401 (user-error "Remoto: authentication failed; \
+configure ghub token in auth-source"))
+       (_ (user-error "Remoto: API error: %s" (error-message-string err)))))
     (json-error
      (user-error "Remoto: could not parse API response for %s" endpoint))))
 
@@ -208,9 +210,13 @@ setup via unauthenticated fallback."
                      ;; Try our own auth-source search before ghub's
                      ;; resolution, which uses different host/user
                      ;; patterns and often fails on fresh sessions.
-                     (t (when-let* ((token (remoto--find-github-token)))
-                          (setq remoto--effective-auth token)
-                          token)))))
+                     (t (or (when-let* ((token (remoto--find-github-token)))
+                              (setq remoto--effective-auth token)
+                              token)
+                            ;; A lookup that fails inside sets the flag; this
+                            ;; call must go unauthenticated too, or ghub's own
+                            ;; lookup hits the same broken backend and errors.
+                            (and remoto--auth-failed 'none))))))
     (if (eq auth 'none)
         (remoto--ghub-get resource 'none endpoint)
       (condition-case err
@@ -1303,6 +1309,16 @@ VISIT, BEG, END, REPLACE as per `insert-file-contents'."
   (let ((parsed (remoto--parse-path filename)))
     (unless parsed
       (error "Remoto: cannot parse path: %s" filename))
+    ;; `find-file-noselect' treats a `file-error' as a nonexistent file and
+    ;; otherwise keeps the buffer it created; the tree is cached, so the
+    ;; check costs no request.  Like the primitive and TRAMP, a visiting
+    ;; call still records the file name so the new-file path can go on.
+    (unless (remoto--tree-entry parsed)
+      (when visit
+        (setq buffer-file-name filename)
+        (set-buffer-modified-p nil))
+      (signal 'file-missing
+              (list "Opening input file" "No such file or directory" filename)))
     (let* ((resolved (remoto--resolve-ref parsed))
            (path (remoto--relative-path (remoto-path-path resolved)))
            (content (remoto--fetch-file-content
@@ -1474,7 +1490,8 @@ PRESERVE-PERMISSIONS are passed through to `copy-file'."
      input)
     (remoto-path-create
      :owner (match-string 1 input)
-     :repo (match-string 2 input)
+     :repo (let ((repo (match-string 2 input)))
+             (if (string-suffix-p ".git" repo) (substring repo 0 -4) repo))
      :ref (match-string 3 input)
      :path (concat "/" (or (match-string 4 input) ""))))
    ((string-match
@@ -1600,6 +1617,10 @@ Derived from the path prefix, e.g. \"/github:...\" -> `github'."
     (let ((prefix (match-string 1 path)))
       (if (member prefix '("github" "gh")) 'github (intern prefix)))))
 
+(defun remoto--url-encode-path (path)
+  "Percent-encode each segment of PATH for a web URL, keeping the slashes."
+  (mapconcat #'url-hexify-string (split-string (or path "") "/") "/"))
+
 (defun remoto--forge-url (forge kind owner repo ref path &optional line-start line-end)
   "Build a FORGE web URL of KIND for OWNER/REPO at REF and PATH.
 KIND is one of `blob', `tree', `blame', `history', `raw'.  A nil REF
@@ -1624,7 +1645,7 @@ one."
     (format-spec template `((?o . ,owner)
                             (?r . ,repo)
                             (?R . ,(or ref "HEAD"))
-                            (?p . ,path)
+                            (?p . ,(remoto--url-encode-path path))
                             (?L . ,line)))))
 
 (defun remoto--forge-issue-url (forge owner repo number &optional kind)
@@ -2829,8 +2850,9 @@ Returns a `remoto-path' struct or nil."
 
 (defun remoto--maybe-rewrite (input)
   "If INPUT is a GitHub URL/shorthand, return canonical remoto path.
-Also handles partial canonical paths like /github:OWNER/REPO.
-Otherwise return INPUT unchanged."
+Also handles partial canonical paths like /github:OWNER/REPO and the
+/gh: shorthand prefix.  Otherwise return INPUT unchanged."
+  (setq input (remoto--normalize-shorthand input))
   (cond
    ;; Already a full canonical path
    ((remoto--parse-path input) input)
@@ -2878,10 +2900,13 @@ Otherwise return INPUT unchanged."
    (t input)))
 
 (defun remoto--dired-around-a (orig-fn dir-or-list &rest args)
-  "Rewrite GitHub URLs to canonical remoto paths for Dired.
+  "Rewrite GitHub URLs and short remoto paths to canonical paths for Dired.
 Call ORIG-FN with DIR-OR-LIST and ARGS after any rewrite."
-  (if-let* ((dir (if (consp dir-or-list) (car dir-or-list) dir-or-list))
-            ((remoto--github-input-p dir)))
+  (if-let* ((raw (if (consp dir-or-list) (car dir-or-list) dir-or-list))
+            ((stringp raw))
+            (dir (remoto--normalize-shorthand raw))
+            ((or (remoto--github-input-p dir)
+                 (string-prefix-p "/github:" dir))))
       (let ((canonical (remoto--maybe-rewrite dir)))
         (apply orig-fn
                (if (consp dir-or-list)
@@ -2894,6 +2919,7 @@ Call ORIG-FN with DIR-OR-LIST and ARGS after any rewrite."
   "Rewrite GitHub URLs to canonical remoto paths for `find-file'.
 Intercepts #NUM patterns to display issues instead of file operations.
 Call ORIG-FN with FILENAME and ARGS after any rewrite."
+  (setq filename (remoto--normalize-shorthand filename))
   ;; Check for #NUM BEFORE rewrite (rewrite would mangle the # delimiter)
   (if (string-match (rx "/github:" (+ (not (in "/@#"))) "/" (+ (not (in "/@#")))
                         (group "#") (group (+ digit)) eos)
@@ -3099,7 +3125,11 @@ Provides group-function and affixation-function for @ and # modes."
                                          (if is-pr "PR " "   ")
                                          (format "%s [%s]" title state))))
                                candidates)))))
+      ;; The candidates come pre-sorted (pull requests first, newest first);
+      ;; without these two entries the UI re-sorts them by length or name.
       `((category . remoto-issue)
+        (display-sort-function . identity)
+        (cycle-sort-function . identity)
         (group-function . ,group-fn)
         (affixation-function . ,affix-fn))))
    ;; Branches/tags mode: /github:OWNER/REPO@

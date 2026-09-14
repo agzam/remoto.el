@@ -151,6 +151,13 @@
       (expect (remoto-path-owner p) :to-equal "agzam")
       (expect (remoto-path-repo p) :to-equal "remoto.el")))
 
+  (it "strips .git from an https clone URL"
+    ;; The Code button on github.com hands out this form.
+    (let ((p (remoto--parse-input "https://github.com/agzam/remoto.el.git")))
+      (expect (remoto-path-owner p) :to-equal "agzam")
+      (expect (remoto-path-repo p) :to-equal "remoto.el")
+      (expect (remoto-path-path p) :to-equal "/")))
+
   (it "parses owner/repo shorthand"
     (let ((p (remoto--parse-input "torvalds/linux")))
       (expect (remoto-path-owner p) :to-equal "torvalds")
@@ -424,7 +431,29 @@
           (remoto--handle-insert-file-contents
            "/github:testowner/testrepo@main:/README.md")
           (expect (point) :to-equal pt)
-          (expect (buffer-string) :to-equal "line one\nline two\nline three\n"))))))
+          (expect (buffer-string) :to-equal "line one\nline two\nline three\n")))))
+
+  (it "insert-file-contents signals file-missing for a path absent from the tree"
+    ;; `find-file-noselect' only treats a `file-error' as a nonexistent
+    ;; file; anything else leaves the buffer it created behind.
+    (remoto-test-with-cache
+      (spy-on 'remoto--api)
+      (with-temp-buffer
+        (expect (remoto--handle-insert-file-contents
+                 "/github:testowner/testrepo@main:/nope.txt")
+                :to-throw 'file-missing))
+      (expect 'remoto--api :not :to-have-been-called)))
+
+  (it "find-file-noselect on a missing path leaves no stray buffer"
+    (remoto-test-with-cache
+      (let* ((before (buffer-list))
+             (buf (find-file-noselect "/github:testowner/testrepo@main:/nope.txt")))
+        (unwind-protect
+            (progn
+              (expect (buffer-file-name buf)
+                      :to-equal "/github:testowner/testrepo@main:/nope.txt")
+              (expect (seq-difference (buffer-list) before) :to-equal (list buf)))
+          (kill-buffer buf))))))
 
 ;;; Dired listing format
 
@@ -534,6 +563,12 @@
   (it "builds a blob URL with a line range"
     (expect (remoto--forge-url 'github 'blob "o" "r" "main" "src/main.el" 2 4)
             :to-equal "https://github.com/o/r/blob/main/src/main.el#L2-L4"))
+
+  (it "percent-encodes path segments and keeps the slashes"
+    (expect (remoto--forge-url 'github 'blob "o" "r" "main" "docs/a b+c.md" nil nil)
+            :to-equal "https://github.com/o/r/blob/main/docs/a%20b%2Bc.md")
+    (expect (remoto--forge-url 'github 'raw "o" "r" "main" "img/x y.png" nil nil)
+            :to-equal "https://raw.githubusercontent.com/o/r/main/img/x%20y.png"))
 
   (it "builds a blob URL with no line fragment"
     (expect (remoto--forge-url 'github 'blob "o" "r" "main" "src/main.el" nil nil)
@@ -1330,6 +1365,21 @@
       (remoto-reset-auth)
       (expect remoto--auth-failed :to-be nil)))
 
+  (it "goes unauthenticated on the same call when the token lookup itself fails"
+    (let ((remoto--auth-failed nil)
+          (remoto--effective-auth nil)
+          (remoto-github-auth nil)
+          (remoto-auth-timeout 5)
+          (auth-used nil))
+      (spy-on 'remoto--find-github-token :and-call-fake
+              (lambda () (setq remoto--auth-failed t) nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (push (plist-get args :auth) auth-used)
+                '((name . "test-repo"))))
+      (expect (remoto--api "repos/owner/repo") :to-equal '((name . "test-repo")))
+      (expect auth-used :to-equal '(none))))
+
   (it "does not cache failure when auth succeeds"
     (let ((remoto--auth-failed nil)
           (remoto-github-auth nil)
@@ -1397,6 +1447,39 @@
               (signal 'json-end-of-file '("premature end"))))
     (expect (remoto--ghub-get "/repos/owner/repo" 'none "repos/owner/repo")
             :to-throw 'user-error)))
+
+(defun remoto-test--ghub-fails-with (code)
+  "Make `ghub-get' signal the `ghub-http-error' ghub raises for status CODE."
+  (spy-on 'ghub-get :and-call-fake
+          (lambda (&rest _)
+            (signal 'ghub-http-error
+                    (list code "status text" "https://api.github.com/x" nil)))))
+
+(defun remoto-test--ghub-get-message ()
+  "The `user-error' text `remoto--ghub-get' produces for repos/o/r."
+  (condition-case err
+      (remoto--ghub-get "/repos/o/r" 'none "repos/o/r")
+    (user-error (error-message-string err))))
+
+(describe "remoto--ghub-get HTTP status messages"
+  ;; ghub has no per-status error symbols; the code is the first datum.
+  (it "says not found on 404"
+    (remoto-test--ghub-fails-with 404)
+    (expect (remoto-test--ghub-get-message) :to-equal "Remoto: not found: repos/o/r"))
+
+  (it "says access denied on 403"
+    (remoto-test--ghub-fails-with 403)
+    (expect (remoto-test--ghub-get-message)
+            :to-equal "Remoto: access denied (rate limit or permissions): repos/o/r"))
+
+  (it "says authentication failed on 401"
+    (remoto-test--ghub-fails-with 401)
+    (expect (remoto-test--ghub-get-message) :to-match "\\`Remoto: authentication failed"))
+
+  (it "falls back to the generic message for other codes"
+    (remoto-test--ghub-fails-with 500)
+    (expect (remoto-test--ghub-get-message)
+            :to-match "\\`Remoto: API error: HTTP Error: 500")))
 
 (describe "remoto--find-github-token"
   (it "finds token at api.github.com with ^forge suffix"
@@ -2144,7 +2227,46 @@ using unauthenticated access until M-x remoto-reset-auth")
             :to-equal "/github:torvalds/linux@master:/src"))
 
   (it "leaves non-github paths unchanged"
-    (expect (remoto--maybe-rewrite "/home/user/file") :to-equal "/home/user/file")))
+    (expect (remoto--maybe-rewrite "/home/user/file") :to-equal "/home/user/file"))
+
+  (it "normalizes the /gh: shorthand before rewriting"
+    (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (puthash "torvalds/linux" "master" remoto--default-branch-cache)
+      (expect (remoto--maybe-rewrite "/gh:torvalds/linux")
+              :to-equal "/github:torvalds/linux@master:/")
+      (expect (remoto--maybe-rewrite "/gh:torvalds/linux/")
+              :to-equal "/github:torvalds/linux@master:/")
+      (expect (remoto--maybe-rewrite "/gh:torvalds/linux@master:/src")
+              :to-equal "/github:torvalds/linux@master:/src")
+      (expect (remoto--maybe-rewrite "/gh:foo/bar#42")
+              :to-equal "/github:foo/bar#42"))))
+
+(describe "remoto--dired-around-a"
+  ;; `dired' gets the raw argument; only URLs and remoto paths are rewritten.
+  (it "rewrites the bare, short and shorthand forms to the canonical path"
+    (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (puthash "torvalds/linux" "master" remoto--default-branch-cache)
+      (dolist (dir '("/github:torvalds/linux" "/github:torvalds/linux/"
+                     "/gh:torvalds/linux" "/gh:torvalds/linux/"
+                     "https://github.com/torvalds/linux"))
+        (expect (remoto--dired-around-a (lambda (d &rest _) d) dir)
+                :to-equal "/github:torvalds/linux@master:/"))))
+
+  (it "rewrites the directory of a (DIR . FILES) argument"
+    (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (puthash "torvalds/linux" "master" remoto--default-branch-cache)
+      (expect (remoto--dired-around-a (lambda (d &rest _) d)
+                                      '("/gh:torvalds/linux" "Makefile"))
+              :to-equal '("/github:torvalds/linux@master:/" "Makefile"))))
+
+  (it "passes local directories and canonical paths through untouched"
+    (spy-on 'remoto--maybe-rewrite :and-call-through)
+    (expect (remoto--dired-around-a (lambda (d &rest _) d) "/tmp/")
+            :to-equal "/tmp/")
+    (expect 'remoto--maybe-rewrite :not :to-have-been-called)
+    (expect (remoto--dired-around-a (lambda (d &rest _) d)
+                                    "/github:torvalds/linux@master:/src")
+            :to-equal "/github:torvalds/linux@master:/src")))
 
 ;;; ====================================================================
 ;;; TDD tests for v2 features: delimiter dispatch, #issues, @tags,
@@ -2876,7 +2998,20 @@ Returns the full path after completion, or INPUT if no completion."
     (spy-on 'remoto--maybe-rewrite :and-return-value "/github:testowner/testrepo@main:/README.md")
     ;; This would error in real use but we just check topic-display wasn't called
     (ignore-errors (find-file-noselect "/github:testowner/testrepo@main:/README.md"))
-    (expect 'remoto-topic-display :not :to-have-been-called)))
+    (expect 'remoto-topic-display :not :to-have-been-called))
+
+  (it "routes the /gh: shorthand with #NUM to remoto-topic-display"
+    (spy-on 'remoto-topic-display :and-return-value (generate-new-buffer "*test*"))
+    (spy-on 'remoto--require-topic)
+    (remoto--find-file-around-a #'ignore "/gh:testowner/testrepo#42")
+    (expect 'remoto-topic-display :to-have-been-called-with "42" "/github:testowner/testrepo")
+    (kill-buffer "*test*"))
+
+  (it "rewrites the /gh: short form before calling the original"
+    (remoto-test-with-cache
+      (expect (remoto--find-file-around-a (lambda (f &rest _) f)
+                                          "/gh:testowner/testrepo/")
+              :to-equal "/github:testowner/testrepo@main:/"))))
 
 ;;; ---- parse-partial-canonical rejects #NUM paths ----
 
@@ -2973,7 +3108,13 @@ Returns the full path after completion, or INPUT if no completion."
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
       (let ((result (remoto--handle-file-name-all-completions "" "/github:foo/bar#")))
         ;; First should be the PR (number 20)
-        (expect (car result) :to-equal "20")))))
+        (expect (car result) :to-equal "20"))))
+
+  (it "tells the completion UI to keep that order"
+    (let ((md (completion-metadata "/github:foo/bar#" #'read-file-name-internal nil)))
+      (expect (completion-metadata-get md 'category) :to-be 'remoto-issue)
+      (expect (completion-metadata-get md 'display-sort-function) :to-be #'identity)
+      (expect (completion-metadata-get md 'cycle-sort-function) :to-be #'identity))))
 
 ;;; ---- remoto--fetch-user-orgs uses authenticated endpoint ----
 
