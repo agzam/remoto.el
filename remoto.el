@@ -28,12 +28,15 @@
 ;; `remoto-mode' in remoto buffers, and removes all of them when turned off.
 ;;
 ;; Usage:
-;;   (global-remoto-mode 1)
 ;;   C-x C-f /github:torvalds/linux RET
 ;;   M-x remoto-browse RET https://github.com/torvalds/linux RET
 ;;
-;; `remoto-browse' turns the mode on itself when it is off.  Supports pasting
-;; any GitHub URL, git remote URL, or owner/repo shorthand.
+;; Both turn the mode on when it is off: `remoto-browse' itself, and the
+;; path through `remoto-autoload-file-name-handler', which the package
+;; autoloads register for `/github:' and `/gh:' paths the way TRAMP
+;; autoloads on a remote path.  `(global-remoto-mode 1)' in the init file
+;; turns it on ahead of time.  `remoto-browse' supports pasting any GitHub
+;; URL, git remote URL, or owner/repo shorthand.
 
 ;;; Code:
 
@@ -55,6 +58,12 @@
       eos)
   "Regexp matching canonical remoto paths.
 Groups: 1=owner, 2=repo, 3=ref (maybe nil), 4=path.")
+
+(defconst remoto--handler-regexp "\\`/\\(?:github\\|gh\\):"
+  "Regexp matching remoto file paths.
+Matches the canonical /github: prefix and its /gh: shorthand alias.
+Spelled out rather than built with `rx' because the autoload cookie on
+`remoto-autoload-file-name-handler' repeats it as a literal.")
 
 (defconst remoto--repo-delimiters
   '((?/ . files-default)
@@ -170,6 +179,151 @@ across different ghub and url.el versions."
              :false-object nil)
           (json-error nil))))))
 
+;;;; Fetch indicator
+
+(defcustom remoto-show-fetch-indicator t
+  "When non-nil, show a \"fetching\" indicator during GitHub requests.
+While completing a remoto path (e.g. with \\[find-file]) or at the
+`remoto-browse' prompt, it is drawn as minibuffer text, so it works with
+any completion UI (vertico, icomplete, default, ...).  A fetch that
+blocks with no such prompt up, as when the chosen path opens, shows it
+in the echo area instead."
+  :type 'boolean
+  :group 'remoto)
+
+(defvar remoto--inflight-count 0
+  "Number of API requests the minibuffer overlay stands for.
+Every async request of the completion counts, and so does a blocking
+fetch that runs while a remoto prompt is up.")
+
+(defvar remoto--status-overlay nil
+  "Overlay showing the in-flight indicator in the active minibuffer.")
+
+(defconst remoto--fetch-indicator-text
+  (propertize "[fetching...]" 'face 'shadow)
+  "Shadowed label shown by the fetch indicator in both contexts.
+Reused by the minibuffer overlay and the echo-area message so the two
+read identically.")
+
+(defun remoto--clear-status ()
+  "Remove the in-flight fetch indicator overlay, if any."
+  (when (overlayp remoto--status-overlay)
+    (delete-overlay remoto--status-overlay))
+  (setq remoto--status-overlay nil))
+
+(defun remoto--render-status (buffer)
+  "Draw or reposition the fetch indicator overlay at the end of BUFFER.
+The after-string carries a `cursor' text property so the editing
+cursor stays put instead of jumping past the indicator: without it,
+an after-string at point makes Emacs draw the cursor after the
+string."
+  (with-current-buffer buffer
+    (unless (and (overlayp remoto--status-overlay)
+                 (eq (overlay-buffer remoto--status-overlay) buffer))
+      (remoto--clear-status)
+      (setq remoto--status-overlay
+            (make-overlay (point-max) (point-max) nil t t)))
+    (move-overlay remoto--status-overlay (point-max) (point-max))
+    (overlay-put remoto--status-overlay 'priority 1000)
+    (let ((indicator (concat "  " remoto--fetch-indicator-text)))
+      (put-text-property 0 1 'cursor t indicator)
+      (overlay-put remoto--status-overlay 'after-string indicator))))
+
+(defun remoto--completion-minibuffer ()
+  "Return the active minibuffer when it is completing for remoto, else nil.
+That is a file name inside a remoto path, with either prefix and possibly
+behind a shadowed directory (\"~/x//gh:o/\") the way `read-file-name'
+reads it, or the `remoto-browse' prompt, whose collection is
+`remoto--repo-completion-table'."
+  (when-let* ((win (active-minibuffer-window))
+              (buf (window-buffer win)))
+    (with-current-buffer buf
+      (and (or (eq minibuffer-completion-table #'remoto--repo-completion-table)
+               (string-match-p remoto--handler-regexp
+                               (condition-case nil
+                                   (substitute-in-file-name
+                                    (minibuffer-contents-no-properties))
+                                 (error ""))))
+           buf))))
+
+(defun remoto--show-status ()
+  "Show the in-flight fetch indicator in the active remoto minibuffer.
+No-op unless `remoto-show-fetch-indicator' is non-nil and the active
+minibuffer is one that `remoto--completion-minibuffer' recognizes.
+Drawn as minibuffer text so it works with any completion UI."
+  (when remoto-show-fetch-indicator
+    (when-let* ((buf (remoto--completion-minibuffer)))
+      (remoto--render-status buf))))
+
+(defun remoto--inflight-inc ()
+  "Register a new in-flight async request and show the indicator."
+  (setq remoto--inflight-count (1+ remoto--inflight-count))
+  (remoto--show-status))
+
+(defun remoto--inflight-dec ()
+  "Mark one in-flight async request as finished.
+Clear the indicator once no requests remain."
+  (setq remoto--inflight-count (max 0 (1- remoto--inflight-count)))
+  (when (zerop remoto--inflight-count)
+    (remoto--clear-status)))
+
+(defun remoto--minibuffer-exit-cleanup ()
+  "Reset in-flight indicator state when a minibuffer exits."
+  (remoto--clear-status)
+  (setq remoto--inflight-count 0))
+
+(defvar remoto--sync-fetch-depth 0
+  "Nesting depth of `remoto--with-fetch-indicator' bodies.
+Only the outermost body draws and clears the indicator, so a command
+wrapped as a whole and the API calls inside it draw it once.")
+
+(defvar remoto--sync-fetch-overlay nil
+  "Non-nil while the outermost blocking fetch is drawn as the minibuffer overlay.
+Decides which of the two indicators the end of that fetch clears.")
+
+(defun remoto--sync-fetch-begin ()
+  "Draw the indicator for the blocking fetch about to begin.
+In a remoto completion minibuffer that is the overlay of the async
+fetches, painted at once because nothing redisplays while the fetch
+blocks; anywhere else it is an echo-area message, which the echo area
+shows at once."
+  (setq remoto--sync-fetch-depth (1+ remoto--sync-fetch-depth))
+  (when (= remoto--sync-fetch-depth 1)
+    (setq remoto--sync-fetch-overlay (and (remoto--completion-minibuffer) t))
+    (if remoto--sync-fetch-overlay
+        (progn (remoto--inflight-inc)
+               (redisplay))
+      (let ((message-log-max nil))
+        (message "Remoto %s" remoto--fetch-indicator-text)))))
+
+(defun remoto--sync-fetch-end ()
+  "Clear the indicator once the outermost blocking fetch is over.
+A message that something else put up meanwhile is left alone."
+  (setq remoto--sync-fetch-depth (max 0 (1- remoto--sync-fetch-depth)))
+  (when (zerop remoto--sync-fetch-depth)
+    (if remoto--sync-fetch-overlay
+        (remoto--inflight-dec)
+      (when (equal (current-message)
+                   (format "Remoto %s" remoto--fetch-indicator-text))
+        (let ((message-log-max nil))
+          (message nil))))
+    (setq remoto--sync-fetch-overlay nil)))
+
+(defmacro remoto--with-fetch-indicator (&rest body)
+  "Run BODY, a blocking GitHub round-trip, with the fetch indicator up.
+Every synchronous API call goes through this, so `remoto-browse' and a
+path at `find-file' or `dired' show the same thing: the minibuffer
+overlay while completing, the echo area once the prompt is gone.
+Honors `remoto-show-fetch-indicator' and does nothing in batch, where
+there is no display.  Returns BODY's value."
+  (declare (indent 0) (debug t))
+  `(if (or noninteractive (not remoto-show-fetch-indicator))
+       (progn ,@body)
+     (remoto--sync-fetch-begin)
+     (unwind-protect
+         (progn ,@body)
+       (remoto--sync-fetch-end))))
+
 (cl-defstruct (remoto--request (:constructor remoto--request-create))
   "A GitHub request started under `while-no-input'."
   (status 'pending)
@@ -239,15 +393,16 @@ ENDPOINT is used in error messages for context.  Always passes
 resolution can resolve to github.com (HTML) instead of the
 JSON API endpoint."
   (condition-case err
-      (let ((inhibit-message (not ghub-debug)))
-        ;; `while-no-input' binds `throw-on-input'; only then can input
-        ;; abandon the call, and only then is the callback path needed.
-        (if throw-on-input
-            (remoto--ghub-get-interruptible resource auth)
-          (ghub-get resource nil
-                    :auth auth
-                    :reader #'remoto--json-reader
-                    :host "api.github.com")))
+      (remoto--with-fetch-indicator
+        (let ((inhibit-message (not ghub-debug)))
+          ;; `while-no-input' binds `throw-on-input'; only then can input
+          ;; abandon the call, and only then is the callback path needed.
+          (if throw-on-input
+              (remoto--ghub-get-interruptible resource auth)
+            (ghub-get resource nil
+                      :auth auth
+                      :reader #'remoto--json-reader
+                      :host "api.github.com"))))
     ;; ghub signals every HTTP failure as (ghub-http-error CODE MESSAGE URL
     ;; PAYLOAD); there are no per-status error symbols to match on.
     (ghub-http-error
@@ -1935,15 +2090,6 @@ avoids repeated fetches during a session."
   :type 'integer
   :group 'remoto)
 
-(defcustom remoto-show-fetch-indicator t
-  "When non-nil, show a \"fetching\" indicator during GitHub requests.
-While completing a `/github:' path (e.g. with \\[find-file]), it is drawn
-as minibuffer text, so it works with any completion UI (vertico,
-icomplete, default, ...).  During the synchronous fetches of
-`remoto-browse' it is shown in the echo area instead."
-  :type 'boolean
-  :group 'remoto)
-
 (defvar remoto--debounce-timer nil
   "Active idle timer for debounced async searches.")
 
@@ -1960,18 +2106,6 @@ on every `post-command-hook' cycle.")
 Incremented on each new debounce schedule; callbacks whose
 captured generation doesn't match the current value are stale
 and skip UI refresh (but still cache their results).")
-
-(defvar remoto--inflight-count 0
-  "Number of in-flight async API requests for completion.")
-
-(defvar remoto--status-overlay nil
-  "Overlay showing the in-flight indicator in the active minibuffer.")
-
-(defconst remoto--fetch-indicator-text
-  (propertize "[fetching...]" 'face 'shadow)
-  "Shadowed label shown by the fetch indicator in both contexts.
-Reused by the minibuffer overlay (completion) and the echo-area
-message (`remoto-browse') so the two flows read identically.")
 
 (defun remoto--search-cache-get (key &optional ttl)
   "Return cached results for KEY if not expired.
@@ -1992,80 +2126,6 @@ queries that returned zero results."
   "Store RESULTS for KEY with current timestamp."
   (puthash key (cons (float-time) results) remoto--search-cache)
   results)
-
-(defun remoto--clear-status ()
-  "Remove the in-flight fetch indicator overlay, if any."
-  (when (overlayp remoto--status-overlay)
-    (delete-overlay remoto--status-overlay))
-  (setq remoto--status-overlay nil))
-
-(defun remoto--render-status (buffer)
-  "Draw or reposition the fetch indicator overlay at the end of BUFFER.
-The after-string carries a `cursor' text property so the editing
-cursor stays put instead of jumping past the indicator: without it,
-an after-string at point makes Emacs draw the cursor after the
-string."
-  (with-current-buffer buffer
-    (unless (and (overlayp remoto--status-overlay)
-                 (eq (overlay-buffer remoto--status-overlay) buffer))
-      (remoto--clear-status)
-      (setq remoto--status-overlay
-            (make-overlay (point-max) (point-max) nil t t)))
-    (move-overlay remoto--status-overlay (point-max) (point-max))
-    (overlay-put remoto--status-overlay 'priority 1000)
-    (let ((indicator (concat "  " remoto--fetch-indicator-text)))
-      (put-text-property 0 1 'cursor t indicator)
-      (overlay-put remoto--status-overlay 'after-string indicator))))
-
-(defun remoto--show-status ()
-  "Show the in-flight fetch indicator in the active remoto minibuffer.
-No-op unless `remoto-show-fetch-indicator' is non-nil and the active
-minibuffer is a remoto completion: either editing a /github: path
-\(file-name completion) or running `remoto-browse' (whose collection
-is `remoto--repo-completion-table').  Drawn as minibuffer text so it
-works with any completion UI."
-  (when remoto-show-fetch-indicator
-    (when-let* ((win (active-minibuffer-window))
-                (buf (window-buffer win)))
-      (when (with-current-buffer buf
-              (or (string-prefix-p "/github:" (minibuffer-contents-no-properties))
-                  (eq minibuffer-completion-table #'remoto--repo-completion-table)))
-        (remoto--render-status buf)))))
-
-(defun remoto--inflight-inc ()
-  "Register a new in-flight async request and show the indicator."
-  (setq remoto--inflight-count (1+ remoto--inflight-count))
-  (remoto--show-status))
-
-(defun remoto--inflight-dec ()
-  "Mark one in-flight async request as finished.
-Clear the indicator once no requests remain."
-  (setq remoto--inflight-count (max 0 (1- remoto--inflight-count)))
-  (when (zerop remoto--inflight-count)
-    (remoto--clear-status)))
-
-(defun remoto--minibuffer-exit-cleanup ()
-  "Reset in-flight indicator state when a minibuffer exits."
-  (remoto--clear-status)
-  (setq remoto--inflight-count 0))
-
-(defmacro remoto--with-fetch-indicator (&rest body)
-  "Run BODY showing a synchronous fetch indicator in the echo area.
-For commands like `remoto-browse' whose GitHub round-trips block and
-run with no active minibuffer to host the completion overlay.  Honors
-`remoto-show-fetch-indicator'; the forced redisplay paints the label
-before the blocking call, and the echo area is cleared afterwards.
-Returns BODY's value."
-  (declare (indent 0) (debug t))
-  `(if (not remoto-show-fetch-indicator)
-       (progn ,@body)
-     (let ((message-log-max nil))
-       (message "Remoto %s" remoto--fetch-indicator-text))
-     (redisplay t)
-     (unwind-protect
-         (progn ,@body)
-       (let ((message-log-max nil))
-         (message nil)))))
 
 (defun remoto--api-async (endpoint callback)
   "Call GitHub REST API ENDPOINT asynchronously via ghub.
@@ -3098,13 +3158,6 @@ will try ghub auth on first API call")))))
 Held so turning `global-remoto-mode' off before the timer fires can
 cancel it.")
 
-;;;; Handler registration
-
-(defconst remoto--handler-regexp
-  (rx bos "/" (or "github" "gh") ":")
-  "Regexp matching remoto file paths.
-Matches the canonical /github: prefix and its /gh: shorthand alias.")
-
 ;;;; Minor mode
 
 (defvar remoto-command-map
@@ -3303,9 +3356,18 @@ Args: ORIG, STRING, PRED, ACTION."
 
 ;;;; Global mode
 
+(defun remoto--drop-autoload-handler ()
+  "Remove the bootstrap entry of the autoloads from `file-name-handler-alist'."
+  (setq file-name-handler-alist
+        (rassq-delete-all #'remoto-autoload-file-name-handler
+                          file-name-handler-alist)))
+
 (defun remoto--install ()
   "Install the handler, the advice, the hooks and the auth warm-up timer.
 Each step is idempotent, so a second call while on is a no-op."
+  ;; The real handler takes over from the bootstrap entry; left behind, that
+  ;; entry would catch the operations the real handler passes down.
+  (remoto--drop-autoload-handler)
   (unless (equal (cdr (assoc remoto--handler-regexp file-name-handler-alist))
                  #'remoto-file-name-handler)
     (push (cons remoto--handler-regexp #'remoto-file-name-handler)
@@ -3349,7 +3411,8 @@ buffers, and a GitHub token is looked up once Emacs is idle.  When off,
 all of that is removed again.
 
 Loading remoto does not turn this mode on.  Enable it in your init file,
-or let `remoto-browse' do it on first use."
+or let the first use do it: `remoto-browse', the Embark open actions,
+and a `/github:' or `/gh:' path at any file prompt all turn it on."
   :global t
   :group 'remoto
   (if global-remoto-mode
@@ -3358,11 +3421,25 @@ or let `remoto-browse' do it on first use."
 
 (defun remoto--ensure-global-mode ()
   "Turn on `global-remoto-mode' when it is off, and say so.
-For remoto's own entry commands: the buffers they open need the
+For remoto's own entry points: the buffers they open need the
 file-name handler for as long as they live, so the mode has to stay on."
   (unless global-remoto-mode
     (global-remoto-mode 1)
     (message "Remoto: `global-remoto-mode' enabled")))
+
+;;;###autoload
+(defun remoto-autoload-file-name-handler (operation &rest args)
+  "Turn on `global-remoto-mode' for the first remoto path, then run OPERATION.
+ARGS are the arguments of OPERATION.  The package autoloads register
+this handler in `file-name-handler-alist', so a `/github:' or `/gh:'
+path typed at a file prompt works before remoto is loaded, the way a
+remote path loads TRAMP.  Calling it loads remoto; it then leaves the
+alist for good, and `remoto--install' puts the real handler in front."
+  (remoto--drop-autoload-handler)
+  (remoto--ensure-global-mode)
+  (apply operation args))
+
+;;;###autoload (add-to-list 'file-name-handler-alist '("\\`/\\(?:github\\|gh\\):" . remoto-autoload-file-name-handler))
 
 ;;;; Issue display (see remoto-topic.el for full implementation)
 
@@ -3382,9 +3459,12 @@ Adds the package directory to `load-path' if needed."
 ;;;; Unload
 
 (defun remoto-unload-function ()
-  "Turn `global-remoto-mode' off and drop the caches."
+  "Turn `global-remoto-mode' off and drop the caches.
+The bootstrap entry of the autoloads goes too: it is still there when
+remoto was loaded some other way and the mode never turned on."
   (when global-remoto-mode
     (global-remoto-mode -1))
+  (remoto--drop-autoload-handler)
   (clrhash remoto--tree-cache)
   (clrhash remoto--default-branch-cache)
   (clrhash remoto--branches-cache)
