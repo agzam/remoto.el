@@ -1592,12 +1592,22 @@ VISIT, BEG, END, REPLACE as per `insert-file-contents'."
   ;; buffer named after the number.  The emptiness test is what tells that
   ;; buffer apart from a caller's own.
   (when (remoto--topic-path filename)
-    (when (and visit (zerop (buffer-size)) (not buffer-file-name))
-      (set-buffer-modified-p nil)
-      (kill-buffer (current-buffer)))
-    (user-error
-     "Remoto: %s is an issue or pull request - open it with `find-file'"
-     filename))
+    ;; An empty buffer with no file name, under VISIT, is the state
+    ;; `find-file-noselect' leaves: that call reached the handler because it
+    ;; started before `remoto--install' added the advice that turns a #NUM
+    ;; path into a topic buffer, and the advice is in place by now, so
+    ;; repeating the call works.  Any other caller asked for file contents
+    ;; directly and needs the command that goes through the advice.
+    (let ((from-find-file (and visit (zerop (buffer-size)) (not buffer-file-name))))
+      (when from-find-file
+        (set-buffer-modified-p nil)
+        (kill-buffer (current-buffer)))
+      (user-error
+       "Remoto: %s is an issue or pull request, not a file - %s"
+       filename
+       (if from-find-file
+           "remoto is loaded now, run the command again"
+         "open it with `find-file'"))))
   (let ((parsed (remoto--parse-path filename)))
     (unless parsed
       (error "Remoto: cannot parse path: %s" filename))

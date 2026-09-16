@@ -3310,6 +3310,49 @@ Returns the full path after completion, or INPUT if no completion."
                                           "/gh:testowner/testrepo/")
               :to-equal "/github:testowner/testrepo@main:/"))))
 
+(describe "insert-file-contents on a #NUM path"
+  ;; Two callers reach this and the cure differs.  Someone asking for the
+  ;; contents directly needs the command that goes through the advice; a
+  ;; `find-file-noselect' that started before the advice existed only has to
+  ;; run again.  `advice-member-p' cannot tell them apart - the autoload
+  ;; handler installs the advice before it dispatches, so it is present in
+  ;; both - but the buffer state `find-file-noselect' leaves can.
+  (it "sends a direct caller to find-file"
+    (let ((msg (format "%s" (condition-case err
+                                (progn (with-temp-buffer
+                                         (insert-file-contents "/github:o/r#31"))
+                                       :no-error)
+                              (user-error (cadr err))))))
+      (expect msg :to-match "is an issue or pull request, not a file")
+      (expect msg :to-match "open it with .find-file.")))
+
+  (it "leaves a caller's own buffer alone and does not tell it to run again"
+    (let* ((buf (generate-new-buffer " *remoto-test-icf*"))
+           (msg (format "%s"
+                        (condition-case err
+                            (with-current-buffer buf
+                              (insert "unsaved work")
+                              (insert-file-contents "/github:o/r#31" t)
+                              :no-error)
+                          (user-error (cadr err))))))
+      (expect (buffer-live-p buf) :to-be t)
+      (expect (with-current-buffer buf (buffer-string)) :to-equal "unsaved work")
+      (expect msg :to-match "open it with .find-file.")
+      (kill-buffer buf)))
+
+  (it "tells a first call of a session to run again"
+    ;; The state `find-file-noselect' hands the handler: VISIT set, buffer
+    ;; empty, no `buffer-file-name'.  That buffer is killed as well.
+    (let* ((buf (generate-new-buffer " *remoto-test-icf*"))
+           (msg (format "%s" (condition-case err
+                                 (with-current-buffer buf
+                                   (insert-file-contents "/gh:o/r#31" t)
+                                   :no-error)
+                               (user-error (cadr err))))))
+      (expect msg :to-match "is an issue or pull request, not a file")
+      (expect msg :to-match "remoto is loaded now, run the command again")
+      (expect (buffer-live-p buf) :to-be nil))))
+
 ;;; ---- parse-partial-canonical rejects #NUM paths ----
 
 (describe "parse-partial-canonical rejects # delimiter"
@@ -5655,7 +5698,10 @@ with what the same call does once the mode is on."
                       '(find-file-noselect "/gh:o/r#31")))))
         (expect (plist-get result :error) :to-be 'user-error)
         (expect (plist-get result :message)
-                :to-match "is an issue or pull request")
+                :to-match "is an issue or pull request, not a file")
+        ;; The advice arrives while this very call runs, so the cure is to
+        ;; repeat the call, not to reach for the command that was used.
+        (expect (plist-get result :message) :to-match "run the command again")
         (expect (seq-find (lambda (n) (string-match-p "31" n))
                           (plist-get result :buffers))
                 :to-be nil)))))
