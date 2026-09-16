@@ -8,10 +8,15 @@
 ;;; Code:
 
 (require 'buttercup)
+(require 'loaddefs-gen)
 (require 'remoto)
 ;; Soft: present once remoto-embark.el exists; tests below fail (not error)
 ;; until then, keeping the rest of the suite runnable.
 (require 'remoto-embark nil t)
+
+;; Loading remoto installs nothing.  The suite exercises the handler, the
+;; advice and the hooks, so flip the switch the way an init file does.
+(global-remoto-mode 1)
 
 ;;; Helpers
 
@@ -25,6 +30,11 @@
     ("" ((type . "tree") (size . 0) (sha . "") (mode . "040000")))
     ("/" ((type . "tree") (size . 0) (sha . "") (mode . "040000"))))
   "Mock tree data for tests.")
+
+(defvar remoto-test--png-bytes
+  (unibyte-string #x89 ?P ?N ?G ?\r ?\n #x1a ?\n 0 0 0 13 ?I ?H ?D ?R
+                  0 0 0 1 0 0 0 1 8 6 0 0 0 #xff #xfe)
+  "The head of a PNG file: signature, IHDR chunk, NUL and high bytes.")
 
 (defun remoto-test--install-mock-tree ()
   "Install mock tree into the cache."
@@ -146,6 +156,13 @@
     (let ((p (remoto--parse-input "git@github.com:agzam/remoto.el")))
       (expect (remoto-path-owner p) :to-equal "agzam")
       (expect (remoto-path-repo p) :to-equal "remoto.el")))
+
+  (it "strips .git from an https clone URL"
+    ;; The Code button on github.com hands out this form.
+    (let ((p (remoto--parse-input "https://github.com/agzam/remoto.el.git")))
+      (expect (remoto-path-owner p) :to-equal "agzam")
+      (expect (remoto-path-repo p) :to-equal "remoto.el")
+      (expect (remoto-path-path p) :to-equal "/")))
 
   (it "parses owner/repo shorthand"
     (let ((p (remoto--parse-input "torvalds/linux")))
@@ -420,7 +437,66 @@
           (remoto--handle-insert-file-contents
            "/github:testowner/testrepo@main:/README.md")
           (expect (point) :to-equal pt)
-          (expect (buffer-string) :to-equal "line one\nline two\nline three\n"))))))
+          (expect (buffer-string) :to-equal "line one\nline two\nline three\n")))))
+
+  (it "insert-file-contents keeps a binary file as bytes under no-conversion"
+    ;; `image-mode' takes the data from a remote buffer by encoding it
+    ;; with `buffer-file-coding-system', so the bytes must round-trip.
+    (remoto-test-with-cache
+      (puthash "logo.png" '((type . "blob") (size . 31) (sha . "ggg") (mode . "100644"))
+               (gethash "testowner/testrepo@main" remoto--tree-cache))
+      (spy-on 'remoto--fetch-file-content :and-return-value remoto-test--png-bytes)
+      (with-temp-buffer
+        (let* ((result (insert-file-contents "/github:testowner/testrepo@main:/logo.png" t))
+               (data (encode-coding-string (buffer-string) buffer-file-coding-system)))
+          (expect (cadr result) :to-equal (length remoto-test--png-bytes))
+          (expect buffer-file-coding-system :to-be 'no-conversion)
+          (expect data :to-equal remoto-test--png-bytes)
+          (expect (image-type-from-data data) :to-be 'png)))))
+
+  (it "insert-file-contents decodes a UTF-8 text file"
+    (remoto-test-with-cache
+      (spy-on 'remoto--fetch-file-content
+              :and-return-value (encode-coding-string "# Título\n— ünïcödé\n" 'utf-8))
+      (with-temp-buffer
+        (let ((result (insert-file-contents "/github:testowner/testrepo@main:/README.md" t)))
+          (expect (buffer-string) :to-equal "# Título\n— ünïcödé\n")
+          (expect (cadr result) :to-equal (length "# Título\n— ünïcödé\n"))
+          (expect (coding-system-base buffer-file-coding-system) :to-be 'utf-8)))))
+
+  (it "file-local-copy writes a binary file byte for byte"
+    (remoto-test-with-cache
+      (spy-on 'remoto--fetch-file-content :and-return-value remoto-test--png-bytes)
+      (let ((copy (file-local-copy "/github:testowner/testrepo@main:/logo.png")))
+        (unwind-protect
+            (expect (with-temp-buffer
+                      (set-buffer-multibyte nil)
+                      (insert-file-contents-literally copy)
+                      (buffer-string))
+                    :to-equal remoto-test--png-bytes)
+          (delete-file copy)))))
+
+  (it "insert-file-contents signals file-missing for a path absent from the tree"
+    ;; `find-file-noselect' only treats a `file-error' as a nonexistent
+    ;; file; anything else leaves the buffer it created behind.
+    (remoto-test-with-cache
+      (spy-on 'remoto--api)
+      (with-temp-buffer
+        (expect (remoto--handle-insert-file-contents
+                 "/github:testowner/testrepo@main:/nope.txt")
+                :to-throw 'file-missing))
+      (expect 'remoto--api :not :to-have-been-called)))
+
+  (it "find-file-noselect on a missing path leaves no stray buffer"
+    (remoto-test-with-cache
+      (let* ((before (buffer-list))
+             (buf (find-file-noselect "/github:testowner/testrepo@main:/nope.txt")))
+        (unwind-protect
+            (progn
+              (expect (buffer-file-name buf)
+                      :to-equal "/github:testowner/testrepo@main:/nope.txt")
+              (expect (seq-difference (buffer-list) before) :to-equal (list buf)))
+          (kill-buffer buf))))))
 
 ;;; Dired listing format
 
@@ -530,6 +606,12 @@
   (it "builds a blob URL with a line range"
     (expect (remoto--forge-url 'github 'blob "o" "r" "main" "src/main.el" 2 4)
             :to-equal "https://github.com/o/r/blob/main/src/main.el#L2-L4"))
+
+  (it "percent-encodes path segments and keeps the slashes"
+    (expect (remoto--forge-url 'github 'blob "o" "r" "main" "docs/a b+c.md" nil nil)
+            :to-equal "https://github.com/o/r/blob/main/docs/a%20b%2Bc.md")
+    (expect (remoto--forge-url 'github 'raw "o" "r" "main" "img/x y.png" nil nil)
+            :to-equal "https://raw.githubusercontent.com/o/r/main/img/x%20y.png"))
 
   (it "builds a blob URL with no line fragment"
     (expect (remoto--forge-url 'github 'blob "o" "r" "main" "src/main.el" nil nil)
@@ -1176,6 +1258,26 @@
           (remoto--require-topic)
           (expect loaded :to-be t))))))
 
+(describe "remoto--parse-topic-url"
+  (it "reads owner, repo and number from pull request and issue URLs"
+    (expect (remoto--parse-topic-url "https://github.com/o/r/pull/42")
+            :to-equal '("o" "r" "42"))
+    (expect (remoto--parse-topic-url "https://github.com/o/r/issues/7")
+            :to-equal '("o" "r" "7"))
+    (expect (remoto--parse-topic-url "github.com/o/r/pull/42/files")
+            :to-equal '("o" "r" "42"))
+    (expect (remoto--parse-topic-url "/github.com/o/r/issues/7#issuecomment-99")
+            :to-equal '("o" "r" "7"))
+    (expect (remoto--parse-topic-url "https://github.com/o/r/pull/42?diff=split")
+            :to-equal '("o" "r" "42")))
+
+  (it "returns nil for repository, tree and blob URLs and other input"
+    (expect (remoto--parse-topic-url "https://github.com/o/r") :to-be nil)
+    (expect (remoto--parse-topic-url "https://github.com/o/r/pulls") :to-be nil)
+    (expect (remoto--parse-topic-url "https://github.com/o/r/blob/main/pull/42") :to-be nil)
+    (expect (remoto--parse-topic-url "/github:o/r#42") :to-be nil)
+    (expect (remoto--parse-topic-url "o/r#42") :to-be nil)))
+
 (describe "remoto-browse issue dispatch"
   (it "calls remoto-topic-display for #NUM input"
     (spy-on 'remoto-topic-display :and-return-value (generate-new-buffer "*test*"))
@@ -1184,6 +1286,36 @@
     (expect 'remoto-topic-display :to-have-been-called-with
             "42" "/github:foo/bar")
     (kill-buffer "*test*"))
+
+  (it "calls remoto-topic-display for a pull request or issue web URL"
+    (spy-on 'remoto-topic-display)
+    (spy-on 'remoto--require-topic)
+    (remoto-browse "https://github.com/foo/bar/pull/42")
+    (expect 'remoto-topic-display :to-have-been-called-with "42" "/github:foo/bar")
+    (remoto-browse "https://github.com/foo/bar/issues/7#issuecomment-1")
+    (expect 'remoto-topic-display :to-have-been-called-with "7" "/github:foo/bar"))
+
+  (it "turns global-remoto-mode on when it is off"
+    (spy-on 'remoto-topic-display)
+    (spy-on 'remoto--require-topic)
+    (spy-on 'message)
+    (unwind-protect
+        (progn
+          (global-remoto-mode -1)
+          (remoto-browse "foo/bar#42")
+          (expect global-remoto-mode :to-be-truthy)
+          (expect 'message :to-have-been-called-with
+                  "Remoto: `global-remoto-mode' enabled"))
+      (global-remoto-mode 1)))
+
+  (it "leaves global-remoto-mode alone when it is already on"
+    (spy-on 'remoto-topic-display)
+    (spy-on 'remoto--require-topic)
+    (spy-on 'message)
+    (remoto-browse "foo/bar#42")
+    (expect global-remoto-mode :to-be-truthy)
+    (expect 'message :not :to-have-been-called-with
+            "Remoto: `global-remoto-mode' enabled"))
 
   (it "opens dired for plain owner/repo"
     (let ((remoto--default-branch-cache (make-hash-table :test 'equal))
@@ -1304,6 +1436,21 @@
       (remoto-reset-auth)
       (expect remoto--auth-failed :to-be nil)))
 
+  (it "goes unauthenticated on the same call when the token lookup itself fails"
+    (let ((remoto--auth-failed nil)
+          (remoto--effective-auth nil)
+          (remoto-github-auth nil)
+          (remoto-auth-timeout 5)
+          (auth-used nil))
+      (spy-on 'remoto--find-github-token :and-call-fake
+              (lambda () (setq remoto--auth-failed t) nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (push (plist-get args :auth) auth-used)
+                '((name . "test-repo"))))
+      (expect (remoto--api "repos/owner/repo") :to-equal '((name . "test-repo")))
+      (expect auth-used :to-equal '(none))))
+
   (it "does not cache failure when auth succeeds"
     (let ((remoto--auth-failed nil)
           (remoto-github-auth nil)
@@ -1372,6 +1519,134 @@
     (expect (remoto--ghub-get "/repos/owner/repo" 'none "repos/owner/repo")
             :to-throw 'user-error)))
 
+(defun remoto-test--ghub-fails-with (code)
+  "Make `ghub-get' signal the `ghub-http-error' ghub raises for status CODE."
+  (spy-on 'ghub-get :and-call-fake
+          (lambda (&rest _)
+            (signal 'ghub-http-error
+                    (list code "status text" "https://api.github.com/x" nil)))))
+
+(defun remoto-test--ghub-get-message ()
+  "The `user-error' text `remoto--ghub-get' produces for repos/o/r."
+  (condition-case err
+      (remoto--ghub-get "/repos/o/r" 'none "repos/o/r")
+    (user-error (error-message-string err))))
+
+(describe "remoto--ghub-get HTTP status messages"
+  ;; ghub has no per-status error symbols; the code is the first datum.
+  (it "says not found on 404"
+    (remoto-test--ghub-fails-with 404)
+    (expect (remoto-test--ghub-get-message) :to-equal "Remoto: not found: repos/o/r"))
+
+  (it "says access denied on 403"
+    (remoto-test--ghub-fails-with 403)
+    (expect (remoto-test--ghub-get-message)
+            :to-equal "Remoto: access denied (rate limit or permissions): repos/o/r"))
+
+  (it "says authentication failed on 401"
+    (remoto-test--ghub-fails-with 401)
+    (expect (remoto-test--ghub-get-message) :to-match "\\`Remoto: authentication failed"))
+
+  (it "falls back to the generic message for other codes"
+    (remoto-test--ghub-fails-with 500)
+    (expect (remoto-test--ghub-get-message)
+            :to-match "\\`Remoto: API error: HTTP Error: 500")))
+
+(defvar remoto-test--reply nil
+  "The callback and errorback of the last faked callback request.")
+
+(defun remoto-test--ghub-answers-later ()
+  "Fake `ghub-get' as a callback request: return a live buffer, keep the callbacks.
+The test delivers the reply through `remoto-test--reply' when it decides."
+  (spy-on 'ghub-get :and-call-fake
+          (lambda (_resource _params &rest args)
+            (setq remoto-test--reply (list (plist-get args :callback)
+                                           (plist-get args :errorback)))
+            (generate-new-buffer " *remoto-test-http*"))))
+
+(describe "remoto--ghub-get under while-no-input"
+  ;; `while-no-input' binds `throw-on-input'; a synchronous wait that it
+  ;; throws past leaves the url buffer behind, so the call goes through a
+  ;; callback request that ghub cleans up itself.
+  (before-each
+    (setq remoto-test--reply nil)
+    (clrhash remoto--pending-requests))
+
+  (after-each
+    (dolist (buf (buffer-list))
+      (when (string-prefix-p " *remoto-test-http*" (buffer-name buf))
+        (kill-buffer buf))))
+
+  (it "calls ghub synchronously when input cannot interrupt"
+    (let ((throw-on-input nil) callback)
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource _params &rest args)
+                (setq callback (plist-get args :callback))
+                '((name . "main"))))
+      (expect (remoto--ghub-get "/repos/o/r" 'none "repos/o/r")
+              :to-equal '((name . "main")))
+      (expect callback :to-be nil)))
+
+  (it "waits for the callback reply and returns it"
+    (let ((throw-on-input 'remoto-test-input))
+      (remoto-test--ghub-answers-later)
+      (run-at-time 0.01 nil (lambda () (funcall (car remoto-test--reply) '((name . "main")))))
+      (expect (remoto--ghub-get "/repos/o/r" 'none "repos/o/r")
+              :to-equal '((name . "main")))
+      (expect (hash-table-count remoto--pending-requests) :to-equal 0)))
+
+  (it "hands the reply of an abandoned request to the next call"
+    (let ((throw-on-input 'remoto-test-input))
+      (remoto-test--ghub-answers-later)
+      ;; A timer plays the keystroke that makes `while-no-input' throw.
+      (expect (catch 'remoto-test-input
+                (run-at-time 0.01 nil (lambda () (throw 'remoto-test-input 'typed)))
+                (remoto--ghub-get "/repos/o/r" 'none "repos/o/r"))
+              :to-be 'typed)
+      (funcall (car remoto-test--reply) '((name . "main")))
+      (expect (remoto--ghub-get "/repos/o/r" 'none "repos/o/r")
+              :to-equal '((name . "main")))
+      (expect 'ghub-get :to-have-been-called-times 1)
+      (expect (hash-table-count remoto--pending-requests) :to-equal 0)))
+
+  (it "waits on the pending request of an abandoned call instead of starting another"
+    (let ((throw-on-input 'remoto-test-input))
+      (remoto-test--ghub-answers-later)
+      (catch 'remoto-test-input
+        (run-at-time 0.01 nil (lambda () (throw 'remoto-test-input 'typed)))
+        (remoto--ghub-get "/repos/o/r" 'none "repos/o/r"))
+      (run-at-time 0.01 nil (lambda () (funcall (car remoto-test--reply) '((name . "main")))))
+      (expect (remoto--ghub-get "/repos/o/r" 'none "repos/o/r")
+              :to-equal '((name . "main")))
+      (expect 'ghub-get :to-have-been-called-times 1)))
+
+  (it "keeps requests with different auth apart"
+    (let ((throw-on-input 'remoto-test-input))
+      (remoto-test--ghub-answers-later)
+      (catch 'remoto-test-input
+        (run-at-time 0.01 nil (lambda () (throw 'remoto-test-input 'typed)))
+        (remoto--ghub-get "/repos/o/r" 'none "repos/o/r"))
+      (run-at-time 0.01 nil (lambda () (funcall (car remoto-test--reply) '((name . "private")))))
+      (expect (remoto--ghub-get "/repos/o/r" "ghp_token" "repos/o/r")
+              :to-equal '((name . "private")))
+      (expect 'ghub-get :to-have-been-called-times 2)))
+
+  (it "reports a failed reply like the synchronous call and forgets it"
+    (let ((throw-on-input 'remoto-test-input))
+      (remoto-test--ghub-answers-later)
+      (run-at-time 0.01 nil (lambda () (funcall (cadr remoto-test--reply) '(error http 404 nil))))
+      (expect (remoto-test--ghub-get-message) :to-equal "Remoto: not found: repos/o/r")
+      (expect (hash-table-count remoto--pending-requests) :to-equal 0)))
+
+  (it "gives up when the reply buffer dies without a reply"
+    (let ((throw-on-input 'remoto-test-input) buffer)
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (&rest _)
+                (setq buffer (generate-new-buffer " *remoto-test-http*"))))
+      (run-at-time 0.01 nil (lambda () (kill-buffer buffer)))
+      (expect (remoto--ghub-get "/repos/o/r" 'none "repos/o/r") :to-throw 'error)
+      (expect (hash-table-count remoto--pending-requests) :to-equal 0))))
+
 (describe "remoto--find-github-token"
   (it "finds token at api.github.com with ^forge suffix"
     (spy-on 'ghub--username :and-return-value "testuser")
@@ -1392,7 +1667,23 @@
   (it "returns nil when username cannot be determined"
     (spy-on 'ghub--username :and-call-fake
             (lambda (&rest _) (error "Cannot determine username")))
-    (expect (remoto--find-github-token) :to-be nil)))
+    (expect (remoto--find-github-token) :to-be nil))
+
+  (it "reports a failing auth-source backend once, stops, and marks auth failed"
+    (let ((remoto--auth-failed nil))
+      (spy-on 'ghub--username :and-return-value "testuser")
+      (spy-on 'auth-source-search :and-call-fake
+              (lambda (&rest _) (error "Decryption failed")))
+      (spy-on 'message)
+      (expect (remoto--find-github-token) :to-be nil)
+      (expect 'auth-source-search :to-have-been-called-times 1)
+      (expect 'message :to-have-been-called-times 1)
+      (expect (apply #'format (spy-calls-args-for 'message 0))
+              :to-equal "Remoto: auth-source lookup failed (Decryption failed); \
+using unauthenticated access until M-x remoto-reset-auth")
+      ;; Every API call retries the lookup while this is nil, and each
+      ;; retry would repeat the message.
+      (expect remoto--auth-failed :to-be t))))
 
 (describe "remoto--warm-auth"
   (it "caches authenticated user and token on success"
@@ -1419,6 +1710,17 @@
       ;; auth permanently - remoto--api will try ghub's own resolution.
       (expect remoto--auth-failed :to-be nil)
       (expect remoto--authenticated-user :to-be nil)))
+
+  (it "adds no message of its own after the lookup reported a backend failure"
+    (let ((remoto--authenticated-user nil)
+          (remoto--auth-failed nil)
+          (remoto--effective-auth nil)
+          (remoto-github-auth nil))
+      (spy-on 'remoto--find-github-token :and-call-fake
+              (lambda () (setq remoto--auth-failed t) nil))
+      (spy-on 'message)
+      (remoto--warm-auth)
+      (expect 'message :not :to-have-been-called)))
 
   (it "sets auth-failed when API call fails with found token"
     (let ((remoto--authenticated-user nil)
@@ -2091,7 +2393,46 @@
             :to-equal "/github:torvalds/linux@master:/src"))
 
   (it "leaves non-github paths unchanged"
-    (expect (remoto--maybe-rewrite "/home/user/file") :to-equal "/home/user/file")))
+    (expect (remoto--maybe-rewrite "/home/user/file") :to-equal "/home/user/file"))
+
+  (it "normalizes the /gh: shorthand before rewriting"
+    (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (puthash "torvalds/linux" "master" remoto--default-branch-cache)
+      (expect (remoto--maybe-rewrite "/gh:torvalds/linux")
+              :to-equal "/github:torvalds/linux@master:/")
+      (expect (remoto--maybe-rewrite "/gh:torvalds/linux/")
+              :to-equal "/github:torvalds/linux@master:/")
+      (expect (remoto--maybe-rewrite "/gh:torvalds/linux@master:/src")
+              :to-equal "/github:torvalds/linux@master:/src")
+      (expect (remoto--maybe-rewrite "/gh:foo/bar#42")
+              :to-equal "/github:foo/bar#42"))))
+
+(describe "remoto--dired-around-a"
+  ;; `dired' gets the raw argument; only URLs and remoto paths are rewritten.
+  (it "rewrites the bare, short and shorthand forms to the canonical path"
+    (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (puthash "torvalds/linux" "master" remoto--default-branch-cache)
+      (dolist (dir '("/github:torvalds/linux" "/github:torvalds/linux/"
+                     "/gh:torvalds/linux" "/gh:torvalds/linux/"
+                     "https://github.com/torvalds/linux"))
+        (expect (remoto--dired-around-a (lambda (d &rest _) d) dir)
+                :to-equal "/github:torvalds/linux@master:/"))))
+
+  (it "rewrites the directory of a (DIR . FILES) argument"
+    (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (puthash "torvalds/linux" "master" remoto--default-branch-cache)
+      (expect (remoto--dired-around-a (lambda (d &rest _) d)
+                                      '("/gh:torvalds/linux" "Makefile"))
+              :to-equal '("/github:torvalds/linux@master:/" "Makefile"))))
+
+  (it "passes local directories and canonical paths through untouched"
+    (spy-on 'remoto--maybe-rewrite :and-call-through)
+    (expect (remoto--dired-around-a (lambda (d &rest _) d) "/tmp/")
+            :to-equal "/tmp/")
+    (expect 'remoto--maybe-rewrite :not :to-have-been-called)
+    (expect (remoto--dired-around-a (lambda (d &rest _) d)
+                                    "/github:torvalds/linux@master:/src")
+            :to-equal "/github:torvalds/linux@master:/src")))
 
 ;;; ====================================================================
 ;;; TDD tests for v2 features: delimiter dispatch, #issues, @tags,
@@ -2823,7 +3164,30 @@ Returns the full path after completion, or INPUT if no completion."
     (spy-on 'remoto--maybe-rewrite :and-return-value "/github:testowner/testrepo@main:/README.md")
     ;; This would error in real use but we just check topic-display wasn't called
     (ignore-errors (find-file-noselect "/github:testowner/testrepo@main:/README.md"))
-    (expect 'remoto-topic-display :not :to-have-been-called)))
+    (expect 'remoto-topic-display :not :to-have-been-called))
+
+  (it "routes the /gh: shorthand with #NUM to remoto-topic-display"
+    (spy-on 'remoto-topic-display :and-return-value (generate-new-buffer "*test*"))
+    (spy-on 'remoto--require-topic)
+    (remoto--find-file-around-a #'ignore "/gh:testowner/testrepo#42")
+    (expect 'remoto-topic-display :to-have-been-called-with "42" "/github:testowner/testrepo")
+    (kill-buffer "*test*"))
+
+  (it "routes a pull request or issue web URL to remoto-topic-display"
+    (spy-on 'remoto-topic-display)
+    (spy-on 'remoto--require-topic)
+    (spy-on 'remoto--maybe-rewrite)
+    (remoto--find-file-around-a #'ignore "https://github.com/testowner/testrepo/pull/42/files")
+    (expect 'remoto-topic-display :to-have-been-called-with "42" "/github:testowner/testrepo")
+    (remoto--find-file-around-a #'ignore "https://github.com/testowner/testrepo/issues/7#issuecomment-1")
+    (expect 'remoto-topic-display :to-have-been-called-with "7" "/github:testowner/testrepo")
+    (expect 'remoto--maybe-rewrite :not :to-have-been-called))
+
+  (it "rewrites the /gh: short form before calling the original"
+    (remoto-test-with-cache
+      (expect (remoto--find-file-around-a (lambda (f &rest _) f)
+                                          "/gh:testowner/testrepo/")
+              :to-equal "/github:testowner/testrepo@main:/"))))
 
 ;;; ---- parse-partial-canonical rejects #NUM paths ----
 
@@ -2920,7 +3284,13 @@ Returns the full path after completion, or INPUT if no completion."
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
       (let ((result (remoto--handle-file-name-all-completions "" "/github:foo/bar#")))
         ;; First should be the PR (number 20)
-        (expect (car result) :to-equal "20")))))
+        (expect (car result) :to-equal "20"))))
+
+  (it "tells the completion UI to keep that order"
+    (let ((md (completion-metadata "/github:foo/bar#" #'read-file-name-internal nil)))
+      (expect (completion-metadata-get md 'category) :to-be 'remoto-issue)
+      (expect (completion-metadata-get md 'display-sort-function) :to-be #'identity)
+      (expect (completion-metadata-get md 'cycle-sort-function) :to-be #'identity))))
 
 ;;; ---- remoto--fetch-user-orgs uses authenticated endpoint ----
 
@@ -3734,9 +4104,76 @@ Returns the full path after completion, or INPUT if no completion."
         (remoto--invalidate-completion-ui))
       (expect 'minibuffer-completion-help :to-have-been-called))))
 
+(defmacro remoto-test-with-minibuffer-contents (contents &rest body)
+  "Run BODY as if a file-name minibuffer showing CONTENTS were active.
+The suite runs in batch, where no minibuffer can be active, so the
+three functions the indicator asks are answered by a temp buffer."
+  (declare (indent 1))
+  `(with-temp-buffer
+     (insert ,contents)
+     (let ((buf (current-buffer)))
+       (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () 'win))
+                 ((symbol-function 'window-buffer) (lambda (_w) buf))
+                 ((symbol-function 'minibuffer-contents-no-properties)
+                  (lambda () (buffer-string))))
+         ,@body))))
+
+(describe "remoto--completion-minibuffer"
+  (it "recognizes the /github: prefix"
+    (remoto-test-with-minibuffer-contents "/github:torvalds/"
+      (expect (remoto--completion-minibuffer) :to-be (current-buffer))))
+
+  (it "recognizes the /gh: shorthand"
+    (remoto-test-with-minibuffer-contents "/gh:torvalds/"
+      (expect (remoto--completion-minibuffer) :to-be (current-buffer))))
+
+  (it "recognizes a remoto path typed behind the shadowed default directory"
+    ;; `C-x C-f' starts with the current directory in the minibuffer; typing
+    ;; a second absolute path after it is how the prompt is normally used.
+    (remoto-test-with-minibuffer-contents "~/src//gh:torvalds/"
+      (expect (remoto--completion-minibuffer) :to-be (current-buffer))))
+
+  (it "recognizes the remoto-browse prompt by its collection"
+    (remoto-test-with-minibuffer-contents ""
+      (setq-local minibuffer-completion-table #'remoto--repo-completion-table)
+      (expect (remoto--completion-minibuffer) :to-be (current-buffer))))
+
+  (it "ignores a local file name"
+    (remoto-test-with-minibuffer-contents "~/src/"
+      (expect (remoto--completion-minibuffer) :to-be nil)))
+
+  (it "is nil without an active minibuffer"
+    (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil)))
+      (expect (remoto--completion-minibuffer) :to-be nil))))
+
+(describe "remoto--show-status with the /gh: shorthand"
+  (it "renders the overlay for /gh: input"
+    (let ((remoto-show-fetch-indicator t)
+          (remoto--status-overlay nil))
+      (remoto-test-with-minibuffer-contents "/gh:agz"
+        (remoto--show-status)
+        (expect (overlayp remoto--status-overlay) :to-be-truthy)
+        (expect (overlay-buffer remoto--status-overlay) :to-be (current-buffer))
+        (remoto--clear-status))))
+
+  (it "renders the overlay for a shadowed /gh: input"
+    (let ((remoto-show-fetch-indicator t)
+          (remoto--status-overlay nil))
+      (remoto-test-with-minibuffer-contents "~/src//gh:agz"
+        (remoto--show-status)
+        (expect (overlayp remoto--status-overlay) :to-be-truthy)
+        (remoto--clear-status)))))
+
 (describe "remoto--with-fetch-indicator"
+  ;; The suite runs in batch, where the macro does nothing; each spec here
+  ;; pretends to be interactive.
+  (before-each
+    (setq remoto--sync-fetch-depth 0
+          remoto--sync-fetch-overlay nil))
+
   (it "runs body and returns its value without UI when disabled"
-    (let ((remoto-show-fetch-indicator nil)
+    (let ((noninteractive nil)
+          (remoto-show-fetch-indicator nil)
           (ran nil))
       (spy-on 'message)
       (spy-on 'redisplay)
@@ -3745,31 +4182,151 @@ Returns the full path after completion, or INPUT if no completion."
       (expect 'message :not :to-have-been-called)
       (expect 'redisplay :not :to-have-been-called)))
 
-  (it "shows the label, forces redisplay, then clears, when enabled"
-    (let ((remoto-show-fetch-indicator t)
+  (it "does nothing in batch, where there is no display"
+    (let ((noninteractive t)
+          (remoto-show-fetch-indicator t))
+      (spy-on 'message)
+      (spy-on 'redisplay)
+      (expect (remoto--with-fetch-indicator 5) :to-equal 5)
+      (expect 'message :not :to-have-been-called)
+      (expect 'redisplay :not :to-have-been-called)))
+
+  (it "uses the echo area with no remoto minibuffer, then clears its own message"
+    (let ((noninteractive nil)
+          (remoto-show-fetch-indicator t)
           (ran nil))
       (spy-on 'message)
       (spy-on 'redisplay)
-      (expect (remoto--with-fetch-indicator (setq ran t) 7) :to-equal 7)
+      (spy-on 'current-message
+              :and-return-value (format "Remoto %s" remoto--fetch-indicator-text))
+      (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil)))
+        (expect (remoto--with-fetch-indicator (setq ran t) 7) :to-equal 7))
       (expect ran :to-be t)
-      (expect 'redisplay :to-have-been-called)
       (expect 'message :to-have-been-called-with
               "Remoto %s" remoto--fetch-indicator-text)
-      (expect 'message :to-have-been-called-with nil))))
+      (expect 'message :to-have-been-called-with nil)
+      (expect 'redisplay :not :to-have-been-called)))
+
+  (it "leaves a message that something else put up during the fetch"
+    (let ((noninteractive nil)
+          (remoto-show-fetch-indicator t))
+      (spy-on 'message)
+      (spy-on 'current-message :and-return-value "Remoto: tree truncated")
+      (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil)))
+        (remoto--with-fetch-indicator 1))
+      (expect 'message :not :to-have-been-called-with nil)))
+
+  (it "draws the minibuffer overlay and paints it when a remoto prompt is active"
+    (let ((noninteractive nil)
+          (remoto-show-fetch-indicator t)
+          (remoto--inflight-count 0)
+          (remoto--status-overlay nil)
+          seen)
+      (spy-on 'message)
+      (spy-on 'redisplay)
+      (remoto-test-with-minibuffer-contents "/gh:agzam/remoto.el@"
+        (remoto--with-fetch-indicator
+          (setq seen (list remoto--inflight-count
+                           (overlayp remoto--status-overlay))))
+        (expect seen :to-equal '(1 t))
+        (expect 'redisplay :to-have-been-called)
+        (expect 'message :not :to-have-been-called)
+        (expect remoto--inflight-count :to-equal 0)
+        (expect remoto--status-overlay :to-be nil))))
+
+  (it "draws once for nested bodies and clears at the outermost end"
+    (let ((noninteractive nil)
+          (remoto-show-fetch-indicator t)
+          (remoto--inflight-count 0)
+          (remoto--status-overlay nil)
+          inner)
+      (spy-on 'redisplay)
+      (remoto-test-with-minibuffer-contents "/gh:agzam/"
+        (remoto--with-fetch-indicator
+          (remoto--with-fetch-indicator
+            (setq inner remoto--inflight-count))
+          (expect (overlayp remoto--status-overlay) :to-be-truthy))
+        (expect inner :to-equal 1)
+        (expect 'redisplay :to-have-been-called-times 1)
+        (expect remoto--status-overlay :to-be nil))))
+
+  (it "clears the indicator when the body signals"
+    (let ((noninteractive nil)
+          (remoto-show-fetch-indicator t)
+          (remoto--inflight-count 0)
+          (remoto--status-overlay nil))
+      (spy-on 'redisplay)
+      (remoto-test-with-minibuffer-contents "/gh:agzam/"
+        (expect (remoto--with-fetch-indicator (error "boom")) :to-throw 'error)
+        (expect remoto--sync-fetch-depth :to-equal 0)
+        (expect remoto--inflight-count :to-equal 0)
+        (expect remoto--status-overlay :to-be nil)))))
+
+(describe "remoto--ghub-get fetch indicator"
+  ;; Every blocking API call shows the indicator, so `C-x C-f' and
+  ;; `remoto-browse' behave the same whichever of them is fetching.
+  (before-each
+    (setq remoto--sync-fetch-depth 0
+          remoto--sync-fetch-overlay nil))
+
+  (it "shows the minibuffer overlay around a blocking fetch while completing"
+    (let ((noninteractive nil)
+          (remoto-show-fetch-indicator t)
+          (remoto--inflight-count 0)
+          (remoto--status-overlay nil)
+          (throw-on-input nil)
+          seen)
+      (spy-on 'redisplay)
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (&rest _)
+                (setq seen (overlayp remoto--status-overlay))
+                '((name . "main"))))
+      (remoto-test-with-minibuffer-contents "/gh:agzam/remoto.el@"
+        (expect (remoto--ghub-get "/repos/o/r/branches" 'none "repos/o/r/branches")
+                :to-equal '((name . "main")))
+        (expect seen :to-be t)
+        (expect 'redisplay :to-have-been-called)
+        (expect remoto--status-overlay :to-be nil))))
+
+  (it "shows the echo-area message around a blocking fetch after the prompt"
+    (let ((noninteractive nil)
+          (remoto-show-fetch-indicator t)
+          (throw-on-input nil))
+      (spy-on 'message)
+      (spy-on 'ghub-get :and-return-value '((default_branch . "main")))
+      (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil)))
+        (remoto--ghub-get "/repos/o/r" 'none "repos/o/r"))
+      (expect 'message :to-have-been-called-with
+              "Remoto %s" remoto--fetch-indicator-text)))
+
+  (it "clears the overlay when the fetch fails"
+    (let ((noninteractive nil)
+          (remoto-show-fetch-indicator t)
+          (remoto--inflight-count 0)
+          (remoto--status-overlay nil)
+          (throw-on-input nil))
+      (spy-on 'redisplay)
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (&rest _) (signal 'ghub-http-error '(404 "Not found" "u" nil))))
+      (remoto-test-with-minibuffer-contents "/gh:agzam/nope/"
+        (expect (remoto--ghub-get "/repos/agzam/nope" 'none "repos/agzam/nope")
+                :to-throw 'user-error)
+        (expect remoto--inflight-count :to-equal 0)
+        (expect remoto--status-overlay :to-be nil)))))
 
 (describe "remoto-browse fetch indicator"
   (it "shows the synchronous indicator around the resolve/open fetch"
-    (let ((remoto-show-fetch-indicator t))
+    (let ((noninteractive nil)
+          (remoto-show-fetch-indicator t))
       (spy-on 'message)
-      (spy-on 'redisplay)
       (spy-on 'remoto--parse-input :and-return-value 'parsed)
       (spy-on 'remoto--resolve-ref :and-return-value 'resolved)
       (spy-on 'remoto--canonical-path :and-return-value "/github:o/r:main:/")
       (spy-on 'remoto--tree-entry :and-return-value '((type . "tree")))
       (spy-on 'dired)
       (spy-on 'find-file)
-      (remoto-browse "owner/repo")
-      (expect 'redisplay :to-have-been-called)
+      (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil)))
+        (remoto-browse "owner/repo"))
       (expect 'message :to-have-been-called-with
               "Remoto %s" remoto--fetch-indicator-text)
       (expect 'remoto--resolve-ref :to-have-been-called)
@@ -3806,7 +4363,25 @@ Returns the full path after completion, or INPUT if no completion."
   (it "returns nil outside remoto buffers"
     (with-temp-buffer
       (setq-local buffer-file-name "/home/me/x.el")
-      (expect (remoto--embark-target-at-point) :to-be nil))))
+      (expect (remoto--embark-target-at-point) :to-be nil)))
+
+  (it "treats a failed forge lookup as no target"
+    (with-temp-buffer
+      (setq-local buffer-file-name "/github:testowner/testrepo@main:/src/main.el")
+      (spy-on 'remoto--path-context :and-throw-error 'user-error)
+      (expect (remoto--embark-target-at-point) :to-be nil)))
+
+  (it "lets a programming error propagate"
+    (with-temp-buffer
+      (setq-local buffer-file-name "/github:testowner/testrepo@main:/src/main.el")
+      (spy-on 'remoto--path-context :and-throw-error 'wrong-type-argument)
+      (expect (remoto--embark-target-at-point) :to-throw 'wrong-type-argument))))
+
+(describe "remoto--embark-classify"
+  (it "falls back to the given type when the forge lookup fails"
+    (spy-on 'remoto--path-context :and-throw-error 'user-error)
+    (expect (remoto--embark-classify "/github:o/r@main:/src" 'remoto-file)
+            :to-be 'remoto-file)))
 
 (describe "remoto-embark actions"
   (it "copies the repo web URL from a repo target (no network)"
@@ -3896,7 +4471,30 @@ Returns the full path after completion, or INPUT if no completion."
 
   (it "errors on a non-forge URL"
     (expect (remoto-embark-open-in-remoto "https://example.com/foo")
-            :to-throw 'user-error)))
+            :to-throw 'user-error))
+
+  (it "turns global-remoto-mode on when it is off"
+    (spy-on 'find-file)
+    (spy-on 'message)
+    (unwind-protect
+        (progn
+          (global-remoto-mode -1)
+          (remoto-embark-open-in-remoto "https://github.com/o/r")
+          (expect global-remoto-mode :to-be-truthy)
+          (expect 'find-file :to-have-been-called-with "/github:o/r:/"))
+      (global-remoto-mode 1))))
+
+(describe "remoto-embark-open-issue"
+  (it "turns global-remoto-mode on and visits the issue path"
+    (spy-on 'find-file)
+    (spy-on 'message)
+    (unwind-protect
+        (progn
+          (global-remoto-mode -1)
+          (remoto-embark-open-issue "/github:o/r#42")
+          (expect global-remoto-mode :to-be-truthy)
+          (expect 'find-file :to-have-been-called-with "/github:o/r#42"))
+      (global-remoto-mode 1))))
 
 (describe "remoto-embark-clone"
   (it "clones with the HTTPS URL and chosen dir by default"
@@ -3965,7 +4563,10 @@ Returns the full path after completion, or INPUT if no completion."
       (expect visited :to-equal '(magit . "/tmp/r/")))
 
     (it "falls back to dired when magit is unavailable"
+      ;; Unbind the Magit entry point too: an installed Magit leaves it
+      ;; autoloaded, and the fallback keys on `fboundp'.
       (cl-letf (((symbol-function 'require) (lambda (&rest _) nil))
+                ((symbol-function 'magit-status-setup-buffer) nil)
                 ((symbol-function 'dired) (lambda (dir) (setq visited (cons 'dired dir)))))
         (remoto--clone-finished "/tmp/r/" "finished\n"))
       (expect visited :to-equal '(dired . "/tmp/r/")))
@@ -4196,7 +4797,10 @@ Returns the full path after completion, or INPUT if no completion."
       (expect result :to-equal '(remoto-issue . "/github:foo/bar#42"))))
 
   (it "classifies a branch browse target"
+    ;; The browse table marks its branch and tag candidates with
+    ;; `remoto-ref-type'; without it the same root is the repository.
     (let* ((cand (propertize "foo/bar@main"
+                             'remoto-ref-type "branch"
                              'remoto-target "/github:foo/bar@main:/"))
            (result (remoto--embark-browse-transform 'remoto-browse cand)))
       (expect result :to-equal '(remoto-branch . "/github:foo/bar@main:/"))))
@@ -4583,31 +5187,312 @@ of `completion-all-completions'; Vertico inserts a candidate as
               :to-equal '("agzam/remoto.el"))
       (expect 'remoto--search-repos :to-have-been-called-with "agzam/rem"))))
 
+;;; The global switch
+
+(describe "global-remoto-mode"
+  ;; The suite runs with the mode on; every spec here puts it back.
+  (it "installs the handler, the advice and the hooks"
+    (global-remoto-mode 1)
+    (expect (cdr (assoc remoto--handler-regexp file-name-handler-alist))
+            :to-be 'remoto-file-name-handler)
+    (expect (advice-member-p #'remoto--dired-around-a 'dired) :to-be-truthy)
+    (expect (advice-member-p #'remoto--find-file-around-a 'find-file-noselect)
+            :to-be-truthy)
+    (expect (advice-member-p #'remoto--read-file-name-internal-a
+                             'read-file-name-internal)
+            :to-be-truthy)
+    (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be-truthy)
+    (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be-truthy)
+    (expect (memq 'remoto--minibuffer-exit-cleanup minibuffer-exit-hook)
+            :to-be-truthy))
+
+  (it "removes all of them when turned off"
+    (unwind-protect
+        (progn
+          (global-remoto-mode -1)
+          (expect (assoc remoto--handler-regexp file-name-handler-alist)
+                  :to-be nil)
+          (expect (advice-member-p #'remoto--dired-around-a 'dired) :to-be nil)
+          (expect (advice-member-p #'remoto--find-file-around-a 'find-file-noselect)
+                  :to-be nil)
+          (expect (advice-member-p #'remoto--read-file-name-internal-a
+                                   'read-file-name-internal)
+                  :to-be nil)
+          (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be nil)
+          (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be nil)
+          (expect (memq 'remoto--minibuffer-exit-cleanup minibuffer-exit-hook)
+                  :to-be nil))
+      (global-remoto-mode 1)))
+
+  (it "schedules the auth warm-up on idle and cancels it when turned off"
+    (unwind-protect
+        (progn
+          (global-remoto-mode -1)
+          (global-remoto-mode 1)
+          (let ((timer remoto--warm-auth-timer))
+            (expect (memq timer timer-idle-list) :to-be-truthy)
+            (expect (timer--function timer) :to-be #'remoto--warm-auth)
+            (global-remoto-mode -1)
+            (expect (memq timer timer-idle-list) :to-be nil)
+            (expect remoto--warm-auth-timer :to-be nil)))
+      (global-remoto-mode 1)))
+
+  (it "registers the handler once however often it is turned on"
+    (global-remoto-mode 1)
+    (global-remoto-mode 1)
+    (expect (cl-count remoto--handler-regexp file-name-handler-alist
+                      :key #'car :test #'equal)
+            :to-equal 1)
+    (expect (cl-count 'remoto--maybe-enable-mode find-file-hook) :to-equal 1))
+
+  (it "makes a remoto path reach the handler only while on"
+    (unwind-protect
+        (progn
+          (expect (find-file-name-handler "/github:o/r:/" 'file-exists-p)
+                  :to-be 'remoto-file-name-handler)
+          (global-remoto-mode -1)
+          (expect (find-file-name-handler "/github:o/r:/" 'file-exists-p)
+                  :not :to-be 'remoto-file-name-handler))
+      (global-remoto-mode 1))))
+
+;;; The bootstrap handler of the autoloads
+
+(defun remoto-test--push-bootstrap ()
+  "Register the bootstrap entry the way the package autoloads do."
+  (add-to-list 'file-name-handler-alist
+               (cons remoto--handler-regexp #'remoto-autoload-file-name-handler)))
+
+(describe "remoto-autoload-file-name-handler"
+  ;; The suite runs with the mode on; every spec here puts it back.
+  (it "turns the mode on, leaves the alist, and runs the operation"
+    (unwind-protect
+        (progn
+          (global-remoto-mode -1)
+          (remoto-test--push-bootstrap)
+          (spy-on 'message)
+          (expect (find-file-name-handler "/gh:o/r@main:/x" 'file-remote-p)
+                  :to-be 'remoto-autoload-file-name-handler)
+          (expect (file-remote-p "/gh:o/r@main:/x") :to-equal "/github:o/r@main:")
+          (expect global-remoto-mode :to-be-truthy)
+          (expect (rassq 'remoto-autoload-file-name-handler file-name-handler-alist)
+                  :to-be nil)
+          (expect (find-file-name-handler "/gh:o/r@main:/x" 'file-remote-p)
+                  :to-be 'remoto-file-name-handler)
+          (expect 'message :to-have-been-called-with
+                  "Remoto: `global-remoto-mode' enabled")
+          (expect 'message :to-have-been-called-times 1))
+      (global-remoto-mode 1)))
+
+  (it "is dropped when the mode is turned on from the init file instead"
+    (unwind-protect
+        (progn
+          (global-remoto-mode -1)
+          (remoto-test--push-bootstrap)
+          (global-remoto-mode 1)
+          (expect (rassq 'remoto-autoload-file-name-handler file-name-handler-alist)
+                  :to-be nil)
+          (expect (car (rassq 'remoto-file-name-handler file-name-handler-alist))
+                  :to-equal remoto--handler-regexp))
+      (global-remoto-mode 1)))
+
+  (it "does not loop when an operation falls through the real handler to it"
+    ;; A stale bootstrap entry behind the real handler catches the
+    ;; operations that handler passes down; it must step aside, not recurse.
+    (unwind-protect
+        (progn
+          (setq file-name-handler-alist
+                (append file-name-handler-alist
+                        (list (cons remoto--handler-regexp
+                                    #'remoto-autoload-file-name-handler))))
+          (expect (file-newer-than-file-p "/gh:o/r@main:/a" "/gh:o/r@main:/b")
+                  :to-be nil)
+          (expect (rassq 'remoto-autoload-file-name-handler file-name-handler-alist)
+                  :to-be nil)
+          (expect global-remoto-mode :to-be-truthy))
+      (remoto--drop-autoload-handler)
+      (global-remoto-mode 1)))
+
+  (it "is dropped by remoto-unload-function when the mode never turned on"
+    (unwind-protect
+        (progn
+          (global-remoto-mode -1)
+          (remoto-test--push-bootstrap)
+          (remoto-unload-function)
+          (expect (rassq 'remoto-autoload-file-name-handler file-name-handler-alist)
+                  :to-be nil))
+      (global-remoto-mode 1))))
+
+(defmacro remoto-test-with-autoloads (var &rest body)
+  "Bind VAR to a freshly generated autoloads file of the package and run BODY.
+The file sits in its own temporary directory: `loaddefs-generate' skips
+every source older than an existing output file, so it must not exist."
+  (declare (indent 1))
+  `(let ((,var (expand-file-name "remoto-autoloads.el"
+                                 (make-temp-file "remoto-autoloads" t))))
+     (unwind-protect
+         (progn
+           (loaddefs-generate (file-name-directory (locate-library "remoto")) ,var)
+           ,@body)
+       (delete-directory (file-name-directory ,var) t))))
+
+(defun remoto-test--autoload-forms (file)
+  "Return the top-level forms of the autoloads FILE."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (goto-char (point-min))
+    (let (forms)
+      (condition-case nil
+          (while t (push (read (current-buffer)) forms))
+        (end-of-file (nreverse forms))))))
+
+(describe "the autoloads bootstrap"
+  (it "registers the handler for remoto paths with the regexp the mode uses"
+    (remoto-test-with-autoloads file
+      (let* ((forms (remoto-test--autoload-forms file))
+             (registration (seq-find (lambda (f)
+                                       (and (eq (car-safe f) 'add-to-list)
+                                            (equal (nth 1 f) ''file-name-handler-alist)))
+                                     forms))
+             (entry (cadr (nth 2 registration))))
+        (expect registration :to-be-truthy)
+        (expect (car entry) :to-equal remoto--handler-regexp)
+        (expect (cdr entry) :to-be 'remoto-autoload-file-name-handler)
+        (expect (seq-find (lambda (f)
+                            (and (eq (car-safe f) 'autoload)
+                                 (equal (nth 1 f) ''remoto-autoload-file-name-handler)))
+                          forms)
+                :to-be-truthy))))
+
+  (it "loads nothing and turns nothing on by itself"
+    (remoto-test-with-autoloads file
+      (let ((forms (remoto-test--autoload-forms file)))
+        (expect (seq-find (lambda (f) (memq (car-safe f) '(require global-remoto-mode)))
+                          forms)
+                :to-be nil)))))
+
+;;; A fresh session: the autoloads alone, then the first remoto path
+
+(defun remoto-test--fresh-session (autoloads form)
+  "Run FORM in a child Emacs that has loaded only AUTOLOADS; return its value.
+The child is `emacs -Q --batch' with a throwaway init directory and this
+process's `load-path', so remoto and ghub resolve when the autoload
+fires.  FORM is read back from the child's standard output; a child that
+fails yields (:error ...), an unreadable child (:unreadable OUT ERR)."
+  (let* ((init-dir (make-temp-file "remoto-fresh" t))
+         (stderr (make-temp-file "remoto-fresh-stderr"))
+         (script `(progn
+                    (setq load-path ',load-path)
+                    (load ,autoloads nil t)
+                    (prin1 (condition-case err ,form (error (list :error err))))))
+         (print-length nil)
+         (print-level nil)
+         (output (with-temp-buffer
+                   (call-process (expand-file-name invocation-name invocation-directory)
+                                 nil (list (current-buffer) stderr) nil
+                                 "-Q" "--batch" "--init-directory" init-dir
+                                 "--eval" (prin1-to-string script))
+                   (buffer-string))))
+    (unwind-protect
+        (condition-case nil
+            (car (read-from-string output))
+          (error (list :unreadable output
+                       (with-temp-buffer
+                         (insert-file-contents stderr)
+                         (buffer-string)))))
+      (delete-directory init-dir t)
+      (delete-file stderr))))
+
+(defconst remoto-test--fresh-session-form
+  '(let ((messages nil)
+         (before (list (featurep 'remoto)
+                       (find-file-name-handler "/gh:o/r@main:/" 'file-exists-p)
+                       (bound-and-true-p global-remoto-mode))))
+     (advice-add 'message :before
+                 (lambda (fmt &rest args)
+                   (when fmt (push (apply #'format fmt args) messages))))
+     ;; The fixture answers the API from the moment remoto is in, which is
+     ;; before its first request: the autoload fires on the operation below.
+     (with-eval-after-load 'remoto
+       (advice-add 'remoto--api :override
+                   (lambda (endpoint)
+                     (pcase endpoint
+                       ("repos/o/r" '((default_branch . "main")))
+                       ("repos/o/r/git/trees/main?recursive=1"
+                        '((tree . (((path . "README.md") (type . "blob")
+                                    (size . 6) (sha . "aaa") (mode . "100644"))))))
+                       ("repos/o/r/contents/README.md?ref=main"
+                        (list (cons 'sha "aaa")
+                              (cons 'encoding "base64")
+                              (cons 'content (base64-encode-string "hello\n"))))
+                       (_ nil)))))
+     ;; What `C-x C-f /gh:o/r@main:/RE TAB RET' does, minus the keystrokes.
+     (let* ((completions (file-name-all-completions "RE" "/gh:o/r@main:/"))
+            (buf (find-file-noselect "/gh:o/r@main:/README.md")))
+       (list :before before
+             :completions completions
+             :content (with-current-buffer buf (buffer-string))
+             :file (buffer-file-name buf)
+             :remoto-mode (buffer-local-value 'remoto-mode buf)
+             :global global-remoto-mode
+             :handler (find-file-name-handler "/gh:o/r@main:/" 'file-exists-p)
+             :bootstrap-left (and (rassq 'remoto-autoload-file-name-handler
+                                         file-name-handler-alist)
+                                  t)
+             :enabled-messages (seq-count (lambda (m)
+                                            (equal m "Remoto: `global-remoto-mode' enabled"))
+                                          messages))))
+  "The first remoto path of a session, as a form for `remoto-test--fresh-session'.")
+
+(describe "a fresh session"
+  ;; The complaint this guards: with nothing in the init file, `C-x C-f
+  ;; /gh:...' must work the way `M-x remoto-browse' does.
+  (it "serves the first /gh: path from the autoloads alone"
+    (remoto-test-with-autoloads file
+      (let ((result (remoto-test--fresh-session file remoto-test--fresh-session-form)))
+        (expect (plist-get result :before)
+                :to-equal '(nil remoto-autoload-file-name-handler nil))
+        (expect (plist-get result :completions) :to-equal '("README.md"))
+        (expect (plist-get result :content) :to-equal "hello\n")
+        (expect (plist-get result :file) :to-equal "/github:o/r@main:/README.md")
+        (expect (plist-get result :remoto-mode) :to-be t)
+        (expect (plist-get result :global) :to-be t)
+        (expect (plist-get result :handler) :to-be 'remoto-file-name-handler)
+        (expect (plist-get result :bootstrap-left) :to-be nil)
+        (expect (plist-get result :enabled-messages) :to-equal 1))))
+
+  (it "leaves a session that never touches a remoto path alone"
+    (remoto-test-with-autoloads file
+      (let ((result (remoto-test--fresh-session
+                     file
+                     `(progn
+                        (find-file-noselect ,(locate-library "remoto"))
+                        (list :loaded (featurep 'remoto)
+                              :global (bound-and-true-p global-remoto-mode)
+                              :hooked (and (memq 'remoto--maybe-enable-mode
+                                                 find-file-hook)
+                                           t))))))
+        (expect (plist-get result :loaded) :to-be nil)
+        (expect (plist-get result :global) :to-be nil)
+        (expect (plist-get result :hooked) :to-be nil)))))
+
 ;;; Unloading
 
 (describe "remoto-unload-function"
-  ;; Everything remoto installs at load time is put back, so the rest of
-  ;; the suite runs against a loaded remoto.
-  (it "removes the handler, the hooks and the advice"
-    (let ((handlers file-name-handler-alist))
-      (unwind-protect
-          (progn
-            (remoto-unload-function)
-            (expect (assoc remoto--handler-regexp file-name-handler-alist)
-                    :to-be nil)
-            (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be nil)
-            (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be nil)
-            (expect (memq 'remoto--minibuffer-exit-cleanup minibuffer-exit-hook)
-                    :to-be nil)
-            (expect (advice-member-p #'remoto--read-file-name-internal-a
-                                     'read-file-name-internal)
-                    :to-be nil))
-        (setq file-name-handler-alist handlers)
-        (add-hook 'find-file-hook #'remoto--maybe-enable-mode)
-        (add-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
-        (add-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
-        (advice-add 'read-file-name-internal :around
-                    #'remoto--read-file-name-internal-a)))))
+  ;; Runs last: it empties the real caches.
+  (it "turns global-remoto-mode off and empties the caches"
+    (unwind-protect
+        (progn
+          (puthash "o/r" "main" remoto--default-branch-cache)
+          (remoto-unload-function)
+          (expect global-remoto-mode :to-be nil)
+          (expect (assoc remoto--handler-regexp file-name-handler-alist)
+                  :to-be nil)
+          (expect (advice-member-p #'remoto--read-file-name-internal-a
+                                   'read-file-name-internal)
+                  :to-be nil)
+          (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be nil)
+          (expect (hash-table-count remoto--default-branch-cache) :to-equal 0))
+      (global-remoto-mode 1))))
 
 (provide 'remoto-tests)
 

@@ -28,13 +28,14 @@ For now it works only with GitHub repos. Future plans include support for other 
 * How
 ** use-package + straight
 
-You need to load the package so it can register its file handler and advice.
+Loading the package defines things and changes nothing. ~global-remoto-mode~ is the switch: it installs the file handler, the URL rewriting in ~find-file~ and ~dired~, and the completion metadata, and removes them all when turned off. Nothing else is needed:
 
 #+begin_src emacs-lisp
 (use-package remoto
-  :straight (:host github :repo "agzam/remoto.el")
-  :demand t)
+  :straight (:host github :repo "agzam/remoto.el"))
 #+end_src
+
+The mode turns itself on at first use, whichever way that comes: ~M-x remoto-browse~, an Embark open action, or a ~/github:~ or ~/gh:~ path typed at ~C-x C-f~, ~C-x d~ or any other file prompt. For the last one the package autoloads register a small handler for those two prefixes, the way TRAMP loads on the first remote path; it hands over to the real handler and steps aside. Each of these says so once in the echo area. To have the mode on from the start, and skip that message, put ~(global-remoto-mode 1)~ in your config.
 
 The package is not on MELPA yet. Maybe upvote the [[https://github.com/melpa/melpa/pull/10219][submission PR]], who knows, perhaps it gets accepted faster.
 
@@ -78,7 +79,7 @@ The ~/github:~ prefix (~/gh:~ shorthand works too) enables multi-level completio
 /github:torvalds/linux#        -> issues + PRs
 #+end_example
 
-Each level shows annotations: repo descriptions, issue/PR titles and state, file commit messages, user/org type. Works with vanilla completion, Vertico, Corfu, etc.
+Each level shows annotations: repo descriptions, issue/PR titles and state, file commit messages, user/org type. Works with vanilla completion, Vertico, Corfu, etc. While a GitHub request is in flight, a ~[fetching...]~ label sits at the end of the minibuffer input, and once the path is chosen and opens, the same label sits in the echo area; ~remoto-browse~ shows the same two, and ~remoto-show-fetch-indicator~ turns both off.
 
 Hitting RET on ~/github:owner/repo~ opens the default branch. ~/github:owner/repo#42~ opens an issue/PR display buffer.
 
@@ -100,11 +101,12 @@ Keybindings in the display buffer: ~b~ (open in browser), ~g~ (refresh).
 
 *** Commands
 
-| Command                | Description                                            |
-|------------------------+--------------------------------------------------------|
-| ~remoto-browse~          | Prompt for a repo, open dired at root                  |
-| ~remoto-refresh~         | Clear tree cache for current repo, re-fetch            |
-| ~remoto-copy-github-url~ | Copy ~github.com~ URL for current file/line to kill ring |
+| Command              | Description                                                   |
+|----------------------+---------------------------------------------------------------|
+| ~global-remoto-mode~ | Turn the file handler, URL rewriting and completion on or off |
+| ~remoto-browse~      | Prompt for a repo, open dired at root                         |
+| ~remoto-refresh~     | Clear tree cache for current repo, re-fetch                   |
+| ~remoto-copy-url~    | Copy ~github.com~ URL for current file/line to kill ring      |
 
 ** Embark integration
 

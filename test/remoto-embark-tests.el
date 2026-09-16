@@ -24,6 +24,8 @@
 
 ;; Installed users get this from the autoloads; a bare `require' does not.
 (remoto-embark-register)
+;; And their init file turns the switch on; loading remoto does not.
+(global-remoto-mode 1)
 
 (defmacro remoto-embark-test-with-autoloads (var &rest body)
   "Bind VAR to a freshly generated autoloads file of the package and run BODY.
@@ -48,6 +50,16 @@ every source older than an existing output file, so it must not exist."
                     (buffer-string))))
         (expect text :to-match "(autoload 'remoto-embark-register \"[^\"]*remoto-embark\"")
         (expect text :to-match "(with-eval-after-load 'embark (remoto-embark-register))"))))
+
+  (it "autoloads global-remoto-mode, so an init file can turn it on unloaded"
+    (remoto-embark-test-with-autoloads file
+      (let ((text (with-temp-buffer
+                    (insert-file-contents file)
+                    (buffer-string))))
+        (expect text :to-match "(defvar global-remoto-mode nil")
+        (expect text :to-match "(autoload 'global-remoto-mode \"[^\"]*remoto\"")
+        ;; The autoloads only define; they never flip the switch.
+        (expect text :not :to-match "^(global-remoto-mode"))))
 
   (it "registers the per-type keymaps in embark-keymap-alist"
     (expect (assoc 'remoto-repo embark-keymap-alist)
@@ -246,9 +258,20 @@ with that property intact and no live minibuffer."
 (describe "remoto-embark target routing"
   (it "classifies each target shape to its own type"
     (expect (remoto--embark-classify "/github:o/r:/" 'remoto) :to-be 'remoto-repo)
-    (expect (remoto--embark-classify "/github:o/r@main:/" 'remoto) :to-be 'remoto-branch)
+    (expect (remoto--embark-classify "/github:o/r@main:/" 'remoto "branch") :to-be 'remoto-branch)
     (expect (remoto--embark-classify "/github:o/r#42" 'remoto) :to-be 'remoto-issue)
     (expect (remoto--embark-classify "/github:torvalds" 'remoto) :to-be 'remoto-owner))
+
+  (it "classifies a bare ref root as the repository unless a ref candidate says otherwise"
+    ;; The root Dired of o/r@REF:/ wants clone, remote URLs and history; only
+    ;; a branch or tag candidate carries `remoto-ref-type'.
+    (expect (remoto--embark-classify "/github:o/r@main:/" 'remoto) :to-be 'remoto-repo)
+    (expect (remoto--embark-transform 'remoto-repo "/github:o/r@main:/")
+            :to-equal '(remoto-repo . "/github:o/r@main:/"))
+    (let ((cand (propertize "o/r@main" 'remoto-ref-type "branch"
+                            'remoto-target "/github:o/r@main:/")))
+      (expect (remoto--embark-browse-transform 'remoto-browse cand)
+              :to-equal '(remoto-branch . "/github:o/r@main:/"))))
 
   (it "routes a bare owner target to the owner type (the repo-map bug)"
     (expect (remoto--embark-transform 'remoto "/github:torvalds")
@@ -462,7 +485,8 @@ with that property intact and no live minibuffer."
       (expect (remoto--embark-classify tgt 'remoto) :to-be 'remoto-repo))
     (expect (remoto--embark-classify "/gh:torvalds" 'remoto) :to-be 'remoto-owner)
     (expect (remoto--embark-classify "/gh:o/r#42" 'remoto) :to-be 'remoto-issue)
-    (expect (remoto--embark-classify "/gh:o/r@main:/" 'remoto) :to-be 'remoto-branch))
+    (expect (remoto--embark-classify "/gh:o/r@main:/" 'remoto "tag") :to-be 'remoto-branch)
+    (expect (remoto--embark-classify "/gh:o/r@main:/" 'remoto) :to-be 'remoto-repo))
 
   (it "transforms a /gh: or file-name candidate into a canonical repo target"
     (expect (remoto--embark-transform 'remoto "/gh:agzam/mxp/")

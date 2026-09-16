@@ -6,7 +6,7 @@
 ;; Assisted-by: ECA:claude-opus-5
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: April 24, 2026
-;; Version: 1.9.2
+;; Version: 2.0.0
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
 ;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
@@ -22,10 +22,21 @@
 ;; via `file-name-handler-alist' that translates Emacs file operations into
 ;; GitHub API calls via the `ghub' library.
 ;;
+;; Loading this file defines things and changes nothing.  `global-remoto-mode'
+;; is the switch: it installs the file-name handler, the `find-file' and
+;; `dired' URL rewriting, the completion metadata, and the auto-enabling of
+;; `remoto-mode' in remoto buffers, and removes all of them when turned off.
+;;
 ;; Usage:
+;;   C-x C-f /github:torvalds/linux RET
 ;;   M-x remoto-browse RET https://github.com/torvalds/linux RET
 ;;
-;; Supports pasting any GitHub URL, git remote URL, or owner/repo shorthand.
+;; Both turn the mode on when it is off: `remoto-browse' itself, and the
+;; path through `remoto-autoload-file-name-handler', which the package
+;; autoloads register for `/github:' and `/gh:' paths the way TRAMP
+;; autoloads on a remote path.  `(global-remoto-mode 1)' in the init file
+;; turns it on ahead of time.  `remoto-browse' supports pasting any GitHub
+;; URL, git remote URL, or owner/repo shorthand.
 
 ;;; Code:
 
@@ -47,6 +58,12 @@
       eos)
   "Regexp matching canonical remoto paths.
 Groups: 1=owner, 2=repo, 3=ref (maybe nil), 4=path.")
+
+(defconst remoto--handler-regexp "\\`/\\(?:github\\|gh\\):"
+  "Regexp matching remoto file paths.
+Matches the canonical /github: prefix and its /gh: shorthand alias.
+Spelled out rather than built with `rx' because the autoload cookie on
+`remoto-autoload-file-name-handler' repeats it as a literal.")
 
 (defconst remoto--repo-delimiters
   '((?/ . files-default)
@@ -162,6 +179,213 @@ across different ghub and url.el versions."
              :false-object nil)
           (json-error nil))))))
 
+;;;; Fetch indicator
+
+(defcustom remoto-show-fetch-indicator t
+  "When non-nil, show a \"fetching\" indicator during GitHub requests.
+While completing a remoto path (e.g. with \\[find-file]) or at the
+`remoto-browse' prompt, it is drawn as minibuffer text, so it works with
+any completion UI (vertico, icomplete, default, ...).  A fetch that
+blocks with no such prompt up, as when the chosen path opens, shows it
+in the echo area instead."
+  :type 'boolean
+  :group 'remoto)
+
+(defvar remoto--inflight-count 0
+  "Number of API requests the minibuffer overlay stands for.
+Every async request of the completion counts, and so does a blocking
+fetch that runs while a remoto prompt is up.")
+
+(defvar remoto--status-overlay nil
+  "Overlay showing the in-flight indicator in the active minibuffer.")
+
+(defconst remoto--fetch-indicator-text
+  (propertize "[fetching...]" 'face 'shadow)
+  "Shadowed label shown by the fetch indicator in both contexts.
+Reused by the minibuffer overlay and the echo-area message so the two
+read identically.")
+
+(defun remoto--clear-status ()
+  "Remove the in-flight fetch indicator overlay, if any."
+  (when (overlayp remoto--status-overlay)
+    (delete-overlay remoto--status-overlay))
+  (setq remoto--status-overlay nil))
+
+(defun remoto--render-status (buffer)
+  "Draw or reposition the fetch indicator overlay at the end of BUFFER.
+The after-string carries a `cursor' text property so the editing
+cursor stays put instead of jumping past the indicator: without it,
+an after-string at point makes Emacs draw the cursor after the
+string."
+  (with-current-buffer buffer
+    (unless (and (overlayp remoto--status-overlay)
+                 (eq (overlay-buffer remoto--status-overlay) buffer))
+      (remoto--clear-status)
+      (setq remoto--status-overlay
+            (make-overlay (point-max) (point-max) nil t t)))
+    (move-overlay remoto--status-overlay (point-max) (point-max))
+    (overlay-put remoto--status-overlay 'priority 1000)
+    (let ((indicator (concat "  " remoto--fetch-indicator-text)))
+      (put-text-property 0 1 'cursor t indicator)
+      (overlay-put remoto--status-overlay 'after-string indicator))))
+
+(defun remoto--completion-minibuffer ()
+  "Return the active minibuffer when it is completing for remoto, else nil.
+That is a file name inside a remoto path, with either prefix and possibly
+behind a shadowed directory (\"~/x//gh:o/\") the way `read-file-name'
+reads it, or the `remoto-browse' prompt, whose collection is
+`remoto--repo-completion-table'."
+  (when-let* ((win (active-minibuffer-window))
+              (buf (window-buffer win)))
+    (with-current-buffer buf
+      (and (or (eq minibuffer-completion-table #'remoto--repo-completion-table)
+               (string-match-p remoto--handler-regexp
+                               (condition-case nil
+                                   (substitute-in-file-name
+                                    (minibuffer-contents-no-properties))
+                                 (error ""))))
+           buf))))
+
+(defun remoto--show-status ()
+  "Show the in-flight fetch indicator in the active remoto minibuffer.
+No-op unless `remoto-show-fetch-indicator' is non-nil and the active
+minibuffer is one that `remoto--completion-minibuffer' recognizes.
+Drawn as minibuffer text so it works with any completion UI."
+  (when remoto-show-fetch-indicator
+    (when-let* ((buf (remoto--completion-minibuffer)))
+      (remoto--render-status buf))))
+
+(defun remoto--inflight-inc ()
+  "Register a new in-flight async request and show the indicator."
+  (setq remoto--inflight-count (1+ remoto--inflight-count))
+  (remoto--show-status))
+
+(defun remoto--inflight-dec ()
+  "Mark one in-flight async request as finished.
+Clear the indicator once no requests remain."
+  (setq remoto--inflight-count (max 0 (1- remoto--inflight-count)))
+  (when (zerop remoto--inflight-count)
+    (remoto--clear-status)))
+
+(defun remoto--minibuffer-exit-cleanup ()
+  "Reset in-flight indicator state when a minibuffer exits."
+  (remoto--clear-status)
+  (setq remoto--inflight-count 0))
+
+(defvar remoto--sync-fetch-depth 0
+  "Nesting depth of `remoto--with-fetch-indicator' bodies.
+Only the outermost body draws and clears the indicator, so a command
+wrapped as a whole and the API calls inside it draw it once.")
+
+(defvar remoto--sync-fetch-overlay nil
+  "Non-nil while the outermost blocking fetch is drawn as the minibuffer overlay.
+Decides which of the two indicators the end of that fetch clears.")
+
+(defun remoto--sync-fetch-begin ()
+  "Draw the indicator for the blocking fetch about to begin.
+In a remoto completion minibuffer that is the overlay of the async
+fetches, painted at once because nothing redisplays while the fetch
+blocks; anywhere else it is an echo-area message, which the echo area
+shows at once."
+  (setq remoto--sync-fetch-depth (1+ remoto--sync-fetch-depth))
+  (when (= remoto--sync-fetch-depth 1)
+    (setq remoto--sync-fetch-overlay (and (remoto--completion-minibuffer) t))
+    (if remoto--sync-fetch-overlay
+        (progn (remoto--inflight-inc)
+               (redisplay))
+      (let ((message-log-max nil))
+        (message "Remoto %s" remoto--fetch-indicator-text)))))
+
+(defun remoto--sync-fetch-end ()
+  "Clear the indicator once the outermost blocking fetch is over.
+A message that something else put up meanwhile is left alone."
+  (setq remoto--sync-fetch-depth (max 0 (1- remoto--sync-fetch-depth)))
+  (when (zerop remoto--sync-fetch-depth)
+    (if remoto--sync-fetch-overlay
+        (remoto--inflight-dec)
+      (when (equal (current-message)
+                   (format "Remoto %s" remoto--fetch-indicator-text))
+        (let ((message-log-max nil))
+          (message nil))))
+    (setq remoto--sync-fetch-overlay nil)))
+
+(defmacro remoto--with-fetch-indicator (&rest body)
+  "Run BODY, a blocking GitHub round-trip, with the fetch indicator up.
+Every synchronous API call goes through this, so `remoto-browse' and a
+path at `find-file' or `dired' show the same thing: the minibuffer
+overlay while completing, the echo area once the prompt is gone.
+Honors `remoto-show-fetch-indicator' and does nothing in batch, where
+there is no display.  Returns BODY's value."
+  (declare (indent 0) (debug t))
+  `(if (or noninteractive (not remoto-show-fetch-indicator))
+       (progn ,@body)
+     (remoto--sync-fetch-begin)
+     (unwind-protect
+         (progn ,@body)
+       (remoto--sync-fetch-end))))
+
+(cl-defstruct (remoto--request (:constructor remoto--request-create))
+  "A GitHub request started under `while-no-input'."
+  (status 'pending)
+  buffer
+  value)
+
+(defvar remoto--pending-requests (make-hash-table :test 'equal)
+  "Requests started under `while-no-input', keyed by (RESOURCE . AUTH).
+Such a request outlives the completion call that started it: the reply
+lands in its `remoto--request', and the next call for the same key
+waits on that request or reads the landed reply instead of asking
+GitHub again.  A failed request leaves the table, so the next call
+retries.")
+
+(defun remoto--request-condition (err resource)
+  "Turn ERR, as ghub hands it to an errorback, into the condition ghub signals.
+RESOURCE names the request in the condition data."
+  (pcase err
+    (`(error http ,code . ,rest)
+     (list 'ghub-http-error code (nth 2 (assq code url-http-codes))
+           (concat "https://api.github.com" resource) (car rest)))
+    (`(error . ,data) (cons 'ghub-error data))
+    (_ err)))
+
+(defun remoto--request-start (key resource auth)
+  "Start a callback request for RESOURCE with AUTH and register it under KEY."
+  (let ((req (remoto--request-create)))
+    (setf (remoto--request-buffer req)
+          (ghub-get resource nil
+                    :auth auth
+                    :reader #'remoto--json-reader
+                    :host "api.github.com"
+                    :callback (lambda (value &rest _)
+                                (setf (remoto--request-value req) value
+                                      (remoto--request-status req) 'done))
+                    :errorback (lambda (err &rest _)
+                                 (remhash key remoto--pending-requests)
+                                 (setf (remoto--request-value req)
+                                       (remoto--request-condition err resource)
+                                       (remoto--request-status req) 'error))))
+    (puthash key req remoto--pending-requests)
+    req))
+
+(defun remoto--ghub-get-interruptible (resource auth)
+  "GET RESOURCE with AUTH through a callback, waiting in a way input can end.
+`url-retrieve-synchronously' leaves its buffer behind when `while-no-input'
+throws past it, and the reply nobody reads keeps the buffer alive; ghub
+kills the buffer of a callback request itself once the reply is handled.
+Return the value or signal the condition the synchronous call would."
+  (let* ((key (cons resource auth))
+         (req (or (gethash key remoto--pending-requests)
+                  (remoto--request-start key resource auth))))
+    (while (and (eq (remoto--request-status req) 'pending)
+                (buffer-live-p (remoto--request-buffer req)))
+      (accept-process-output nil 0.1))
+    (remhash key remoto--pending-requests)
+    (pcase (remoto--request-status req)
+      ('done (remoto--request-value req))
+      ('error (let ((err (remoto--request-value req)))
+                (signal (car err) (cdr err))))
+      (_ (error "Remoto: no reply for %s" resource)))))
+
 (defun remoto--ghub-get (resource auth endpoint)
   "Call `ghub-get' on RESOURCE with AUTH, translating errors.
 ENDPOINT is used in error messages for context.  Always passes
@@ -169,19 +393,26 @@ ENDPOINT is used in error messages for context.  Always passes
 resolution can resolve to github.com (HTML) instead of the
 JSON API endpoint."
   (condition-case err
-      (let ((inhibit-message (not ghub-debug)))
-        (ghub-get resource nil
-                 :auth auth
-                 :reader #'remoto--json-reader
-                 :host "api.github.com"))
-    (ghub-404
-     (user-error "Remoto: not found: %s" endpoint))
-    (ghub-403
-     (user-error "Remoto: access denied (rate limit or permissions): %s" endpoint))
-    (ghub-401
-     (user-error "Remoto: authentication failed; configure ghub token in auth-source"))
+      (remoto--with-fetch-indicator
+        (let ((inhibit-message (not ghub-debug)))
+          ;; `while-no-input' binds `throw-on-input'; only then can input
+          ;; abandon the call, and only then is the callback path needed.
+          (if throw-on-input
+              (remoto--ghub-get-interruptible resource auth)
+            (ghub-get resource nil
+                      :auth auth
+                      :reader #'remoto--json-reader
+                      :host "api.github.com"))))
+    ;; ghub signals every HTTP failure as (ghub-http-error CODE MESSAGE URL
+    ;; PAYLOAD); there are no per-status error symbols to match on.
     (ghub-http-error
-     (user-error "Remoto: API error: %s" (error-message-string err)))
+     (pcase (cadr err)
+       (404 (user-error "Remoto: not found: %s" endpoint))
+       (403 (user-error "Remoto: access denied (rate limit or permissions): %s"
+                        endpoint))
+       (401 (user-error "Remoto: authentication failed; \
+configure ghub token in auth-source"))
+       (_ (user-error "Remoto: API error: %s" (error-message-string err)))))
     (json-error
      (user-error "Remoto: could not parse API response for %s" endpoint))))
 
@@ -200,9 +431,13 @@ setup via unauthenticated fallback."
                      ;; Try our own auth-source search before ghub's
                      ;; resolution, which uses different host/user
                      ;; patterns and often fails on fresh sessions.
-                     (t (when-let* ((token (remoto--find-github-token)))
-                          (setq remoto--effective-auth token)
-                          token)))))
+                     (t (or (when-let* ((token (remoto--find-github-token)))
+                              (setq remoto--effective-auth token)
+                              token)
+                            ;; A lookup that fails inside sets the flag; this
+                            ;; call must go unauthenticated too, or ghub's own
+                            ;; lookup hits the same broken backend and errors.
+                            (and remoto--auth-failed 'none))))))
     (if (eq auth 'none)
         (remoto--ghub-get resource 'none endpoint)
       (condition-case err
@@ -1255,11 +1490,12 @@ Handles partial paths including # and files-default short forms."
   (if (string-prefix-p "/" path) (substring path 1) path))
 
 (defvar remoto--content-cache (make-hash-table :test 'equal)
-  "Cache: sha -> decoded file content string.")
+  "Cache: sha -> raw file bytes as a unibyte string.")
 
 (defun remoto--fetch-file-content (owner repo path ref)
-  "Fetch content of file at PATH in OWNER/REPO@REF.
-Uses Contents API for files under 1MB, Blobs API otherwise."
+  "Fetch the raw bytes of the file at PATH in OWNER/REPO@REF.
+Uses Contents API for files under 1MB, Blobs API otherwise.
+Return a unibyte string; the caller decides how to decode it."
   (let* ((endpoint (format "repos/%s/%s/contents/%s?ref=%s"
                            owner repo
                            (url-hexify-string path) ref))
@@ -1271,22 +1507,18 @@ Uses Contents API for files under 1MB, Blobs API otherwise."
                (content
                 (if (equal encoding "base64")
                     (let ((raw (alist-get 'content data)))
-                      (decode-coding-string
-                       (base64-decode-string (string-replace "\n" "" raw))
-                       'utf-8))
+                      (base64-decode-string (string-replace "\n" "" raw)))
                   ;; Too large - use Blobs API
                   (remoto--fetch-blob owner repo sha))))
           (puthash sha content remoto--content-cache)
           content))))
 
 (defun remoto--fetch-blob (owner repo sha)
-  "Fetch a git blob by SHA from OWNER/REPO.  Return decoded content."
+  "Fetch a git blob by SHA from OWNER/REPO.  Return its raw bytes."
   (let* ((endpoint (format "repos/%s/%s/git/blobs/%s" owner repo sha))
          (data (remoto--api endpoint))
          (raw (alist-get 'content data)))
-    (decode-coding-string
-     (base64-decode-string (string-replace "\n" "" raw))
-     'utf-8)))
+    (base64-decode-string (string-replace "\n" "" raw))))
 
 (defun remoto--handle-insert-file-contents
     (filename &optional visit beg end replace)
@@ -1295,21 +1527,40 @@ VISIT, BEG, END, REPLACE as per `insert-file-contents'."
   (let ((parsed (remoto--parse-path filename)))
     (unless parsed
       (error "Remoto: cannot parse path: %s" filename))
+    ;; `find-file-noselect' treats a `file-error' as a nonexistent file and
+    ;; otherwise keeps the buffer it created; the tree is cached, so the
+    ;; check costs no request.  Like the primitive and TRAMP, a visiting
+    ;; call still records the file name so the new-file path can go on.
+    (unless (remoto--tree-entry parsed)
+      (when visit
+        (setq buffer-file-name filename)
+        (set-buffer-modified-p nil))
+      (signal 'file-missing
+              (list "Opening input file" "No such file or directory" filename)))
     (let* ((resolved (remoto--resolve-ref parsed))
            (path (remoto--relative-path (remoto-path-path resolved)))
-           (content (remoto--fetch-file-content
-                     (remoto-path-owner resolved)
-                     (remoto-path-repo resolved)
-                     path
-                     (remoto-path-ref resolved))))
+           (bytes (remoto--fetch-file-content
+                   (remoto-path-owner resolved)
+                   (remoto-path-repo resolved)
+                   path
+                   (remoto-path-ref resolved))))
       (when replace (erase-buffer))
-      (let* ((text (if (and beg end)
-                       (substring content (1- beg) (1- end))
-                     content))
-             (len (length text)))
-        (let ((pt (point)))
-          (insert text)
-          (goto-char pt))
+      (let ((pt (point))
+            len)
+        ;; Insert the bytes and decode them in place, so the file gets the
+        ;; coding the primitive would pick from disk: cookies and
+        ;; `auto-coding-alist' by name, then detection.  A binary such as
+        ;; an image stays raw bytes under `no-conversion', which is how
+        ;; `image-mode' recovers the data from a remote buffer.  The
+        ;; primitive sets `buffer-file-coding-system' from the result once
+        ;; this handler returns the decoded length.
+        (save-restriction
+          (narrow-to-region pt pt)
+          (insert (if (or beg end) (substring bytes (or beg 0) end) bytes))
+          (decode-coding-inserted-region (point-min) (point-max) filename
+                                         visit beg end replace)
+          (setq len (- (point-max) (point-min))))
+        (goto-char pt)
         (when visit
           (setq buffer-file-name filename)
           (setq buffer-read-only t)
@@ -1367,9 +1618,9 @@ Use FULL-DIRECTORY-P to force directory-style output."
                         path
                         (remoto-path-ref resolved))))
     (let* ((ext (file-name-extension path t))
-           (temp (make-temp-file "remoto-" nil ext)))
-      (with-temp-file temp
-        (insert content))
+           (temp (make-temp-file "remoto-" nil ext))
+           (coding-system-for-write 'no-conversion))
+      (write-region content nil temp nil 0)
       temp)))
 
 (defun remoto--handle-make-nearby-temp-file (prefix &optional dir-flag suffix)
@@ -1466,7 +1717,8 @@ PRESERVE-PERMISSIONS are passed through to `copy-file'."
      input)
     (remoto-path-create
      :owner (match-string 1 input)
-     :repo (match-string 2 input)
+     :repo (let ((repo (match-string 2 input)))
+             (if (string-suffix-p ".git" repo) (substring repo 0 -4) repo))
      :ref (match-string 3 input)
      :path (concat "/" (or (match-string 4 input) ""))))
    ((string-match
@@ -1482,6 +1734,20 @@ PRESERVE-PERMISSIONS are passed through to `copy-file'."
      :repo (match-string 2 input)
      :ref nil
      :path "/"))))
+
+(defun remoto--parse-topic-url (input)
+  "Return (OWNER REPO NUMBER) for a pull request or issue web URL INPUT.
+Accepts the https and bare github.com forms.  Whatever follows the
+number is ignored: /files, /commits, an #issuecomment fragment, a query.
+Return nil for any other input."
+  (when (string-match (rx bos (? "/") (? "https://") "github.com/"
+                          (group (+ (not (in "/#?")))) "/"
+                          (group (+ (not (in "/#?")))) "/"
+                          (or "pull" "issues") "/"
+                          (group (+ digit))
+                          (or eos (in "/#?")))
+                      input)
+    (list (match-string 1 input) (match-string 2 input) (match-string 3 input))))
 
 (defun remoto--parse-git-remote (input)
   "Parse git remote INPUT into a `remoto-path' struct."
@@ -1592,6 +1858,10 @@ Derived from the path prefix, e.g. \"/github:...\" -> `github'."
     (let ((prefix (match-string 1 path)))
       (if (member prefix '("github" "gh")) 'github (intern prefix)))))
 
+(defun remoto--url-encode-path (path)
+  "Percent-encode each segment of PATH for a web URL, keeping the slashes."
+  (mapconcat #'url-hexify-string (split-string (or path "") "/") "/"))
+
 (defun remoto--forge-url (forge kind owner repo ref path &optional line-start line-end)
   "Build a FORGE web URL of KIND for OWNER/REPO at REF and PATH.
 KIND is one of `blob', `tree', `blame', `history', `raw'.  A nil REF
@@ -1616,7 +1886,7 @@ one."
     (format-spec template `((?o . ,owner)
                             (?r . ,repo)
                             (?R . ,(or ref "HEAD"))
-                            (?p . ,path)
+                            (?p . ,(remoto--url-encode-path path))
                             (?L . ,line)))))
 
 (defun remoto--forge-issue-url (forge owner repo number &optional kind)
@@ -1820,15 +2090,6 @@ avoids repeated fetches during a session."
   :type 'integer
   :group 'remoto)
 
-(defcustom remoto-show-fetch-indicator t
-  "When non-nil, show a \"fetching\" indicator during GitHub requests.
-While completing a `/github:' path (e.g. with \\[find-file]), it is drawn
-as minibuffer text, so it works with any completion UI (vertico,
-icomplete, default, ...).  During the synchronous fetches of
-`remoto-browse' it is shown in the echo area instead."
-  :type 'boolean
-  :group 'remoto)
-
 (defvar remoto--debounce-timer nil
   "Active idle timer for debounced async searches.")
 
@@ -1845,18 +2106,6 @@ on every `post-command-hook' cycle.")
 Incremented on each new debounce schedule; callbacks whose
 captured generation doesn't match the current value are stale
 and skip UI refresh (but still cache their results).")
-
-(defvar remoto--inflight-count 0
-  "Number of in-flight async API requests for completion.")
-
-(defvar remoto--status-overlay nil
-  "Overlay showing the in-flight indicator in the active minibuffer.")
-
-(defconst remoto--fetch-indicator-text
-  (propertize "[fetching...]" 'face 'shadow)
-  "Shadowed label shown by the fetch indicator in both contexts.
-Reused by the minibuffer overlay (completion) and the echo-area
-message (`remoto-browse') so the two flows read identically.")
 
 (defun remoto--search-cache-get (key &optional ttl)
   "Return cached results for KEY if not expired.
@@ -1877,80 +2126,6 @@ queries that returned zero results."
   "Store RESULTS for KEY with current timestamp."
   (puthash key (cons (float-time) results) remoto--search-cache)
   results)
-
-(defun remoto--clear-status ()
-  "Remove the in-flight fetch indicator overlay, if any."
-  (when (overlayp remoto--status-overlay)
-    (delete-overlay remoto--status-overlay))
-  (setq remoto--status-overlay nil))
-
-(defun remoto--render-status (buffer)
-  "Draw or reposition the fetch indicator overlay at the end of BUFFER.
-The after-string carries a `cursor' text property so the editing
-cursor stays put instead of jumping past the indicator: without it,
-an after-string at point makes Emacs draw the cursor after the
-string."
-  (with-current-buffer buffer
-    (unless (and (overlayp remoto--status-overlay)
-                 (eq (overlay-buffer remoto--status-overlay) buffer))
-      (remoto--clear-status)
-      (setq remoto--status-overlay
-            (make-overlay (point-max) (point-max) nil t t)))
-    (move-overlay remoto--status-overlay (point-max) (point-max))
-    (overlay-put remoto--status-overlay 'priority 1000)
-    (let ((indicator (concat "  " remoto--fetch-indicator-text)))
-      (put-text-property 0 1 'cursor t indicator)
-      (overlay-put remoto--status-overlay 'after-string indicator))))
-
-(defun remoto--show-status ()
-  "Show the in-flight fetch indicator in the active remoto minibuffer.
-No-op unless `remoto-show-fetch-indicator' is non-nil and the active
-minibuffer is a remoto completion: either editing a /github: path
-\(file-name completion) or running `remoto-browse' (whose collection
-is `remoto--repo-completion-table').  Drawn as minibuffer text so it
-works with any completion UI."
-  (when remoto-show-fetch-indicator
-    (when-let* ((win (active-minibuffer-window))
-                (buf (window-buffer win)))
-      (when (with-current-buffer buf
-              (or (string-prefix-p "/github:" (minibuffer-contents-no-properties))
-                  (eq minibuffer-completion-table #'remoto--repo-completion-table)))
-        (remoto--render-status buf)))))
-
-(defun remoto--inflight-inc ()
-  "Register a new in-flight async request and show the indicator."
-  (setq remoto--inflight-count (1+ remoto--inflight-count))
-  (remoto--show-status))
-
-(defun remoto--inflight-dec ()
-  "Mark one in-flight async request as finished.
-Clear the indicator once no requests remain."
-  (setq remoto--inflight-count (max 0 (1- remoto--inflight-count)))
-  (when (zerop remoto--inflight-count)
-    (remoto--clear-status)))
-
-(defun remoto--minibuffer-exit-cleanup ()
-  "Reset in-flight indicator state when a minibuffer exits."
-  (remoto--clear-status)
-  (setq remoto--inflight-count 0))
-
-(defmacro remoto--with-fetch-indicator (&rest body)
-  "Run BODY showing a synchronous fetch indicator in the echo area.
-For commands like `remoto-browse' whose GitHub round-trips block and
-run with no active minibuffer to host the completion overlay.  Honors
-`remoto-show-fetch-indicator'; the forced redisplay paints the label
-before the blocking call, and the echo area is cleared afterwards.
-Returns BODY's value."
-  (declare (indent 0) (debug t))
-  `(if (not remoto-show-fetch-indicator)
-       (progn ,@body)
-     (let ((message-log-max nil))
-       (message "Remoto %s" remoto--fetch-indicator-text))
-     (redisplay t)
-     (unwind-protect
-         (progn ,@body)
-       (let ((message-log-max nil))
-         (message nil)))))
 
 (defun remoto--api-async (endpoint callback)
   "Call GitHub REST API ENDPOINT asynchronously via ghub.
@@ -2725,8 +2900,16 @@ INPUT can be any GitHub URL, git remote URL, or owner/repo shorthand.
 Supports owner/repo#NUM to view issues/PRs and owner/repo@ref for
 specific branches/tags.
 With interactive use, provides search completion - type 3+ characters
-to search GitHub repositories."
-  (interactive (list (remoto--read-repo)))
+to search GitHub repositories.
+Turns on `global-remoto-mode' when it is off: the buffers this command
+opens need the file-name handler for as long as they live."
+  (interactive (progn (remoto--ensure-global-mode)
+                      (list (remoto--read-repo))))
+  (remoto--ensure-global-mode)
+  ;; A pull request or issue web URL is the topic, not the repository root
+  ;; the URL parser would make of it.
+  (when-let* ((topic (remoto--parse-topic-url input)))
+    (setq input (apply #'format "%s/%s#%s" topic)))
   (remoto--with-fetch-indicator
     (cond
      ;; Issue/PR mode: owner/repo#NUM
@@ -2817,8 +3000,9 @@ Returns a `remoto-path' struct or nil."
 
 (defun remoto--maybe-rewrite (input)
   "If INPUT is a GitHub URL/shorthand, return canonical remoto path.
-Also handles partial canonical paths like /github:OWNER/REPO.
-Otherwise return INPUT unchanged."
+Also handles partial canonical paths like /github:OWNER/REPO and the
+/gh: shorthand prefix.  Otherwise return INPUT unchanged."
+  (setq input (remoto--normalize-shorthand input))
   (cond
    ;; Already a full canonical path
    ((remoto--parse-path input) input)
@@ -2866,10 +3050,13 @@ Otherwise return INPUT unchanged."
    (t input)))
 
 (defun remoto--dired-around-a (orig-fn dir-or-list &rest args)
-  "Rewrite GitHub URLs to canonical remoto paths for Dired.
+  "Rewrite GitHub URLs and short remoto paths to canonical paths for Dired.
 Call ORIG-FN with DIR-OR-LIST and ARGS after any rewrite."
-  (if-let* ((dir (if (consp dir-or-list) (car dir-or-list) dir-or-list))
-            ((remoto--github-input-p dir)))
+  (if-let* ((raw (if (consp dir-or-list) (car dir-or-list) dir-or-list))
+            ((stringp raw))
+            (dir (remoto--normalize-shorthand raw))
+            ((or (remoto--github-input-p dir)
+                 (string-prefix-p "/github:" dir))))
       (let ((canonical (remoto--maybe-rewrite dir)))
         (apply orig-fn
                (if (consp dir-or-list)
@@ -2882,6 +3069,11 @@ Call ORIG-FN with DIR-OR-LIST and ARGS after any rewrite."
   "Rewrite GitHub URLs to canonical remoto paths for `find-file'.
 Intercepts #NUM patterns to display issues instead of file operations.
 Call ORIG-FN with FILENAME and ARGS after any rewrite."
+  (setq filename (remoto--normalize-shorthand filename))
+  ;; A pull request or issue web URL is the topic, not the repository root
+  ;; the URL parser would make of it.
+  (when-let* ((topic (remoto--parse-topic-url filename)))
+    (setq filename (apply #'format "/github:%s/%s#%s" topic)))
   ;; Check for #NUM BEFORE rewrite (rewrite would mangle the # delimiter)
   (if (string-match (rx "/github:" (+ (not (in "/@#"))) "/" (+ (not (in "/@#")))
                         (group "#") (group (+ digit)) eos)
@@ -2892,11 +3084,6 @@ Call ORIG-FN with FILENAME and ARGS after any rewrite."
          (match-string 2 filename)
          (substring filename 0 (match-beginning 1))))
     (apply orig-fn (remoto--maybe-rewrite filename) args)))
-
-(unless (advice-member-p #'remoto--dired-around-a 'dired)
-  (advice-add 'dired :around #'remoto--dired-around-a))
-(unless (advice-member-p #'remoto--find-file-around-a 'find-file-noselect)
-  (advice-add 'find-file-noselect :around #'remoto--find-file-around-a))
 
 ;;;; Eager auth warm-up
 
@@ -2914,8 +3101,20 @@ hosts (api.github.com vs github.com) and package suffixes (^forge,
         (dolist (host hosts)
           (dolist (pkg packages)
             (let* ((user (if pkg (format "%s^%s" username pkg) username))
-                   (results (ignore-errors
-                              (auth-source-search :host host :user user :max 1)))
+                   (results (condition-case err
+                                (auth-source-search :host host :user user :max 1)
+                              ;; A broken backend (say, a .authinfo.gpg that
+                              ;; does not decrypt) fails the same way for
+                              ;; every combination and for every later API
+                              ;; call, which would repeat this lookup.  Report
+                              ;; it once, go unauthenticated, and leave the
+                              ;; retry to `remoto-reset-auth'.
+                              (error
+                               (setq remoto--auth-failed t)
+                               (message "Remoto: auth-source lookup failed (%s); \
+using unauthenticated access until M-x remoto-reset-auth"
+                                        (error-message-string err))
+                               (throw 'found nil))))
                    (secret (plist-get (car results) :secret))
                    (token (if (functionp secret) (funcall secret) secret)))
               (when (and token (not (string-empty-p token)))
@@ -2948,27 +3147,16 @@ using unauthenticated access"
       ;; No token found yet - don't set auth-failed so remoto--api
       ;; can still try ghub's own auth-source resolution on demand.
       ;; The warm-up is opportunistic; failing here should not lock
-      ;; out the session permanently.
-      (message "Remoto: no token found during warm-up; \
-will try ghub auth on first API call"))))
+      ;; out the session permanently.  A backend failure inside the
+      ;; lookup has already set auth-failed and said so.
+      (unless remoto--auth-failed
+        (message "Remoto: no token found during warm-up; \
+will try ghub auth on first API call")))))
 
-(run-with-idle-timer 2 nil #'remoto--warm-auth)
-
-;;;; Handler registration
-
-(defconst remoto--handler-regexp
-  (rx bos "/" (or "github" "gh") ":")
-  "Regexp matching remoto file paths.
-Matches the canonical /github: prefix and its /gh: shorthand alias.")
-
-(unless (equal (cdr (assoc remoto--handler-regexp file-name-handler-alist))
-               #'remoto-file-name-handler)
-  (push (cons remoto--handler-regexp #'remoto-file-name-handler)
-        file-name-handler-alist))
-
-;; Clear the fetch indicator and reset in-flight state whenever a
-;; minibuffer exits.  `add-hook' is idempotent, so reloading is safe.
-(add-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
+(defvar remoto--warm-auth-timer nil
+  "Pending idle timer for `remoto--warm-auth', or nil.
+Held so turning `global-remoto-mode' off before the timer fires can
+cancel it.")
 
 ;;;; Minor mode
 
@@ -3006,15 +3194,16 @@ or directory shown in the current buffer.  The commands work the same in
 file buffers and in Dired, and adapt to the forge behind the path (only
 GitHub today, but designed for more).
 
-`remoto-mode' is enabled automatically when visiting a remoto path.  Its
-keymap is empty by default; the commands are grouped in the variable
-`remoto-command-map', which you can bind to a prefix of your choosing."
+While `global-remoto-mode' is on, `remoto-mode' is enabled automatically
+when visiting a remoto path.  Its keymap is empty by default; the
+commands are grouped in the variable `remoto-command-map', which you can
+bind to a prefix of your choosing."
   :lighter " Remoto"
   :keymap remoto-mode-map)
 
 (defun remoto--maybe-enable-mode ()
   "Enable `remoto-mode' when the current buffer is a remoto buffer.
-Intended for `find-file-hook' and `dired-mode-hook'."
+`global-remoto-mode' runs it from `find-file-hook' and `dired-mode-hook'."
   (let ((file (or buffer-file-name
                   (and (derived-mode-p 'dired-mode)
                        (if (listp dired-directory)
@@ -3023,9 +3212,6 @@ Intended for `find-file-hook' and `dired-mode-hook'."
     (when (and (stringp file)
                (string-match-p remoto--handler-regexp file))
       (remoto-mode 1))))
-
-(add-hook 'find-file-hook #'remoto--maybe-enable-mode)
-(add-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
 
 (defun remoto--get-prop (candidate prop)
   "Get text property PROP from CANDIDATE.
@@ -3086,7 +3272,11 @@ Provides group-function and affixation-function for @ and # modes."
                                          (if is-pr "PR " "   ")
                                          (format "%s [%s]" title state))))
                                candidates)))))
+      ;; The candidates come pre-sorted (pull requests first, newest first);
+      ;; without these two entries the UI re-sorts them by length or name.
       `((category . remoto-issue)
+        (display-sort-function . identity)
+        (cycle-sort-function . identity)
         (group-function . ,group-fn)
         (affixation-function . ,affix-fn))))
    ;; Branches/tags mode: /github:OWNER/REPO@
@@ -3164,8 +3354,92 @@ Args: ORIG, STRING, PRED, ACTION."
                                       (assq-delete-all 'category (copy-alist base-alist)))))
           (or base (cons 'metadata nil)))))))
 
-(advice-add 'read-file-name-internal :around
-            #'remoto--read-file-name-internal-a)
+;;;; Global mode
+
+(defun remoto--drop-autoload-handler ()
+  "Remove the bootstrap entry of the autoloads from `file-name-handler-alist'."
+  (setq file-name-handler-alist
+        (rassq-delete-all #'remoto-autoload-file-name-handler
+                          file-name-handler-alist)))
+
+(defun remoto--install ()
+  "Install the handler, the advice, the hooks and the auth warm-up timer.
+Each step is idempotent, so a second call while on is a no-op."
+  ;; The real handler takes over from the bootstrap entry; left behind, that
+  ;; entry would catch the operations the real handler passes down.
+  (remoto--drop-autoload-handler)
+  (unless (equal (cdr (assoc remoto--handler-regexp file-name-handler-alist))
+                 #'remoto-file-name-handler)
+    (push (cons remoto--handler-regexp #'remoto-file-name-handler)
+          file-name-handler-alist))
+  (advice-add 'dired :around #'remoto--dired-around-a)
+  (advice-add 'find-file-noselect :around #'remoto--find-file-around-a)
+  (advice-add 'read-file-name-internal :around
+              #'remoto--read-file-name-internal-a)
+  (add-hook 'find-file-hook #'remoto--maybe-enable-mode)
+  (add-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
+  ;; Clear the fetch indicator and reset in-flight state whenever a
+  ;; minibuffer exits.
+  (add-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
+  (unless (timerp remoto--warm-auth-timer)
+    (setq remoto--warm-auth-timer
+          (run-with-idle-timer 2 nil #'remoto--warm-auth))))
+
+(defun remoto--uninstall ()
+  "Remove the handler, the advice, the hooks and the auth warm-up timer."
+  (setq file-name-handler-alist
+        (assoc-delete-all remoto--handler-regexp file-name-handler-alist))
+  (advice-remove 'dired #'remoto--dired-around-a)
+  (advice-remove 'find-file-noselect #'remoto--find-file-around-a)
+  (advice-remove 'read-file-name-internal #'remoto--read-file-name-internal-a)
+  (remove-hook 'find-file-hook #'remoto--maybe-enable-mode)
+  (remove-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
+  (remove-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
+  (when (timerp remoto--warm-auth-timer)
+    (cancel-timer remoto--warm-auth-timer))
+  (setq remoto--warm-auth-timer nil))
+
+;;;###autoload
+(define-minor-mode global-remoto-mode
+  "Toggle remoto's virtual filesystem for GitHub repositories.
+
+When on, `/github:OWNER/REPO...' and `/gh:...' paths work in `find-file',
+`dired', and every other file operation, GitHub URLs typed at those
+prompts are rewritten to remoto paths, `find-file' completion inside a
+remoto path shows remoto's annotations, `remoto-mode' turns on in remoto
+buffers, and a GitHub token is looked up once Emacs is idle.  When off,
+all of that is removed again.
+
+Loading remoto does not turn this mode on.  Enable it in your init file,
+or let the first use do it: `remoto-browse', the Embark open actions,
+and a `/github:' or `/gh:' path at any file prompt all turn it on."
+  :global t
+  :group 'remoto
+  (if global-remoto-mode
+      (remoto--install)
+    (remoto--uninstall)))
+
+(defun remoto--ensure-global-mode ()
+  "Turn on `global-remoto-mode' when it is off, and say so.
+For remoto's own entry points: the buffers they open need the
+file-name handler for as long as they live, so the mode has to stay on."
+  (unless global-remoto-mode
+    (global-remoto-mode 1)
+    (message "Remoto: `global-remoto-mode' enabled")))
+
+;;;###autoload
+(defun remoto-autoload-file-name-handler (operation &rest args)
+  "Turn on `global-remoto-mode' for the first remoto path, then run OPERATION.
+ARGS are the arguments of OPERATION.  The package autoloads register
+this handler in `file-name-handler-alist', so a `/github:' or `/gh:'
+path typed at a file prompt works before remoto is loaded, the way a
+remote path loads TRAMP.  Calling it loads remoto; it then leaves the
+alist for good, and `remoto--install' puts the real handler in front."
+  (remoto--drop-autoload-handler)
+  (remoto--ensure-global-mode)
+  (apply operation args))
+
+;;;###autoload (add-to-list 'file-name-handler-alist '("\\`/\\(?:github\\|gh\\):" . remoto-autoload-file-name-handler))
 
 ;;;; Issue display (see remoto-topic.el for full implementation)
 
@@ -3185,15 +3459,12 @@ Adds the package directory to `load-path' if needed."
 ;;;; Unload
 
 (defun remoto-unload-function ()
-  "Remove handler and advice installed by remoto."
-  (setq file-name-handler-alist
-        (assoc-delete-all remoto--handler-regexp file-name-handler-alist))
-  (advice-remove 'dired #'remoto--dired-around-a)
-  (advice-remove 'find-file-noselect #'remoto--find-file-around-a)
-  (advice-remove 'read-file-name-internal #'remoto--read-file-name-internal-a)
-  (remove-hook 'find-file-hook #'remoto--maybe-enable-mode)
-  (remove-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
-  (remove-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
+  "Turn `global-remoto-mode' off and drop the caches.
+The bootstrap entry of the autoloads goes too: it is still there when
+remoto was loaded some other way and the mode never turned on."
+  (when global-remoto-mode
+    (global-remoto-mode -1))
+  (remoto--drop-autoload-handler)
   (clrhash remoto--tree-cache)
   (clrhash remoto--default-branch-cache)
   (clrhash remoto--branches-cache)
@@ -3204,6 +3475,7 @@ Adds the package directory to `load-path' if needed."
   (clrhash remoto--issues-cache)
   (clrhash remoto--file-commits-cache)
   (clrhash remoto--dir-contents-cache)
+  (clrhash remoto--pending-requests)
   nil)
 
 (provide 'remoto)
