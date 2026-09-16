@@ -365,6 +365,23 @@
     (remoto-test-with-cache
       (expect (file-exists-p "/github:testowner/testrepo@main:/nope.txt") :not :to-be-truthy)))
 
+  (it "file-exists-p on a repository root at a ref fetches no tree"
+    ;; Completion asks this of every candidate at the @ level; a recursive
+    ;; tree per ref is seconds of fetching on a large repository.
+    (let ((remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (spy-on 'remoto--api)
+      (expect (file-exists-p "/github:o/r@v1.2.3:/") :to-be t)
+      (expect (file-exists-p "/github:o/r@v1.2.3:") :to-be t)
+      (expect 'remoto--api :not :to-have-been-called)))
+
+  (it "file-exists-p on a file inside the repository still consults the tree"
+    (remoto-test-with-cache
+      (spy-on 'remoto--tree-entry :and-call-through)
+      (expect (file-exists-p "/github:testowner/testrepo@main:/src/main.el")
+              :to-be t)
+      (expect 'remoto--tree-entry :to-have-been-called)))
+
   (it "file-directory-p returns t for directories"
     (remoto-test-with-cache
       (expect (file-directory-p "/github:testowner/testrepo@main:/src") :to-be-truthy)))
@@ -385,6 +402,35 @@
     (remoto-test-with-cache
       (expect (file-remote-p "/github:testowner/testrepo@main:/README.md")
               :to-equal "/github:testowner/testrepo@main:")))
+
+  (it "file-remote-p with CONNECTED answers for a repo already reached"
+    (remoto-test-with-cache
+      (expect (file-remote-p "/github:testowner/testrepo@main:/README.md" nil t)
+              :to-equal "/github:testowner/testrepo@main:")))
+
+  (it "file-remote-p with CONNECTED answers nil for a repo never reached"
+    (remoto-test-with-cache
+      (spy-on 'remoto--api)
+      (expect (file-remote-p "/github:other/elsewhere@main:/README.md" nil t)
+              :to-be nil)
+      (expect 'remoto--api :not :to-have-been-called)))
+
+  (it "file-remote-p with CONNECTED `never' answers without any request"
+    (remoto-test-with-cache
+      (spy-on 'remoto--api)
+      (expect (file-remote-p "/github:other/elsewhere@main:/README.md" nil 'never)
+              :to-equal "/github:other/elsewhere@main:")
+      (expect 'remoto--api :not :to-have-been-called)))
+
+  (it "access-file returns nil for a file that exists"
+    (remoto-test-with-cache
+      (expect (access-file "/github:testowner/testrepo@main:/README.md" "Probe")
+              :to-be nil)))
+
+  (it "access-file signals file-missing for a path the tree does not hold"
+    (remoto-test-with-cache
+      (expect (access-file "/github:testowner/testrepo@main:/nope.txt" "Probe")
+              :to-throw 'file-missing)))
 
   (it "file-attributes returns correct size"
     (remoto-test-with-cache
@@ -497,6 +543,38 @@
                       :to-equal "/github:testowner/testrepo@main:/nope.txt")
               (expect (seq-difference (buffer-list) before) :to-equal (list buf)))
           (kill-buffer buf))))))
+
+;;; recentf
+
+(describe "recentf keeps remoto paths"
+  ;; `recentf-keep-default-predicate' asks `file-remote-p' with CONNECTED
+  ;; first.  Answering it for a repository remoto has not reached would
+  ;; send it down `access-file', and a cleanup at startup would then cost
+  ;; a tree fetch per entry.
+  (before-all (require 'recentf))
+
+  (it "keeps a remoto path with a cold cache and asks GitHub nothing"
+    (let ((remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (spy-on 'remoto--api)
+      (expect (recentf-keep-default-predicate
+               "/github:testowner/testrepo@main:/README.md")
+              :to-be-truthy)
+      (expect 'remoto--api :not :to-have-been-called)))
+
+  (it "keeps a remoto path whose repository is already cached"
+    (remoto-test-with-cache
+      (spy-on 'remoto--api)
+      (expect (recentf-keep-default-predicate
+               "/github:testowner/testrepo@main:/README.md")
+              :to-be-truthy)
+      (expect 'remoto--api :not :to-have-been-called)))
+
+  (it "drops a cached repository's path that the tree does not hold"
+    (remoto-test-with-cache
+      (expect (recentf-keep-default-predicate
+               "/github:testowner/testrepo@main:/nope.txt")
+              :to-be nil))))
 
 ;;; Dired listing format
 
@@ -1631,6 +1709,23 @@ The test delivers the reply through `remoto-test--reply' when it decides."
               :to-equal '((name . "private")))
       (expect 'ghub-get :to-have-been-called-times 2)))
 
+  (it "keeps the token out of the pending-request key"
+    ;; The table is global and lives in backtraces and bug reports; it only
+    ;; has to tell two callers apart.
+    (let ((throw-on-input 'remoto-test-input)
+          (token "ghp_supersecrettoken"))
+      (remoto-test--ghub-answers-later)
+      (catch 'remoto-test-input
+        (run-at-time 0.01 nil (lambda () (throw 'remoto-test-input 'typed)))
+        (remoto--ghub-get "/repos/o/r" token "repos/o/r"))
+      (expect (hash-table-count remoto--pending-requests) :to-equal 1)
+      (expect (seq-find (lambda (key) (string-search token (format "%S" key)))
+                        (hash-table-keys remoto--pending-requests))
+              :to-be nil)
+      ;; ghub still gets the credential itself
+      (expect (plist-get (cddr (spy-calls-args-for 'ghub-get 0)) :auth)
+              :to-equal token)))
+
   (it "reports a failed reply like the synchronous call and forgets it"
     (let ((throw-on-input 'remoto-test-input))
       (remoto-test--ghub-answers-later)
@@ -2373,7 +2468,33 @@ using unauthenticated access until M-x remoto-reset-auth")
               (with-current-buffer buf
                 (expect major-mode :to-equal 'dired-mode)
                 (expect (buffer-string) :to-match "README\\.md")))
-          (kill-buffer buf))))))
+          (kill-buffer buf)))))
+
+  (it "canonicalizes the short forms it is given"
+    ;; The advice sits here rather than on `dired', so `dired',
+    ;; `dired-other-window' and `dired-other-frame' all get the rewrite.
+    (remoto-test-with-cache
+      (dolist (name '("/github:testowner/testrepo"
+                      "/github:testowner/testrepo/"
+                      "/gh:testowner/testrepo"))
+        (let ((buf (dired-noselect name)))
+          (unwind-protect
+              (with-current-buffer buf
+                (expect default-directory
+                        :to-equal "/github:testowner/testrepo@main:/")
+                (expect (buffer-string) :to-match "README\\.md"))
+            (kill-buffer buf))))))
+
+  (it "lists a short form the rewriting advice never saw"
+    ;; The first Dired of a session reaches the handler with the name the
+    ;; caller typed: `dired-noselect' throws away the result of the one
+    ;; operation the autoload bootstrap gets to rewrite.
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (remoto--handle-insert-directory
+         "/github:testowner/testrepo/" "-al" nil t)
+        (expect (buffer-string) :to-match "README\\.md")
+        (expect (buffer-string) :to-match "src")))))
 
 ;;; maybe-rewrite for partial canonical paths
 
@@ -4138,6 +4259,19 @@ three functions the indicator asks are answered by a temp buffer."
       (setq-local minibuffer-completion-table #'remoto--repo-completion-table)
       (expect (remoto--completion-minibuffer) :to-be (current-buffer))))
 
+  (it "recognizes an emptied prompt opened inside a remoto directory"
+    ;; `C-x C-f' in a remoto Dired, then `C-a C-k': the text is gone but
+    ;; `read-file-name' left its DIR in `default-directory', and completion
+    ;; still fetches from there.
+    (remoto-test-with-minibuffer-contents ""
+      (setq-local default-directory "/github:o/r@main:/")
+      (expect (remoto--completion-minibuffer) :to-be (current-buffer))))
+
+  (it "ignores an emptied prompt opened in a local directory"
+    (remoto-test-with-minibuffer-contents ""
+      (setq-local default-directory "/tmp/")
+      (expect (remoto--completion-minibuffer) :to-be nil)))
+
   (it "ignores a local file name"
     (remoto-test-with-minibuffer-contents "~/src/"
       (expect (remoto--completion-minibuffer) :to-be nil)))
@@ -5195,7 +5329,8 @@ of `completion-all-completions'; Vertico inserts a candidate as
     (global-remoto-mode 1)
     (expect (cdr (assoc remoto--handler-regexp file-name-handler-alist))
             :to-be 'remoto-file-name-handler)
-    (expect (advice-member-p #'remoto--dired-around-a 'dired) :to-be-truthy)
+    (expect (advice-member-p #'remoto--dired-around-a 'dired-noselect)
+            :to-be-truthy)
     (expect (advice-member-p #'remoto--find-file-around-a 'find-file-noselect)
             :to-be-truthy)
     (expect (advice-member-p #'remoto--read-file-name-internal-a
@@ -5212,7 +5347,8 @@ of `completion-all-completions'; Vertico inserts a candidate as
           (global-remoto-mode -1)
           (expect (assoc remoto--handler-regexp file-name-handler-alist)
                   :to-be nil)
-          (expect (advice-member-p #'remoto--dired-around-a 'dired) :to-be nil)
+          (expect (advice-member-p #'remoto--dired-around-a 'dired-noselect)
+                  :to-be nil)
           (expect (advice-member-p #'remoto--find-file-around-a 'find-file-noselect)
                   :to-be nil)
           (expect (advice-member-p #'remoto--read-file-name-internal-a
@@ -5442,6 +5578,87 @@ fails yields (:error ...), an unreadable child (:unreadable OUT ERR)."
                                             (equal m "Remoto: `global-remoto-mode' enabled"))
                                           messages))))
   "The first remoto path of a session, as a form for `remoto-test--fresh-session'.")
+
+(defconst remoto-test--fresh-api-stub
+  '(with-eval-after-load 'remoto
+     (advice-add 'remoto--api :override
+                 (lambda (endpoint)
+                   (pcase endpoint
+                     ("repos/o/r" '((default_branch . "main")))
+                     ("repos/o/r/git/trees/main?recursive=1"
+                      '((tree . (((path . "README.md") (type . "blob")
+                                  (size . 6) (sha . "aaa") (mode . "100644"))))))
+                     ("repos/o/r/contents/README.md?ref=main"
+                      (list (cons 'sha "aaa")
+                            (cons 'encoding "base64")
+                            (cons 'content (base64-encode-string "hello\n"))))
+                     (_ nil)))))
+  "Answer the API for o/r, installed before remoto's first request.")
+
+(defun remoto-test--fresh-first-call-form (call)
+  "Build a form that runs CALL as the first remoto operation of a session.
+The result reports the visited buffer, so a first call can be compared
+with what the same call does once the mode is on."
+  `(progn
+     ,remoto-test--fresh-api-stub
+     (condition-case err
+         (let ((buf ,call))
+           (with-current-buffer buf
+             (list :name (buffer-name) :dir default-directory
+                   :mode major-mode :file buffer-file-name
+                   :listed (and (string-match-p "README\\.md" (buffer-string)) t))))
+       (error (list :error (car err)
+                    :message (error-message-string err)
+                    :buffers (seq-remove (lambda (n) (string-prefix-p " " n))
+                                         (mapcar #'buffer-name (buffer-list))))))))
+
+(describe "the first remoto call of a session"
+  ;; `remoto--install' adds its advice from inside the call that loads
+  ;; remoto, so that one call runs without it.  Every shape below has to
+  ;; land where it would land on the second call.
+  (it "opens a short repository form as the canonical root"
+    (remoto-test-with-autoloads file
+      (dolist (name '("/github:o/r" "/github:o/r/" "/gh:o/r"))
+        (let ((result (remoto-test--fresh-session
+                       file
+                       (remoto-test--fresh-first-call-form
+                        `(find-file-noselect ,name)))))
+          (expect (plist-get result :dir) :to-equal "/github:o/r@main:/")
+          (expect (plist-get result :mode) :to-be 'dired-mode)
+          (expect (plist-get result :listed) :to-be t)))))
+
+  (it "opens a short file form as the file, not as a directory"
+    (remoto-test-with-autoloads file
+      (let ((result (remoto-test--fresh-session
+                     file
+                     (remoto-test--fresh-first-call-form
+                      '(find-file-noselect "/github:o/r/README.md")))))
+        (expect (plist-get result :file) :to-equal "/github:o/r@main:/README.md")
+        (expect (plist-get result :mode) :not :to-be 'dired-mode))))
+
+  (it "lists the tree from every Dired entry point"
+    (remoto-test-with-autoloads file
+      (dolist (call '((dired-noselect "/github:o/r")
+                      (dired-noselect "/gh:o/r")
+                      (progn (dired "/github:o/r") (current-buffer))
+                      (dired-other-window "/gh:o/r")))
+        (let ((result (remoto-test--fresh-session
+                       file (remoto-test--fresh-first-call-form call))))
+          (expect (plist-get result :mode) :to-be 'dired-mode)
+          (expect (plist-get result :listed) :to-be t)))))
+
+  (it "says what a #NUM path is and leaves no buffer behind"
+    (remoto-test-with-autoloads file
+      (let ((result (remoto-test--fresh-session
+                     file
+                     (remoto-test--fresh-first-call-form
+                      '(find-file-noselect "/gh:o/r#31")))))
+        (expect (plist-get result :error) :to-be 'user-error)
+        (expect (plist-get result :message)
+                :to-match "is an issue or pull request")
+        (expect (seq-find (lambda (n) (string-match-p "31" n))
+                          (plist-get result :buffers))
+                :to-be nil)))))
 
 (describe "a fresh session"
   ;; The complaint this guards: with nothing in the init file, `C-x C-f

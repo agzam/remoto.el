@@ -234,7 +234,10 @@ string."
 That is a file name inside a remoto path, with either prefix and possibly
 behind a shadowed directory (\"~/x//gh:o/\") the way `read-file-name'
 reads it, or the `remoto-browse' prompt, whose collection is
-`remoto--repo-completion-table'."
+`remoto--repo-completion-table'.  A prompt opened inside a remoto
+directory counts even with nothing typed: `read-file-name' puts its DIR
+argument in the minibuffer's `default-directory', and completion keeps
+fetching from there after \\[move-beginning-of-line] \\[kill-line]."
   (when-let* ((win (active-minibuffer-window))
               (buf (window-buffer win)))
     (with-current-buffer buf
@@ -243,7 +246,9 @@ reads it, or the `remoto-browse' prompt, whose collection is
                                (condition-case nil
                                    (substitute-in-file-name
                                     (minibuffer-contents-no-properties))
-                                 (error ""))))
+                                 (error "")))
+               (string-match-p remoto--handler-regexp
+                               (or default-directory "")))
            buf))))
 
 (defun remoto--show-status ()
@@ -367,13 +372,20 @@ RESOURCE names the request in the condition data."
     (puthash key req remoto--pending-requests)
     req))
 
+(defun remoto--auth-key (auth)
+  "Return a stable identity for AUTH that is not the credential itself.
+`remoto--pending-requests' only has to tell two callers apart, and its
+keys are readable in a backtrace or a variable dump, so a token string
+goes in hashed.  A symbol such as `none' is no secret and stays as is."
+  (if (stringp auth) (secure-hash 'sha256 auth) auth))
+
 (defun remoto--ghub-get-interruptible (resource auth)
   "GET RESOURCE with AUTH through a callback, waiting in a way input can end.
 `url-retrieve-synchronously' leaves its buffer behind when `while-no-input'
 throws past it, and the reply nobody reads keeps the buffer alive; ghub
 kills the buffer of a callback request itself once the reply is handled.
 Return the value or signal the condition the synchronous call would."
-  (let* ((key (cons resource auth))
+  (let* ((key (cons resource (remoto--auth-key auth)))
          (req (or (gethash key remoto--pending-requests)
                   (remoto--request-start key resource auth))))
     (while (and (eq (remoto--request-status req) 'pending)
@@ -812,7 +824,23 @@ triggering variable `confirm-nonexistent-file-or-buffer' on RET."
    ;; Full canonical path - check tree
    (t
     (when-let* ((parsed (remoto--parse-path filename)))
-      (and (remoto--tree-entry parsed) t)))))
+      ;; The repository root at a ref is openable on its shape alone, the
+      ;; way /github:owner/repo/ above is.  Answering it from the tree
+      ;; would cost one recursive tree per ref, because completion asks
+      ;; this of every candidate it offers at the @ level.
+      (if (string-empty-p (remoto--tree-lookup-key (remoto-path-path parsed)))
+          t
+        (and (remoto--tree-entry parsed) t))))))
+
+(defun remoto--handle-access-file (filename string)
+  "Return nil when FILENAME can be read, else signal `file-missing'.
+STRING names the caller's purpose, as `access-file' documents.  Without
+this the operation falls through to the local primitive, which sees no
+such file and always signals, and `recentf' then drops every remoto
+path."
+  (unless (remoto--handle-file-exists-p filename)
+    (signal 'file-missing
+            (list string "No such file or directory" filename))))
 
 (defun remoto--handle-file-directory-p (filename)
   "Return t if FILENAME is a directory in the remote repo.
@@ -1316,11 +1344,31 @@ ignored since remoto paths always qualify."
   "Return FILENAME as-is - no symlink resolution for remote repos."
   filename)
 
-(defun remoto--handle-file-remote-p (filename &optional identification _connected)
+(defun remoto--reached-p (filename)
+  "Return non-nil when FILENAME's repository was already reached this session.
+A cached default branch or tree is as close as remoto comes to an open
+connection: it means GitHub answered for that repository without a new
+request."
+  (when-let* ((parsed (remoto--parse-path filename)))
+    (or (gethash (format "%s/%s"
+                         (remoto-path-owner parsed)
+                         (remoto-path-repo parsed))
+                 remoto--default-branch-cache)
+        (gethash (remoto--repo-key parsed) remoto--tree-cache))))
+
+(defun remoto--handle-file-remote-p (filename &optional identification connected)
   "Return remote identification for FILENAME.
 Use IDENTIFICATION to select which remote field to report.
+CONNECTED asks for an answer only while the repository is reachable
+without a request, which is what keeps `recentf' and `auto-revert' from
+making remoto fetch a tree just to classify a path.  The symbol `never'
+means the opposite - answer, but never open a connection - so it reads
+like a nil CONNECTED here, where no answer costs one.
 Handles partial paths for pre-repo completion."
-  (when (string-prefix-p "/github:" filename)
+  (when (and (string-prefix-p "/github:" filename)
+             (or (not connected)
+                 (eq connected 'never)
+                 (remoto--reached-p filename)))
     (if-let* ((parsed (remoto--parse-path filename))
               (prefix (remoto--file-name-prefix filename)))
         (pcase identification
@@ -1520,10 +1568,36 @@ Return a unibyte string; the caller decides how to decode it."
          (raw (alist-get 'content data)))
     (base64-decode-string (string-replace "\n" "" raw))))
 
+(defun remoto--topic-path (filename)
+  "Return (REPO-PATH . NUMBER) when FILENAME names an issue or pull request.
+The /github:OWNER/REPO#NUM shape belongs to `remoto-topic-display', not
+to any file operation, so both the `find-file' advice and the handler
+recognize it here."
+  (when (and (stringp filename)
+             (string-match (rx "/github:" (+ (not (in "/@#"))) "/"
+                               (+ (not (in "/@#")))
+                               (group "#") (group (+ digit)) eos)
+                           filename))
+    (cons (substring filename 0 (match-beginning 1))
+          (match-string 2 filename))))
+
 (defun remoto--handle-insert-file-contents
     (filename &optional visit beg end replace)
   "Insert contents of remote FILENAME into current buffer.
 VISIT, BEG, END, REPLACE as per `insert-file-contents'."
+  ;; Reached when the `find-file-noselect' advice did not run, which is
+  ;; the case for the very first remoto call of a session.  Say what the
+  ;; path is and take the buffer `find-file-noselect' made with it: that
+  ;; function has no unwind of its own, so the error would leave an empty
+  ;; buffer named after the number.  The emptiness test is what tells that
+  ;; buffer apart from a caller's own.
+  (when (remoto--topic-path filename)
+    (when (and visit (zerop (buffer-size)) (not buffer-file-name))
+      (set-buffer-modified-p nil)
+      (kill-buffer (current-buffer)))
+    (user-error
+     "Remoto: %s is an issue or pull request - open it with `find-file'"
+     filename))
   (let ((parsed (remoto--parse-path filename)))
     (unless parsed
       (error "Remoto: cannot parse path: %s" filename))
@@ -1591,8 +1665,12 @@ No leading spaces - Dired and dired-subtree add their own."
 (defun remoto--handle-insert-directory
     (filename _switches &optional _wildcard full-directory-p)
   "Insert a Dired-format listing for remote FILENAME.
-Use FULL-DIRECTORY-P to force directory-style output."
-  (when-let* ((parsed (remoto--parse-path filename))
+Use FULL-DIRECTORY-P to force directory-style output.
+A short form such as /github:OWNER/REPO/ is resolved here rather than
+left unparseable: `dired-noselect' discards the result of the one
+operation the autoload bootstrap can rewrite, so the first Dired of a
+session reaches this handler with the name the caller typed."
+  (when-let* ((parsed (remoto--parse-path (remoto--maybe-rewrite filename)))
               (entry (remoto--tree-entry parsed)))
     (cond
      ((or full-directory-p
@@ -3051,7 +3129,10 @@ Also handles partial canonical paths like /github:OWNER/REPO and the
 
 (defun remoto--dired-around-a (orig-fn dir-or-list &rest args)
   "Rewrite GitHub URLs and short remoto paths to canonical paths for Dired.
-Call ORIG-FN with DIR-OR-LIST and ARGS after any rewrite."
+Call ORIG-FN with DIR-OR-LIST and ARGS after any rewrite.
+Advises `dired-noselect' rather than `dired', because `dired',
+`dired-other-window' and `dired-other-frame' all go through it, and only
+a canonical name gives the buffer its canonical `default-directory'."
   (if-let* ((raw (if (consp dir-or-list) (car dir-or-list) dir-or-list))
             ((stringp raw))
             (dir (remoto--normalize-shorthand raw))
@@ -3075,14 +3156,10 @@ Call ORIG-FN with FILENAME and ARGS after any rewrite."
   (when-let* ((topic (remoto--parse-topic-url filename)))
     (setq filename (apply #'format "/github:%s/%s#%s" topic)))
   ;; Check for #NUM BEFORE rewrite (rewrite would mangle the # delimiter)
-  (if (string-match (rx "/github:" (+ (not (in "/@#"))) "/" (+ (not (in "/@#")))
-                        (group "#") (group (+ digit)) eos)
-                    filename)
+  (if-let* ((topic (remoto--topic-path filename)))
       (progn
         (remoto--require-topic)
-        (remoto-topic-display
-         (match-string 2 filename)
-         (substring filename 0 (match-beginning 1))))
+        (remoto-topic-display (cdr topic) (car topic)))
     (apply orig-fn (remoto--maybe-rewrite filename) args)))
 
 ;;;; Eager auth warm-up
@@ -3372,7 +3449,7 @@ Each step is idempotent, so a second call while on is a no-op."
                  #'remoto-file-name-handler)
     (push (cons remoto--handler-regexp #'remoto-file-name-handler)
           file-name-handler-alist))
-  (advice-add 'dired :around #'remoto--dired-around-a)
+  (advice-add 'dired-noselect :around #'remoto--dired-around-a)
   (advice-add 'find-file-noselect :around #'remoto--find-file-around-a)
   (advice-add 'read-file-name-internal :around
               #'remoto--read-file-name-internal-a)
@@ -3389,7 +3466,7 @@ Each step is idempotent, so a second call while on is a no-op."
   "Remove the handler, the advice, the hooks and the auth warm-up timer."
   (setq file-name-handler-alist
         (assoc-delete-all remoto--handler-regexp file-name-handler-alist))
-  (advice-remove 'dired #'remoto--dired-around-a)
+  (advice-remove 'dired-noselect #'remoto--dired-around-a)
   (advice-remove 'find-file-noselect #'remoto--find-file-around-a)
   (advice-remove 'read-file-name-internal #'remoto--read-file-name-internal-a)
   (remove-hook 'find-file-hook #'remoto--maybe-enable-mode)
@@ -3434,9 +3511,19 @@ ARGS are the arguments of OPERATION.  The package autoloads register
 this handler in `file-name-handler-alist', so a `/github:' or `/gh:'
 path typed at a file prompt works before remoto is loaded, the way a
 remote path loads TRAMP.  Calling it loads remoto; it then leaves the
-alist for good, and `remoto--install' puts the real handler in front."
+alist for good, and `remoto--install' puts the real handler in front.
+
+The call that brings remoto in runs without the advice `remoto--install'
+adds, because the advice arrives while that call is already under way.
+`expand-file-name' is what `find-file-noselect' asks first, and what it
+gets back is the name it visits, so canonicalizing here gives that one
+call the rewrite the advice would have given it.  A file prompt asks
+`substitute-in-file-name' first instead, and a prompt is still being
+typed into, so it is left alone."
   (remoto--drop-autoload-handler)
   (remoto--ensure-global-mode)
+  (when (and (eq operation 'expand-file-name) (stringp (car args)))
+    (setcar args (remoto--maybe-rewrite (car args))))
   (apply operation args))
 
 ;;;###autoload (add-to-list 'file-name-handler-alist '("\\`/\\(?:github\\|gh\\):" . remoto-autoload-file-name-handler))
