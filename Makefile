@@ -47,6 +47,7 @@ sandbox: $(ELPA_DIR)
 	--eval "(require 'remoto)" \
 	--eval "(require 'remoto-embark)" \
 	--eval "(remoto-embark-register)" \
+	--eval "(global-remoto-mode 1)" \
 	--eval "(global-set-key (kbd \"C-.\") #'embark-act)" \
 	--eval "(message \"remoto sandbox: M-x remoto-browse | C-x C-f /github:owner/repo | C-. embark-act\")"
 

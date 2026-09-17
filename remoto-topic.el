@@ -20,10 +20,6 @@
 
 (require 'remoto)
 
-(declare-function remoto--api "remoto" (endpoint &rest args))
-(declare-function remoto--fetch-issue "remoto" (owner repo number))
-(declare-function remoto--fetch-issue-comments "remoto" (owner repo number))
-
 ;;;; Customization
 
 (defgroup remoto-topic nil
