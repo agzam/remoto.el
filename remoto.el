@@ -197,37 +197,58 @@ Every async request of the completion counts, and so does a blocking
 fetch that runs while a remoto prompt is up.")
 
 (defvar remoto--status-overlay nil
-  "Overlay showing the in-flight indicator in the active minibuffer.")
+  "Overlay holding the fetch indicator slot in the active minibuffer.")
 
 (defconst remoto--fetch-indicator-text
-  (propertize "[fetching...]" 'face 'shadow)
-  "Shadowed label shown by the fetch indicator in both contexts.
-Reused by the minibuffer overlay and the echo-area message so the two
-read identically.")
+  (propertize "⟳" 'face 'shadow)
+  "Circle arrow shown by the fetch indicator in both contexts.
+Reused by the minibuffer slot and the echo-area message so the two read
+identically.  One character, because a word in the minibuffer scrolls
+the line as it comes and goes; a text character rather than an emoji,
+because a color glyph is taller than the line it sits in and ignores
+the `shadow' face.")
+
+(defconst remoto--fetch-indicator-blank
+  (make-string (string-width remoto--fetch-indicator-text) ?\s)
+  "What the indicator's slot holds between requests.")
 
 (defun remoto--clear-status ()
-  "Remove the in-flight fetch indicator overlay, if any."
+  "Remove the fetch indicator slot, if any."
   (when (overlayp remoto--status-overlay)
     (delete-overlay remoto--status-overlay))
   (setq remoto--status-overlay nil))
 
-(defun remoto--render-status (buffer)
-  "Draw or reposition the fetch indicator overlay at the end of BUFFER.
-The after-string carries a `cursor' text property so the editing
-cursor stays put instead of jumping past the indicator: without it,
-an after-string at point makes Emacs draw the cursor after the
-string."
+(defun remoto--render-status (buffer busy)
+  "Draw the fetch indicator slot in BUFFER, filled when BUSY.
+The slot sits between the prompt and the input, never after it.  Emacs
+draws the cursor after any string that follows point, and a completion
+UI that opens its candidate list there claims the `cursor' property for
+its own string - Vertico does - so an indicator after the input drags
+the cursor sideways on every request.  The blank keeps the slot's width
+between requests, so the input does not shift either."
   (with-current-buffer buffer
-    (unless (and (overlayp remoto--status-overlay)
-                 (eq (overlay-buffer remoto--status-overlay) buffer))
-      (remoto--clear-status)
-      (setq remoto--status-overlay
-            (make-overlay (point-max) (point-max) nil t t)))
-    (move-overlay remoto--status-overlay (point-max) (point-max))
-    (overlay-put remoto--status-overlay 'priority 1000)
-    (let ((indicator (concat "  " remoto--fetch-indicator-text)))
-      (put-text-property 0 1 'cursor t indicator)
-      (overlay-put remoto--status-overlay 'after-string indicator))))
+    (let ((pos (minibuffer-prompt-end)))
+      (unless (and (overlayp remoto--status-overlay)
+                   (eq (overlay-buffer remoto--status-overlay) buffer))
+        (remoto--clear-status)
+        (setq remoto--status-overlay (make-overlay pos pos)))
+      (move-overlay remoto--status-overlay pos pos)
+      (overlay-put remoto--status-overlay 'priority 1000)
+      (overlay-put remoto--status-overlay 'before-string
+                   (concat (if busy
+                               remoto--fetch-indicator-text
+                             remoto--fetch-indicator-blank)
+                           " ")))))
+
+(defun remoto--hide-status ()
+  "Blank the fetch indicator, keeping its slot while the prompt is up.
+A slot that came and went would shift the input left and right as
+requests come and go, which is what drawing it at all has to avoid."
+  (let ((buf (and (overlayp remoto--status-overlay)
+                  (overlay-buffer remoto--status-overlay))))
+    (if (and (buffer-live-p buf) (minibufferp buf))
+        (remoto--render-status buf nil)
+      (remoto--clear-status))))
 
 (defun remoto--completion-minibuffer ()
   "Return the active minibuffer when it is completing for remoto, else nil.
@@ -258,7 +279,7 @@ minibuffer is one that `remoto--completion-minibuffer' recognizes.
 Drawn as minibuffer text so it works with any completion UI."
   (when remoto-show-fetch-indicator
     (when-let* ((buf (remoto--completion-minibuffer)))
-      (remoto--render-status buf))))
+      (remoto--render-status buf t))))
 
 (defun remoto--inflight-inc ()
   "Register a new in-flight async request and show the indicator."
@@ -267,10 +288,10 @@ Drawn as minibuffer text so it works with any completion UI."
 
 (defun remoto--inflight-dec ()
   "Mark one in-flight async request as finished.
-Clear the indicator once no requests remain."
+Blank the indicator once no requests remain."
   (setq remoto--inflight-count (max 0 (1- remoto--inflight-count)))
   (when (zerop remoto--inflight-count)
-    (remoto--clear-status)))
+    (remoto--hide-status)))
 
 (defun remoto--minibuffer-exit-cleanup ()
   "Reset in-flight indicator state when a minibuffer exits."

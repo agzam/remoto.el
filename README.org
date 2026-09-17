@@ -79,7 +79,7 @@ The ~/github:~ prefix (~/gh:~ shorthand works too) enables multi-level completio
 /github:torvalds/linux#        -> issues + PRs
 #+end_example
 
-Each level shows annotations: repo descriptions, issue/PR titles and state, file commit messages, user/org type. Works with vanilla completion, Vertico, Corfu, etc. While a GitHub request is in flight, a ~[fetching...]~ label sits at the end of the minibuffer input, and once the path is chosen and opens, the same label sits in the echo area; ~remoto-browse~ shows the same two, and ~remoto-show-fetch-indicator~ turns both off.
+Each level shows annotations: repo descriptions, issue/PR titles and state, file commit messages, user/org type. Works with vanilla completion, Vertico, Corfu, etc. While a GitHub request is in flight, a ~⟳~ sits between the prompt and the path being typed, and once the path is chosen and opens, the same mark sits in the echo area; ~remoto-browse~ shows the same two, and ~remoto-show-fetch-indicator~ turns both off.
 
 Hitting RET on ~/github:owner/repo~ opens the default branch. ~/github:owner/repo#42~ opens an issue/PR display buffer.
 

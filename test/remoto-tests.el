@@ -4150,36 +4150,67 @@ Returns the full path after completion, or INPUT if no completion."
       (expect remoto--inflight-count :to-equal 1))))
 
 (describe "remoto fetch indicator overlay"
-  (it "renders the indicator at the end of the buffer"
+  (it "renders the indicator between the prompt and the input"
     (let ((remoto--status-overlay nil))
       (with-temp-buffer
         (insert "/github:torvalds/")
-        (remoto--render-status (current-buffer))
+        (remoto--render-status (current-buffer) t)
         (expect (overlayp remoto--status-overlay) :to-be-truthy)
+        (expect (overlay-start remoto--status-overlay)
+                :to-equal (minibuffer-prompt-end))
         (expect (substring-no-properties
-                 (overlay-get remoto--status-overlay 'after-string))
-                :to-equal "  [fetching...]")
+                 (overlay-get remoto--status-overlay 'before-string))
+                :to-equal "⟳ ")
         (remoto--clear-status)
         (expect remoto--status-overlay :to-be nil))))
 
-  (it "pins the cursor before the indicator so point does not jump"
+  (it "draws nothing after the input, where the cursor is"
+    ;; A string after point takes the cursor with it: Emacs draws the
+    ;; cursor after it, and a UI that opens its candidate list at point
+    ;; (Vertico) claims the `cursor' property for its own string, so the
+    ;; property cannot win it back.
     (let ((remoto--status-overlay nil))
       (with-temp-buffer
         (insert "/github:torvalds/")
-        (remoto--render-status (current-buffer))
-        (expect (get-text-property
-                 0 'cursor
-                 (overlay-get remoto--status-overlay 'after-string))
-                :to-be-truthy)
+        (remoto--render-status (current-buffer) t)
+        (expect (overlay-get remoto--status-overlay 'after-string) :to-be nil)
+        (expect (overlay-end remoto--status-overlay)
+                :to-be-less-than (point-max))
+        (remoto--clear-status))))
+
+  (it "holds the slot at the same width busy or idle, so nothing shifts"
+    (let ((remoto--status-overlay nil))
+      (with-temp-buffer
+        (insert "/github:torvalds/")
+        (remoto--render-status (current-buffer) t)
+        (let ((busy (overlay-get remoto--status-overlay 'before-string)))
+          (remoto--render-status (current-buffer) nil)
+          (let ((idle (overlay-get remoto--status-overlay 'before-string)))
+            (expect (string-width idle) :to-equal (string-width busy))
+            (expect (string-trim idle) :to-equal "")))
+        (remoto--clear-status))))
+
+  (it "keeps the blank slot while the prompt is up"
+    (let ((remoto--inflight-count 1)
+          (remoto--status-overlay nil))
+      (with-temp-buffer
+        (insert "/github:torvalds/")
+        (remoto--render-status (current-buffer) t)
+        (spy-on 'minibufferp :and-return-value t)
+        (remoto--inflight-dec)
+        (expect (overlayp remoto--status-overlay) :to-be-truthy)
+        (expect (string-trim
+                 (overlay-get remoto--status-overlay 'before-string))
+                :to-equal "")
         (remoto--clear-status))))
 
   (it "reuses one overlay across repeated renders"
     (let ((remoto--status-overlay nil))
       (with-temp-buffer
         (insert "/github:foo/")
-        (remoto--render-status (current-buffer))
+        (remoto--render-status (current-buffer) t)
         (let ((first remoto--status-overlay))
-          (remoto--render-status (current-buffer))
+          (remoto--render-status (current-buffer) t)
           (expect remoto--status-overlay :to-be first))
         (remoto--clear-status))))
 
