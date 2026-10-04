@@ -5410,6 +5410,7 @@ of `completion-all-completions'; Vertico inserts a candidate as
     (expect (advice-member-p #'remoto--read-file-name-internal-a
                              'read-file-name-internal)
             :to-be-truthy)
+    (expect (advice-member-p #'remoto--inhibit-a 'eglot-ensure) :to-be-truthy)
     (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be-truthy)
     (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be-truthy)
     (expect (memq 'remoto--minibuffer-exit-cleanup minibuffer-exit-hook)
@@ -5428,6 +5429,7 @@ of `completion-all-completions'; Vertico inserts a candidate as
           (expect (advice-member-p #'remoto--read-file-name-internal-a
                                    'read-file-name-internal)
                   :to-be nil)
+          (expect (advice-member-p #'remoto--inhibit-a 'eglot-ensure) :to-be nil)
           (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be nil)
           (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be nil)
           (expect (memq 'remoto--minibuffer-exit-cleanup minibuffer-exit-hook)
@@ -5464,6 +5466,112 @@ of `completion-all-completions'; Vertico inserts a candidate as
           (expect (find-file-name-handler "/github:o/r:/" 'file-exists-p)
                   :not :to-be 'remoto-file-name-handler))
       (global-remoto-mode 1))))
+
+;;; Functions kept out of remoto buffers
+
+(defun remoto-test--tool ()
+  "Stand-in for an LSP entry point."
+  'ran)
+
+(defun remoto-test--call-in (file-name fn)
+  "Call FN in a buffer visiting FILE-NAME."
+  (with-temp-buffer
+    (setq-local buffer-file-name file-name)
+    (funcall fn)))
+
+(describe "remoto-inhibited-functions"
+  ;; The suite runs with the mode on; every spec puts the option back.
+  (let (saved)
+    (before-each
+      (setq saved remoto-inhibited-functions)
+      (setopt remoto-inhibited-functions '(remoto-test--tool)))
+
+    (after-each
+      (setopt remoto-inhibited-functions saved))
+
+    (it "defaults to the entry points of lsp-mode and Eglot"
+      (expect (eval (car (get 'remoto-inhibited-functions 'standard-value)) t)
+              :to-equal '(lsp eglot-ensure)))
+
+    (it "skips a listed function in a buffer visiting a remoto path"
+      (expect (remoto-test--call-in "/github:o/r@main:/src/api.py"
+                                    #'remoto-test--tool)
+              :to-be nil)
+      (expect (remoto-test--call-in "/gh:o/r@main:/src/api.py"
+                                    #'remoto-test--tool)
+              :to-be nil))
+
+    (it "skips it in a buffer whose directory is a remoto path, as in Dired"
+      (with-temp-buffer
+        (setq default-directory "/github:o/r@main:/src/")
+        (expect (remoto-test--tool) :to-be nil)))
+
+    (it "runs it in a buffer visiting a local file"
+      (expect (remoto-test--call-in "/home/me/api.py" #'remoto-test--tool)
+              :to-be 'ran))
+
+    (it "runs it everywhere once the mode is off"
+      (unwind-protect
+          (progn
+            (global-remoto-mode -1)
+            (expect (advice-member-p #'remoto--inhibit-a 'remoto-test--tool)
+                    :to-be nil)
+            (expect remoto--inhibited :to-be nil)
+            (expect (remoto-test--call-in "/github:o/r@main:/src/api.py"
+                                          #'remoto-test--tool)
+                    :to-be 'ran))
+        (global-remoto-mode 1)))
+
+    (it "moves the advice at once when setopt changes the list"
+      (setopt remoto-inhibited-functions '(remoto-test--other))
+      (expect (advice-member-p #'remoto--inhibit-a 'remoto-test--tool)
+              :to-be nil)
+      (expect (advice-member-p #'remoto--inhibit-a 'remoto-test--other)
+              :to-be-truthy))
+
+    (it "takes a plain setq the next time the mode turns on"
+      (setq remoto-inhibited-functions '(remoto-test--other))
+      (expect (advice-member-p #'remoto--inhibit-a 'remoto-test--other)
+              :to-be nil)
+      (global-remoto-mode 1)
+      (expect (advice-member-p #'remoto--inhibit-a 'remoto-test--tool)
+              :to-be nil)
+      (expect (advice-member-p #'remoto--inhibit-a 'remoto-test--other)
+              :to-be-truthy))
+
+    (it "removes the advice it added when turned off after a plain setq"
+      (unwind-protect
+          (progn
+            (setq remoto-inhibited-functions nil)
+            (global-remoto-mode -1)
+            (expect (advice-member-p #'remoto--inhibit-a 'remoto-test--tool)
+                    :to-be nil))
+        (global-remoto-mode 1)))
+
+    (it "advises a function once however often the mode is turned on"
+      (global-remoto-mode 1)
+      (global-remoto-mode 1)
+      (let ((count 0))
+        (advice-mapc (lambda (f _props)
+                       (when (eq f #'remoto--inhibit-a)
+                         (setq count (1+ count))))
+                     'remoto-test--tool)
+        (expect count :to-equal 1)))
+
+    (it "waits for a function that is not defined yet without defining it"
+      (unwind-protect
+          (progn
+            (setopt remoto-inhibited-functions '(remoto-test--later))
+            (expect (fboundp 'remoto-test--later) :to-be nil)
+            (defalias 'remoto-test--later (lambda () 'ran))
+            (expect (remoto-test--call-in "/github:o/r@main:/src/api.py"
+                                          #'remoto-test--later)
+                    :to-be nil)
+            (expect (remoto-test--call-in "/home/me/api.py"
+                                          #'remoto-test--later)
+                    :to-be 'ran))
+        (setopt remoto-inhibited-functions '(remoto-test--tool))
+        (fmakunbound 'remoto-test--later)))))
 
 ;;; The bootstrap handler of the autoloads
 
@@ -5769,6 +5877,40 @@ with what the same call does once the mode is on."
         (expect (plist-get result :global) :to-be nil)
         (expect (plist-get result :hooked) :to-be nil)))))
 
+(describe "remoto-inhibited-functions in a fresh session"
+  (it "advises nothing when remoto is only required"
+    (remoto-test-with-autoloads file
+      (let ((result (remoto-test--fresh-session
+                     file
+                     '(progn
+                        (require 'remoto)
+                        (list :global (bound-and-true-p global-remoto-mode)
+                              :advised (seq-filter
+                                        (lambda (f)
+                                          (advice-member-p #'remoto--inhibit-a f))
+                                        '(lsp eglot-ensure)))))))
+        (expect (plist-get result :global) :to-be nil)
+        (expect (plist-get result :advised) :to-be nil))))
+
+  (it "keeps Eglot's eglot-ensure from arming in a remoto buffer"
+    ;; Eglot ships with Emacs; its autoload gets the advice before it loads.
+    (remoto-test-with-autoloads file
+      (let ((result (remoto-test--fresh-session
+                     file
+                     '(progn
+                        (require 'remoto)
+                        (global-remoto-mode 1)
+                        (require 'eglot)
+                        (let ((armed (lambda (name)
+                                       (with-temp-buffer
+                                         (setq-local buffer-file-name name)
+                                         (eglot-ensure)
+                                         (local-variable-p 'post-command-hook)))))
+                          (list :remoto (funcall armed "/github:o/r@main:/src/api.py")
+                                :local (funcall armed "/home/me/api.py")))))))
+        (expect (plist-get result :remoto) :to-be nil)
+        (expect (plist-get result :local) :to-be t)))))
+
 ;;; Unloading
 
 (describe "remoto-unload-function"
@@ -5784,6 +5926,7 @@ with what the same call does once the mode is on."
           (expect (advice-member-p #'remoto--read-file-name-internal-a
                                    'read-file-name-internal)
                   :to-be nil)
+          (expect (advice-member-p #'remoto--inhibit-a 'eglot-ensure) :to-be nil)
           (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be nil)
           (expect (hash-table-count remoto--default-branch-cache) :to-equal 0))
       (global-remoto-mode 1))))

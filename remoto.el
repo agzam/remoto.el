@@ -6,7 +6,7 @@
 ;; Assisted-by: ECA:claude-opus-5
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: April 24, 2026
-;; Version: 2.0.0
+;; Version: 2.1.0
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
 ;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
@@ -3462,6 +3462,38 @@ Args: ORIG, STRING, PRED, ACTION."
                                       (assq-delete-all 'category (copy-alist base-alist)))))
           (or base (cons 'metadata nil)))))))
 
+;;;; Inhibited functions
+
+(defvar remoto--inhibited nil
+  "Functions advised with `remoto--inhibit-a'.")
+
+(defun remoto--buffer-p ()
+  "Return non-nil in a remoto buffer."
+  (string-match-p remoto--handler-regexp
+                  (or buffer-file-name default-directory "")))
+
+(defun remoto--inhibit-a (fn &rest args)
+  "Call FN with ARGS outside remoto buffers."
+  (unless (remoto--buffer-p)
+    (apply fn args)))
+
+(defun remoto--sync-inhibited (functions)
+  "Advise exactly FUNCTIONS with `remoto--inhibit-a'."
+  (dolist (f remoto--inhibited)
+    (advice-remove f #'remoto--inhibit-a))
+  (dolist (f functions)
+    (advice-add f :around #'remoto--inhibit-a))
+  (setq remoto--inhibited (copy-sequence functions)))
+
+(defcustom remoto-inhibited-functions '(lsp eglot-ensure)
+  "Functions that do nothing in remoto buffers, like LSP clients."
+  :type '(repeat (symbol :tag "Function"))
+  :set (lambda (symbol value)
+         (set-default-toplevel-value symbol value)
+         (when (bound-and-true-p global-remoto-mode)
+           (remoto--sync-inhibited value)))
+  :group 'remoto)
+
 ;;;; Global mode
 
 (defun remoto--drop-autoload-handler ()
@@ -3484,6 +3516,7 @@ Each step is idempotent, so a second call while on is a no-op."
   (advice-add 'find-file-noselect :around #'remoto--find-file-around-a)
   (advice-add 'read-file-name-internal :around
               #'remoto--read-file-name-internal-a)
+  (remoto--sync-inhibited remoto-inhibited-functions)
   (add-hook 'find-file-hook #'remoto--maybe-enable-mode)
   (add-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
   ;; Clear the fetch indicator and reset in-flight state whenever a
@@ -3500,6 +3533,7 @@ Each step is idempotent, so a second call while on is a no-op."
   (advice-remove 'dired-noselect #'remoto--dired-around-a)
   (advice-remove 'find-file-noselect #'remoto--find-file-around-a)
   (advice-remove 'read-file-name-internal #'remoto--read-file-name-internal-a)
+  (remoto--sync-inhibited nil)
   (remove-hook 'find-file-hook #'remoto--maybe-enable-mode)
   (remove-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
   (remove-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
