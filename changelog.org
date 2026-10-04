@@ -3,6 +3,11 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [2.1.0] - 2026-10-04
+
+** Added
+- ~remoto-inhibited-functions~: functions that do nothing in remoto buffers. The default, ~(lsp eglot-ensure)~, keeps lsp-mode and Eglot out, because LSP makes no sense on a remote Git path. Before, lsp-mode listed ~-tramp~ servers it could not start, and Eglot warned about missing server executables.
+
 * [2.0.0] - 2026-09-13
 
 ** Changed
