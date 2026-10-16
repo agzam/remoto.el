@@ -106,6 +106,14 @@ Keybindings in the display buffer: ~b~ (open in browser), ~g~ (refresh).
 | ~remoto-refresh~     | Clear tree cache for current repo, re-fetch                   |
 | ~remoto-copy-url~    | Copy ~github.com~ URL for current file/line to kill ring      |
 
+*** Language servers
+
+LSP makes no sense on a remote Git path, so remoto keeps lsp-mode and Eglot out of its buffers. To keep other tools out too, add them to ~remoto-inhibited-functions~:
+
+#+begin_src emacs-lisp
+(setopt remoto-inhibited-functions '(lsp eglot-ensure flycheck-mode))
+#+end_src
+
 ** Embark integration
 
 Optional [[https://github.com/oantolin/embark][Embark]] integration lives in ~remoto-embark.el~. Embark is not a hard dependency; when it is installed the integration activates automatically, with nothing to configure. With it active, ~embark-act~ offers forge-agnostic actions on remoto targets in remoto file buffers, ~dired~, and ~/github:~ minibuffer completion (including ~embark-collect~).

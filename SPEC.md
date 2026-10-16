@@ -441,6 +441,14 @@ Descoped (read-only model mismatch): `gh pr checkout` and export-subdir-to-local
 - Remaining: `embark-export` refinement (a remoto Dired exporter via `embark-exporters-alist`, if feasible - `embark-collect` already works); the follow-up action tier (repo copy-shorthand, file save-local / insert-contents / copy-curl, dir copy-repo-relative-path).
 - Descoped: `gh pr checkout` and export-subdir-to-local (read-only model mismatch).
 
+## Inhibited functions
+
+A remoto file buffer visits a real file name, so the major mode hooks, `after-change-major-mode-hook` and `find-file-hook` all run. Language-server clients started there cannot work: no server reads a remoto path. lsp-mode sees a non-nil `file-remote-p`, treats the buffer as TRAMP and offers only `-tramp` clients; Eglot finds no server executable "on the remote" and warns.
+
+`remoto-inhibited-functions` (default `(lsp eglot-ensure)`) lists functions that do nothing in remoto buffers. While `global-remoto-mode` is on, each carries the `:around` advice `remoto--inhibit-a`, which skips the call when `buffer-file-name`, or `default-directory` in a buffer without one, matches `remoto--handler-regexp`. `lsp` covers every lsp-mode entry point, since `lsp-deferred`, restarts and installs all end in it; `eglot-ensure` covers Eglot's hook path. This is the pattern of Magit's `magit--inhibit-in-blob-buffers`, minus the load-time `advice-add`.
+
+`remoto--inhibited` records which functions carry the advice, so turning the mode off removes exactly those even after a plain `setq` of the option. The option's `:set` moves the advice at once. Advice on a function that is not defined yet, or is still an autoload, waits for the definition and does not make the symbol `fboundp`, so remoto requires neither lsp-mode nor Eglot.
+
 ## Unloading
 
 `remoto-unload-function` removes the handler-alist entry and all advice, clears all caches (tree, default-branch, branches, tags, issues, users, search, content, file-commits).
