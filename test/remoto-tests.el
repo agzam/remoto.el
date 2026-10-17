@@ -474,6 +474,34 @@
     (expect (expand-file-name "main:" "/github:owner/repo@")
             :to-equal "/github:owner/repo@main:"))
 
+  (it "expand-file-name drops . and .. from absolute remoto paths"
+    (dolist (case '(("/src/.." . "/") ("/src/../" . "/") ("/.." . "/")
+                    ("/src/." . "/src") ("/src/./" . "/src/")
+                    ("/src/../README.md" . "/README.md")
+                    ("/src/./main.el" . "/src/main.el")))
+      (expect (expand-file-name
+               (concat "/github:testowner/testrepo@main:" (car case)))
+              :to-equal
+              (concat "/github:testowner/testrepo@main:" (cdr case)))))
+
+  (it "expand-file-name leaves other absolute remoto paths as they are"
+    (dolist (name '("/github:testowner/testrepo@main:/a"
+                    "/github:testowner/testrepo@main:/src/ab"
+                    "/github:testowner/testrepo@main:/.github/ci.yml"
+                    "/github:testowner/testrepo@main:/..."
+                    "/github:testowner/testrepo@v1.0:/src"
+                    "/github:testowner/testrepo@main:"
+                    "/github:testowner/"
+                    "/github:testowner/testrepo#31"))
+      (expect (expand-file-name name) :to-equal name)))
+
+  (it "file-exists-p resolves .. inside a remoto path"
+    (remoto-test-with-cache
+      (expect (file-exists-p "/github:testowner/testrepo@main:/src/../README.md")
+              :to-be t)
+      (expect (file-exists-p "/github:testowner/testrepo@main:/src/../nope.md")
+              :to-be nil)))
+
   (it "insert-file-contents does not move point"
     (remoto-test-with-cache
       (spy-on 'remoto--fetch-file-content
@@ -594,7 +622,36 @@
   (it "formats an executable entry"
     (let ((line (remoto--format-dired-entry
                  "run" '((type . "blob") (size . 42) (mode . "100755")))))
-      (expect line :to-match "^-rwxr-xr-x"))))
+      (expect line :to-match "^-rwxr-xr-x")))
+
+  (it "marks exactly the name with dired-filename"
+    (let* ((line (remoto--format-dired-entry
+                  "src" '((type . "tree") (size . 0) (mode . "040000")) t))
+           (beg (text-property-any 0 (length line) 'dired-filename t line))
+           (end (next-single-property-change beg 'dired-filename line)))
+      (expect (substring line beg end) :to-equal "src")
+      (expect (substring line end) :to-equal "/\n")))
+
+  (it "appends the ls -F indicator only when asked"
+    (dolist (case '(("040000" "tree" "/") ("100755" "blob" "*")
+                    ("120000" "blob" "@") ("100644" "blob" "")))
+      (pcase-let* ((`(,mode ,type ,mark) case)
+                   (plist `((type . ,type) (size . 1) (mode . ,mode))))
+        (expect (remoto--format-dired-entry "x" plist t)
+                :to-match (concat " x" (regexp-quote mark) "\n\\'"))
+        (expect (remoto--format-dired-entry "x" plist)
+                :to-match " x\n\\'")))))
+
+(describe "remoto--classify-p"
+  (it "recognizes the switches Dired reads as -F"
+    (dolist (switches '("-alF" "-F" "--dired -alF" "-al --classify"
+                        "-al --classify=auto"))
+      (expect (remoto--classify-p switches) :to-be-truthy)))
+
+  (it "rejects switches without -F"
+    (dolist (switches '("-al" "-alf" "-aBhlt --group-directories-first"
+                        "-al --time-style=+%F" nil ("-alF")))
+      (expect (remoto--classify-p switches) :not :to-be-truthy))))
 
 ;;; Read-only enforcement
 
@@ -2495,6 +2552,104 @@ using unauthenticated access until M-x remoto-reset-auth")
          "/github:testowner/testrepo/" "-al" nil t)
         (expect (buffer-string) :to-match "README\\.md")
         (expect (buffer-string) :to-match "src")))))
+
+(defun remoto-test--add-listing-entries ()
+  "Add a one-letter directory and a symlink to the cached mock tree."
+  (let ((tree (gethash "testowner/testrepo@main" remoto--tree-cache)))
+    (puthash "a" '((type . "tree") (size . 0) (sha . "hhh") (mode . "040000"))
+             tree)
+    (puthash "a/b" '((type . "blob") (size . 1) (sha . "iii") (mode . "100644"))
+             tree)
+    (puthash "CHANGELOG"
+             '((type . "blob") (size . 16) (sha . "ggg") (mode . "120000"))
+             tree)))
+
+(defmacro remoto-test-with-listing (switches &rest body)
+  "Run BODY over the mock tree and its extra entries under ls SWITCHES.
+Buffers BODY creates are killed afterwards."
+  (declare (indent 1))
+  (let ((before (make-symbol "before")))
+    `(remoto-test-with-cache
+       (remoto-test--add-listing-entries)
+       (let ((dired-listing-switches ,switches)
+             (,before (buffer-list)))
+         (unwind-protect (progn ,@body)
+           (dolist (buf (buffer-list))
+             (unless (memq buf ,before) (kill-buffer buf))))))))
+
+(defun remoto-test--listed-names (dir switches)
+  "Return the names Dired reads in its listing of DIR under SWITCHES."
+  (with-current-buffer (dired-noselect dir switches)
+    (save-excursion
+      (goto-char (point-min))
+      (let (names)
+        (while (not (eobp))
+          (when (dired-move-to-filename)
+            (push (dired-get-filename 'verbatim t) names))
+          (forward-line 1))
+        (nreverse names)))))
+
+(defun remoto-test--visit-entry (dir name)
+  "Press RET on NAME's line in the Dired buffer of DIR.
+Return the buffer that RET leaves current."
+  (with-current-buffer (dired-noselect dir)
+    (goto-char (point-min))
+    (re-search-forward (concat " " (regexp-quote name) "[/*@]?$"))
+    (dired-find-file)
+    (current-buffer)))
+
+(describe "Dired listing under dired-listing-switches"
+  ;; Dired cuts one character off a directory or executable name under -F
+  ;; unless the listing marks the name, and needs " -> " on a symlink line.
+  (it "reads every name exactly under -alF and -al"
+    (dolist (switches '("-alF" "-al"))
+      (remoto-test-with-listing switches
+        (expect (remoto-test--listed-names
+                 "/github:testowner/testrepo@main:/" switches)
+                :to-equal '("." ".." "CHANGELOG" "README.md" "a" "bin" "src"))
+        (expect (remoto-test--listed-names
+                 "/github:testowner/testrepo@main:/bin/" switches)
+                :to-equal '("." ".." "run")))))
+
+  (it "shows the -F indicators under -F only"
+    (remoto-test-with-listing "-alF"
+      (let ((root (with-current-buffer
+                      (dired-noselect "/github:testowner/testrepo@main:/")
+                    (buffer-string)))
+            (bin (with-current-buffer
+                     (dired-noselect "/github:testowner/testrepo@main:/bin/")
+                   (buffer-string))))
+        (dolist (line '(" \\./$" " \\.\\./$" " a/$" " src/$" " CHANGELOG@$"
+                        " README\\.md$"))
+          (expect root :to-match line))
+        (expect bin :to-match " run\\*$")))
+    (remoto-test-with-listing "-al"
+      (with-current-buffer (dired-noselect "/github:testowner/testrepo@main:/")
+        (expect (buffer-string) :to-match " src$")
+        (expect (buffer-string) :not :to-match "[*@]$\\| \\(?:a\\|src\\)/$"))))
+
+  (it "visits . and .. from a listing"
+    (dolist (switches '("-al" "-alF"))
+      (remoto-test-with-listing switches
+        (let ((root "/github:testowner/testrepo@main:/")
+              (src "/github:testowner/testrepo@main:/src/"))
+          (with-current-buffer (remoto-test--visit-entry src "..")
+            (expect dired-directory :to-equal root))
+          (expect (remoto-test--visit-entry src ".")
+                  :to-be (dired-noselect src))
+          (expect (remoto-test--visit-entry root "..")
+                  :to-be (dired-noselect root))))))
+
+  (it "visits a one-letter directory and a symlink"
+    (remoto-test-with-listing "-alF"
+      (spy-on 'remoto--fetch-file-content :and-return-value "README.md")
+      (with-current-buffer (remoto-test--visit-entry
+                            "/github:testowner/testrepo@main:/" "a")
+        (expect dired-directory :to-equal "/github:testowner/testrepo@main:/a/"))
+      (with-current-buffer (remoto-test--visit-entry
+                            "/github:testowner/testrepo@main:/" "CHANGELOG")
+        (expect buffer-file-name
+                :to-equal "/github:testowner/testrepo@main:/CHANGELOG")))))
 
 ;;; maybe-rewrite for partial canonical paths
 
