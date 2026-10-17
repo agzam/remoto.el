@@ -182,8 +182,8 @@ This returns one directory level at a time. The tree cache stores what it has an
 | `file-name-all-completions` | Filter tree cache entries by prefix, append `/` to dirs; at pre-repo levels, searches users or lists repos |
 | `file-name-completion` | Delegate to `try-completion` on completions list |
 | `insert-file-contents` | Fetch file content via API, insert into buffer |
-| `insert-directory` | Format dired-compatible listing from tree cache |
-| `expand-file-name` | Normalize path components, handle relative paths under remoto dirs; for partial paths (e.g. `/github:owner/`) concatenates directly |
+| `insert-directory` | Format dired-compatible listing from tree cache; `-F` indicators when the switches ask |
+| `expand-file-name` | Resolve `.` and `..` in absolute and relative remoto names, handle relative paths under remoto dirs; for partial paths (e.g. `/github:owner/`) concatenates directly |
 | `file-accessible-directory-p` | Delegates to `file-directory-p` - remote dirs are always readable |
 | `file-truename` | Return the path as-is (no symlink resolution) |
 | `file-remote-p` | Return the `/github:owner/repo@ref:` prefix (or method/host on request); handles partial paths |
@@ -238,6 +238,8 @@ drwxr-xr-x  1 github github     0 Jan  1  2000 drivers
 ```
 
 No leading spaces - dired and dired-subtree add their own. Timestamps are synthetic (the Trees API does not return timestamps). Permissions are derived from the mode field (100644 -> `-rw-r--r--`, 100755 -> `-rwxr-xr-x`, 120000 -> `lrwxrwxrwx`, 040000 -> `drwxr-xr-x`).
+
+Each name carries the `dired-filename` text property, as `ls --dired` output does, so dired reads it exactly whatever `dired-listing-switches` holds. Without it, dired guesses where a name ends: under `-F` it strips one character after every directory and executable name, and on a symlink line it looks for ` -> TARGET`, which the listing does not print. When the switches ask for `-F` or `--classify`, the listing appends `/` to directories, `*` to executables and `@` to symlinks, after the property.
 
 ## TRAMP Coexistence
 
