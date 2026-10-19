@@ -9,9 +9,11 @@ Changes to the project, following Keep a Changelog conventions.
 - With ~F~ or ~--classify~ in ~dired-listing-switches~, Dired cut the last character off every directory and executable name in a remoto listing, and could not read a one-letter directory or ~.~ at all. ~src~ read as ~sr~: ~RET~ on it said the file no longer existed, and marks, ~w~, ~remoto-copy-url~ and Embark got the cut name. Under ~-F~ Dired expects ~ls~ to print a type indicator after those names and strips one character to drop it, but remoto printed none. remoto now puts the ~dired-filename~ text property on each name, as ~ls --dired~ and ls-lisp do, so Dired reads the name exactly under any switches, and under ~-F~ it prints the ~/~, ~*~ and ~@~ indicators too.
 - A symbolic link left its line in a remoto listing unreadable to Dired, which looks for ~ -> TARGET~ after a link name, so ~RET~ on it said "No file on this line", and a Dired hook that reads every name, such as treemacs-icons-dired, failed the whole listing with ~(wrong-type-argument stringp nil)~: the root of ~magit/magit~ did not open. With the ~dired-filename~ property the name reads without a target.
 - ~RET~ on ~.~ or ~..~ in a remoto Dired said the file no longer existed, and ~file-exists-p~ and the other file primitives failed on a remoto path through ~.~ or ~..~, because ~expand-file-name~ kept those components in an absolute remoto name. It now drops them, as it does for a local name; ~..~ at the repository root stays at the root.
+- A file operation on a remoto name could change the caller's match data. Primitives such as ~expand-file-name~ and ~file-exists-p~ leave it alone for a local name, but on a remoto name they run remoto's handler, which matches regexps of its own, so a caller that read its match groups after such a call got remoto's. The handler now saves and restores the match data, as TRAMP's does.
 
 ** Added
 - Specs for remoto listings under ~-al~ and ~-alF~ over a tree with a one-letter directory, an executable and a symlink: every name reads exactly, ~RET~ on ~.~ and ~..~ lands in the right buffer, and the indicators appear under ~-F~ only.
+- A spec that the caller's match data survives ~expand-file-name~, ~file-exists-p~ and ~file-name-directory~ on remoto names.
 
 * [2.1.0] - 2026-10-04
 

@@ -90,7 +90,7 @@ C-x C-f https://github.com/torvalds/linux/blob/master/README RET
 
 3. Tree cache - on first access to any path in a repo@ref, fetch the full tree via the Git Trees API. Store as a hash table keyed by path, values being plists with keys `:type`, `:size`, `:sha`, `:mode`. Cache is keyed by `owner/repo@ref`.
 
-4. File-name handler - the central dispatch function registered in `file-name-handler-alist`. Receives (OPERATION . ARGS), constructs a handler name via `(intern-soft (format "remoto--handle-%s" operation))` and calls it if bound, otherwise falls through to default Emacs handling.
+4. File-name handler - the central dispatch function registered in `file-name-handler-alist`. Receives (OPERATION . ARGS), constructs a handler name via `(intern-soft (format "remoto--handle-%s" operation))` and calls it if bound, otherwise falls through to default Emacs handling. It saves and restores the caller's match data around the call, as TRAMP's handler does: file primitives leave the match data alone for local names, and callers rely on that.
 
 ## ghub Transport
 

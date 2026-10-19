@@ -781,17 +781,20 @@ unchanged so downstream handlers only ever see canonical paths."
 Dispatches to `remoto--handle-OPERATION' or falls through to defaults.
 The /gh: shorthand in ARGS is normalized to /github: first, so every
 resolved handler receives only canonical paths."
-  (let ((args (mapcar #'remoto--normalize-shorthand args)))
-    (if-let* ((handler (intern-soft (format "remoto--handle-%s" operation)))
-              ((fboundp handler)))
-        (apply handler args)
-      ;; Fall through to default handler
-      (let ((inhibit-file-name-handlers
-             (cons #'remoto-file-name-handler
-                   (and (eq inhibit-file-name-operation operation)
-                        inhibit-file-name-handlers)))
-            (inhibit-file-name-operation operation))
-        (apply operation args)))))
+  ;; File primitives leave the match data alone for local names, and the
+  ;; handlers below call `string-match', so the caller's match data is kept.
+  (save-match-data
+    (let ((args (mapcar #'remoto--normalize-shorthand args)))
+      (if-let* ((handler (intern-soft (format "remoto--handle-%s" operation)))
+                ((fboundp handler)))
+          (apply handler args)
+        ;; Fall through to default handler
+        (let ((inhibit-file-name-handlers
+               (cons #'remoto-file-name-handler
+                     (and (eq inhibit-file-name-operation operation)
+                          inhibit-file-name-handlers)))
+              (inhibit-file-name-operation operation))
+          (apply operation args))))))
 
 ;;;; Read operations
 

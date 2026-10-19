@@ -502,6 +502,21 @@
       (expect (file-exists-p "/github:testowner/testrepo@main:/src/../nope.md")
               :to-be nil)))
 
+  (it "keeps the caller's match data across file operations"
+    ;; One form does the match, the call and the read, so buttercup's own
+    ;; matching cannot run in between.
+    (remoto-test-with-cache
+      (let ((dir "/github:testowner/testrepo@main:/src/"))
+        (expect (mapcar (lambda (call)
+                          (string-match "\\(abc\\)" "xxabcxx")
+                          (apply (car call) (cdr call))
+                          (match-beginning 1))
+                        `((expand-file-name ,(concat dir ".."))
+                          (expand-file-name "main.el" ,dir)
+                          (file-exists-p ,(concat dir "main.el"))
+                          (file-name-directory ,(concat dir "main.el"))))
+                :to-equal '(2 2 2 2)))))
+
   (it "insert-file-contents does not move point"
     (remoto-test-with-cache
       (spy-on 'remoto--fetch-file-content
