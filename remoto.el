@@ -6,7 +6,7 @@
 ;; Assisted-by: ECA:claude-opus-5
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: April 24, 2026
-;; Version: 2.1.0
+;; Version: 2.1.1
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
 ;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
@@ -781,17 +781,20 @@ unchanged so downstream handlers only ever see canonical paths."
 Dispatches to `remoto--handle-OPERATION' or falls through to defaults.
 The /gh: shorthand in ARGS is normalized to /github: first, so every
 resolved handler receives only canonical paths."
-  (let ((args (mapcar #'remoto--normalize-shorthand args)))
-    (if-let* ((handler (intern-soft (format "remoto--handle-%s" operation)))
-              ((fboundp handler)))
-        (apply handler args)
-      ;; Fall through to default handler
-      (let ((inhibit-file-name-handlers
-             (cons #'remoto-file-name-handler
-                   (and (eq inhibit-file-name-operation operation)
-                        inhibit-file-name-handlers)))
-            (inhibit-file-name-operation operation))
-        (apply operation args)))))
+  ;; File primitives leave the match data alone for local names, and the
+  ;; handlers below call `string-match', so the caller's match data is kept.
+  (save-match-data
+    (let ((args (mapcar #'remoto--normalize-shorthand args)))
+      (if-let* ((handler (intern-soft (format "remoto--handle-%s" operation)))
+                ((fboundp handler)))
+          (apply handler args)
+        ;; Fall through to default handler
+        (let ((inhibit-file-name-handlers
+               (cons #'remoto-file-name-handler
+                     (and (eq inhibit-file-name-operation operation)
+                          inhibit-file-name-handlers)))
+              (inhibit-file-name-operation operation))
+          (apply operation args))))))
 
 ;;;; Read operations
 
@@ -1342,8 +1345,15 @@ ignored since remoto paths always qualify."
                     inhibit-file-name-handlers)))
         (inhibit-file-name-operation 'expand-file-name))
     (cond
-     ;; Already absolute remoto path
-     ((string-prefix-p "/github:" name) name)
+     ;; Absolute remoto path.  Primitives such as `file-exists-p' expand
+     ;; their argument first, so this is where . and .. must resolve.
+     ((string-prefix-p "/github:" name)
+      (if-let* ((prefix (remoto--file-name-prefix name))
+                (path (substring name (length prefix)))
+                ((string-match-p (rx (or bos "/") (** 1 2 ".") (or "/" eos))
+                                 path)))
+          (concat prefix (remoto--normalize-path path))
+        name))
      ;; Local absolute or home-relative path - never resolve under remoto
      ((or (and (string-prefix-p "/" name)
               (not (string-prefix-p "/github:" name)))
@@ -1683,38 +1693,56 @@ VISIT, BEG, END, REPLACE as per `insert-file-contents'."
    ((equal mode-str "120000") "lrwxrwxrwx")
    (t                   "-rw-r--r--")))
 
-(defun remoto--format-dired-entry (name plist)
+(defun remoto--classify-p (switches)
+  "Return non-nil when ls options ask for -F file type indicators.
+SWITCHES holds the options as a string, the way Dired passes them.
+Like Dired, look for a short-option group holding F, or --classify."
+  (and (stringp switches)
+       (let ((case-fold-search nil))
+         (string-match-p (rx (or bos " ")
+                             (or (seq "-" (* alnum) "F")
+                                 (seq "--classify" eow)))
+                         switches))))
+
+(defun remoto--format-dired-entry (name plist &optional classify)
   "Format a single Dired line for NAME with PLIST attributes.
+CLASSIFY appends the ls -F type indicator.  The `dired-filename'
+property marks NAME, so Dired reads it exactly under any switches.
 No leading spaces - Dired and dired-subtree add their own."
   (let* ((dir? (equal "tree" (alist-get 'type plist)))
          (size (or (alist-get 'size plist) 0))
          (mode (or (alist-get 'mode plist) "100644"))
          (perms (remoto--mode-to-string mode dir?)))
-    (format "%s  1 github github %8d Jan  1  2000 %s\n"
-            perms size name)))
+    (format "%s  1 github github %8d Jan  1  2000 %s%s\n"
+            perms size (propertize name 'dired-filename t)
+            (cond ((not classify) "")
+                  (dir? "/")
+                  ((equal mode "120000") "@")
+                  ((equal mode "100755") "*")
+                  (t "")))))
 
 (defun remoto--handle-insert-directory
-    (filename _switches &optional _wildcard full-directory-p)
+    (filename switches &optional _wildcard full-directory-p)
   "Insert a Dired-format listing for remote FILENAME.
-Use FULL-DIRECTORY-P to force directory-style output.
-A short form such as /github:OWNER/REPO/ is resolved here rather than
-left unparseable: `dired-noselect' discards the result of the one
-operation the autoload bootstrap can rewrite, so the first Dired of a
-session reaches this handler with the name the caller typed."
+SWITCHES may ask for -F indicators; FULL-DIRECTORY-P forces a listing.
+A short form such as /github:OWNER/REPO/ is resolved here: the first
+Dired of a session reaches this handler with the name the caller typed."
   (when-let* ((parsed (remoto--parse-path (remoto--maybe-rewrite filename)))
               (entry (remoto--tree-entry parsed)))
-    (cond
-     ((or full-directory-p
-          (equal "tree" (alist-get 'type entry)))
-      (insert "total 0\n")
-      (insert (remoto--format-dired-entry "." remoto--dir-entry))
-      (insert (remoto--format-dired-entry ".." remoto--dir-entry))
-      (dolist (child (remoto--tree-children parsed))
-        (insert (remoto--format-dired-entry (car child) (cdr child)))))
-     (t
-      (let ((name (file-name-nondirectory
-                   (directory-file-name (remoto-path-path parsed)))))
-        (insert (remoto--format-dired-entry name entry)))))))
+    (let ((classify (remoto--classify-p switches)))
+      (cond
+       ((or full-directory-p
+            (equal "tree" (alist-get 'type entry)))
+        (insert "total 0\n")
+        (insert (remoto--format-dired-entry "." remoto--dir-entry classify))
+        (insert (remoto--format-dired-entry ".." remoto--dir-entry classify))
+        (dolist (child (remoto--tree-children parsed))
+          (insert (remoto--format-dired-entry
+                   (car child) (cdr child) classify))))
+       (t
+        (let ((name (file-name-nondirectory
+                     (directory-file-name (remoto-path-path parsed)))))
+          (insert (remoto--format-dired-entry name entry classify))))))))
 
 (defun remoto--handle-file-local-copy (filename)
   "Download remote FILENAME to a temp file, return temp path."
