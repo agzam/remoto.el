@@ -55,6 +55,7 @@
          (remoto--dir-contents-cache (make-hash-table :test 'equal))
          (remoto--file-commits-cache (make-hash-table :test 'equal))
          (remoto--listing-cache (make-hash-table :test 'equal))
+         (remoto--repo-entry-cache (make-hash-table :test 'equal))
          (remoto--auth-failed nil)
          (remoto--authenticated-user nil))
      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
@@ -2911,8 +2912,11 @@ Return the buffer that RET leaves current."
 
 (defun remoto-test--repo-item (name pushed &rest props)
   "Return repository NAME, last pushed at PUSHED, as a list endpoint sends it.
-PROPS sets :desc, :private, :fork, :archived, :size and :branch."
+PROPS sets :desc, :private, :fork, :archived, :size and :branch, and
+:owner the full_name that search results carry."
   `((name . ,name)
+    (full_name . ,(and (plist-get props :owner)
+                       (concat (plist-get props :owner) "/" name)))
     (description . ,(plist-get props :desc))
     (private . ,(plist-get props :private))
     (fork . ,(plist-get props :fork))
@@ -3224,6 +3228,163 @@ Buffers BODY creates are killed afterwards."
         (expect 'remoto--api :to-have-been-called-with
                 "user/repos?affiliation=owner&sort=pushed&per_page=100&page=1")
         (expect (buffer-string) :to-match " zeta ")))))
+
+(defun remoto-test--search-api (endpoint)
+  "Answer ENDPOINT as `remoto-test--listing-api' does, plus a search of acme.
+A search for stitch finds stitch-env and stitch-api; acme has no other
+repository than tool, and a search for anything else finds none."
+  (cond
+   ((string-prefix-p "search/repositories?q=stitch%20" endpoint)
+    `((items ,(remoto-test--repo-item "stitch-env" "2026-10-19T10:00:00Z"
+                                      :owner "acme" :private t :branch "trunk"
+                                      :desc "Environments")
+             ,(remoto-test--repo-item "stitch-api" "2026-10-13T17:14:04Z"
+                                      :owner "acme" :desc "The API"))))
+   ((string-prefix-p "search/repositories?" endpoint) '((items)))
+   ((equal endpoint "repos/acme/tool") '((default_branch . "main")))
+   ((string-match-p "\\`repos/acme/[^/]+\\'" endpoint)
+    (user-error "%s%s" remoto--not-found endpoint))
+   (t (remoto-test--listing-api endpoint))))
+
+(defun remoto-test--dired-names ()
+  "Return the names that Dired reads in the current buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (let (names)
+      (while (not (eobp))
+        (when (dired-move-to-filename)
+          (push (dired-get-filename 'verbatim t) names))
+        (forward-line 1))
+      (nreverse names))))
+
+(describe "a bare name of no repository"
+  (it "opens a Dired of the repositories that the search of completion found"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
+      ;; Completion at /github:acme/ searched for the typed text already.
+      (remoto--search-owner-repos-sync "acme" "stitch")
+      (spy-calls-reset 'remoto--api)
+      (with-current-buffer (find-file-noselect "/gh:acme/stitch")
+        (expect dired-directory :to-equal '("/github:acme/" "stitch-api" "stitch-env"))
+        (expect (remoto-test--dired-names) :to-equal '("stitch-api" "stitch-env"))
+        (expect (buffer-string) :to-match
+                (rx bol "  drwx------  1 github github " (+ nonl) " stitch-env"
+                    (>= 4 " ") "Environments" eol))
+        (expect (buffer-string) :to-match
+                (rx bol "  drwxr-xr-x " (+ nonl) " stitch-api" (>= 4 " ") "The API" eol)))
+      (expect (mapcar #'car (spy-calls-all-args 'remoto--api))
+              :to-equal '("repos/acme/stitch"))))
+
+  (it "lines the notes up across the matches, and keeps them on revert"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
+      (with-current-buffer (find-file-noselect "/gh:acme/stitch")
+        (revert-buffer)
+        (expect (remoto-test--dired-names) :to-equal '("stitch-api" "stitch-env"))
+        (let ((columns (mapcar (lambda (note)
+                                 (goto-char (point-min))
+                                 (search-forward note)
+                                 (- (match-beginning 0) (line-beginning-position)))
+                               '("The API" "Environments"))))
+          (expect (car columns) :to-equal (cadr columns))))))
+
+  (it "puts the newest push first under -t, as a listing does"
+    (remoto-test-with-listings
+      (let ((dired-listing-switches "-alt"))
+        (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
+        (expect (cdr (buffer-local-value 'dired-directory
+                                         (find-file-noselect "/gh:acme/stitch")))
+                :to-equal '("stitch-env" "stitch-api")))))
+
+  (it "opens a match at its default branch with only the tree request"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
+      (with-current-buffer (find-file-noselect "/gh:acme/stitch")
+        (spy-calls-reset 'remoto--api)
+        (goto-char (point-min))
+        (re-search-forward " stitch-env ")
+        (dired-find-file)
+        (expect dired-directory :to-equal "/github:acme/stitch-env@trunk:/"))
+      (expect (mapcar #'car (spy-calls-all-args 'remoto--api))
+              :to-equal '("repos/acme/stitch-env/git/trees/trunk?recursive=1"))))
+
+  (it "lists the matches for dired-noselect too"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
+      (expect (buffer-local-value 'dired-directory (dired-noselect "/github:acme/stitch"))
+              :to-equal '("/github:acme/" "stitch-api" "stitch-env"))))
+
+  (it "opens an existing repository as before, with no search"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
+      (expect (buffer-local-value 'dired-directory (find-file-noselect "/gh:acme/tool"))
+              :to-equal "/github:acme/tool@main:/")
+      (expect (seq-filter (lambda (args) (string-prefix-p "search/" (car args)))
+                          (spy-calls-all-args 'remoto--api))
+              :to-be nil)))
+
+  (it "asks for no repository that a name cannot be, nor for dots"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
+      (expect (cdr (buffer-local-value 'dired-directory
+                                       (find-file-noselect "/gh:acme/stitch env")))
+              :to-equal '("stitch-api" "stitch-env"))
+      (expect (remoto--repo-matches "/github:acme/..") :to-be nil)
+      (expect (remoto--repo-matches "/github:acme/zeta@main:/..") :to-be nil)
+      (expect (seq-filter (lambda (args) (string-prefix-p "repos/" (car args)))
+                          (spy-calls-all-args 'remoto--api))
+              :to-be nil)))
+
+  (it "says so, and leaves no buffer, when nothing matches"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
+      (let ((before (buffer-list)))
+        (expect (find-file-noselect "/gh:acme/zzz")
+                :to-throw 'user-error '("Remoto: no repository of acme matches zzz"))
+        (expect (seq-difference (buffer-list) before) :to-be nil))))
+
+  (it "lets a failed search or repository check signal its own error"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (endpoint)
+                (if (string-prefix-p "search/" endpoint)
+                    (user-error "Remoto: access denied (rate limit or permissions): x")
+                  (remoto-test--search-api endpoint))))
+      (expect (find-file-noselect "/gh:acme/stitch")
+              :to-throw 'user-error '("Remoto: access denied (rate limit or permissions): x")))
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (endpoint)
+                (user-error "Remoto: access denied (rate limit or permissions): %s" endpoint)))
+      (expect (find-file-noselect "/gh:acme/stitch") :to-throw 'user-error)
+      (expect (mapcar #'car (spy-calls-all-args 'remoto--api))
+              :to-equal '("repos/acme/stitch"))))
+
+  (it "gets one line from insert-directory without FULL-DIRECTORY-P"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
+      (remoto--search-owner-repos-sync "acme" "stitch")
+      (with-temp-buffer
+        (let ((default-directory "/github:acme/"))
+          (remoto--handle-insert-directory "stitch-api" "-al" nil nil))
+        (expect (buffer-string) :to-match
+                (rx bos "  drwxr-xr-x  1 github github " (+ nonl) " stitch-api"
+                    (>= 4 " ") "The API\n" eos)))))
+
+  (it "reads an owner's listing as /github:OWNER, which still does not exist"
+    (expect (file-readable-p "/github:acme") :to-be t)
+    (expect (file-readable-p "/github:") :to-be t)
+    (remoto-test-with-cache
+      (expect (file-exists-p "/github:acme") :to-be nil)))
+
+  (it "remembers a repository a search found, so that it exists and opens"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
+      (remoto--search-owner-repos-sync "acme" "stitch")
+      (expect (file-exists-p "/github:acme/stitch-env") :to-be t)
+      (expect (file-exists-p "/github:acme/stitch") :to-be nil)
+      (expect (gethash "acme/stitch-env" remoto--default-branch-cache)
+              :to-equal "trunk"))))
 
 ;;; maybe-rewrite for partial canonical paths
 

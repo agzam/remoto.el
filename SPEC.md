@@ -171,10 +171,10 @@ This returns one directory level at a time. The tree cache stores what it has an
 
 | Operation | Implementation |
 |---|---|
-| `file-exists-p` | Lookup in tree cache; returns t for partial paths (`/github:`, `/github:OWNER/`), and for a bare `/github:OWNER` or `/github:OWNER/REPO` once a cached listing holds it |
+| `file-exists-p` | Lookup in tree cache; returns t for partial paths (`/github:`, `/github:OWNER/`), and for a bare `/github:OWNER` or `/github:OWNER/REPO` once a cached listing holds it or a search found the repository |
 | `file-directory-p` | Check `:type` = `"tree"` in cache; returns t for partial paths |
 | `file-regular-p` | Check `:type` = `"blob"` in cache |
-| `file-readable-p` | Delegates to `file-exists-p` |
+| `file-readable-p` | Delegates to `file-exists-p`, and is t for `/github:OWNER` too, which Dired asks before it lists matches |
 | `file-writable-p` | Always nil |
 | `file-attributes` | Synthesize from cache entry (size, type, mode, epoch-0 timestamps) |
 | `directory-files` | List tree cache children for parent path, prepend `.` and `..` |
@@ -263,6 +263,7 @@ dr-xr-xr-x  1 github github    20480 Mar  3  2021 old-thing
 - The first page of 100 is a blocking `remoto--api` call. When it is full, `remoto--fetch-listing-page` fetches the next page through `remoto--api-async`, one at a time, until a short page or `remoto-listing-cap` (1000); then every Dired buffer of the listing reverts once. The `.` line's note tells a partial listing: fetching, capped, or failed. Not the `total` line: Dired deletes that under the default `dired-free-space`. A failed page leaves the listing fresh, because the revert that shows the failure would otherwise fetch again; `remoto-refresh` retries.
 - Each repository's `default_branch` goes into `remoto--default-branch-cache`, so `RET` on a line costs one tree request.
 - A Dired line names `/github:OWNER/REPO` or `/github:OWNER`, bare names that `file-exists-p` denies to keep the `[Confirm]` of a half-typed name. `remoto--listed-p` lets them through once a cached listing holds them, whatever its age, so a buffer that still shows a name can open it.
+- A bare `/github:OWNER/NAME` that names no repository opens a Dired of OWNER's repositories that match NAME (`remoto--repo-matches`, called by the `find-file-noselect` and `dired-noselect` advice). The repository check stays first: `remoto--repository-p` asks for the default branch, and only a 404 (a `user-error` starting with `remoto--not-found`) means no; a NAME with a character no repository name has (a space from orderless, say) is not asked about. The matches come from the search completion ran at `/github:OWNER/` (`\0repos:OWNER/NAME` in `remoto--search-cache`), or from that search run then, whose failure signals. They open as Dired on a list of names, `(DIR . NAMES)`, so they take the place of an open `/github:OWNER/` listing until `C-x d /github:OWNER/` brings it back. Dired asks `insert-directory` for each name without FULL-DIRECTORY-P and checks `file-readable-p` of `/github:OWNER` first. Each line comes from `remoto--repo-entry-cache`, which listing pages and every repository search fill (`remoto--remember-repo`, with the default branch); the names in `dired-directory` line the notes up.
 - `..` at a repository root expands to `/github:OWNER/` (`remoto--normalize-name`), and at an owner to `/github:`. `remoto--maybe-rewrite` resolves dots before it reads a short form, which would take `/github:OWNER/..` for a repository named `..`. `^` keeps its behavior: `file-name-directory` of a root is the root, since completion right after `@REF:` relies on it.
 
 ## TRAMP Coexistence
@@ -352,7 +353,7 @@ Returns nil for incomplete paths (triggers `[Confirm]` prompt):
 
 | Returns t | Returns nil |
 |---|---|
-| `/github:`, `/github:owner/`, `/github:owner/repo/`, `/github:owner/repo#42`, canonical paths in tree, a bare `/github:owner` or `/github:owner/repo` that a cached listing holds | `/github:owner/repo` (bare, not listed), `/github:owner/repo#`, `/github:owner/repo@`, `/github:owner#` |
+| `/github:`, `/github:owner/`, `/github:owner/repo/`, `/github:owner/repo#42`, canonical paths in tree, a bare `/github:owner` or `/github:owner/repo` that a cached listing holds or a search found | `/github:owner/repo` (bare, not listed), `/github:owner/repo#`, `/github:owner/repo@`, `/github:owner#` |
 
 #### API functions
 
@@ -381,6 +382,7 @@ Returns nil for incomplete paths (triggers `[Confirm]` prompt):
 | `remoto--content-cache` | SHA | decoded string | Never (content-addressable) |
 | `remoto--file-commits-cache` | `"owner/repo@ref:dir"` | `(TIMESTAMP . ALIST)` | `remoto-search-cache-ttl` |
 | `remoto--listing-cache` | `"/github:"`, `"/github:OWNER/"` | `remoto--listing` (time, entries, state) | `remoto-repo-cache-ttl` |
+| `remoto--repo-entry-cache` | `"owner/repo"`, downcased | attributes of its Dired line | Manual |
 
 #### Partial path handling
 
