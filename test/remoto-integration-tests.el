@@ -324,6 +324,23 @@
         (expect attrs :to-be-truthy)
         (expect (file-attribute-size attrs) :to-be-greater-than 100)))))
 
+;;; Listing of an owner
+
+(describe "integration: Dired listing of an owner"
+  (it "lists emacs-mirror's repositories and learns their default branches"
+    (remoto-itest-with-clean-cache
+      (let* ((remoto--listing-cache (make-hash-table :test 'equal))
+             (buf (dired-noselect (format "/github:%s/" remoto-itest-owner) "-al")))
+        (unwind-protect
+            (with-current-buffer buf
+              (expect (buffer-string) :to-match
+                      (rx bol "  drwxr-xr-x  1 github github " (+ (in " 0-9"))
+                          (= 12 nonl) " emacs" (>= 4 " ") "Mirror of GNU Emacs" eol))
+              (expect (gethash "emacs-mirror/emacs" remoto--default-branch-cache)
+                      :to-equal "master")
+              (expect (file-exists-p "/github:emacs-mirror/emacs") :to-be t))
+          (kill-buffer buf))))))
+
 (provide 'remoto-integration-tests)
 
 ;; Local Variables:

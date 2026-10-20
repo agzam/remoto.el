@@ -61,14 +61,21 @@ Any other error is a bug and propagates."
 
 (defun remoto--embark-target-at-point ()
   "Return (TYPE . PATH) for the remoto target in the current buffer, or nil.
-TYPE is one of `remoto-repo', `remoto-dir', `remoto-file'.  Works in remoto
-file buffers and in Dired (the entry at point, else the directory)."
-  (when-let* ((path (if (derived-mode-p 'dired-mode)
-                        (or (dired-get-filename nil t)
-                            (and (stringp dired-directory) dired-directory))
-                      buffer-file-name))
-              (ctx (remoto--embark-context-or-nil path)))
-    (cons (plist-get ctx :type) path)))
+TYPE is `remoto-repo', `remoto-dir', `remoto-file', or `remoto-owner' for
+an account; Dired gives the entry at point, else the directory.  The dots
+of the . and .. entries resolve first, so .. at a root is the owner."
+  (when-let* ((raw (if (derived-mode-p 'dired-mode)
+                       (or (dired-get-filename nil t)
+                           (and (stringp dired-directory) dired-directory))
+                     buffer-file-name))
+              ((string-match-p remoto--handler-regexp raw))
+              (name (remoto--normalize-shorthand raw))
+              (path (remoto--embark-canonicalize
+                     (if (remoto--dot-component-p name)
+                         (remoto--normalize-name name)
+                       name)))
+              (type (remoto--embark-classify path nil)))
+    (cons type path)))
 
 (defun remoto--embark-target-finder ()
   "Embark target finder for remoto file and Dired buffers.

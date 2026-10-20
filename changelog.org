@@ -3,6 +3,24 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [2.3.0] - 2026-10-20
+
+** Added
+- Dired lists the two levels above a repository, which used to open an empty buffer. ~/github:~ lists the account of your GitHub token and its organizations, each with its type and description. ~/github:OWNER/~ lists OWNER's repositories with their size, their last push as the date, ~drwx------~ for a private one and ~dr-xr-xr-x~ for an archived one, then the description, with ~fork~ in front of a fork's. ~RET~ on a repository opens its root at the default branch, which the listing already knows, so only the tree is fetched. ~-t~ in the switches puts the latest push first, and ~dired-hide-details-mode~ hides the descriptions along with the details.
+- ~remoto-listing-cap~: the most repositories an owner listing holds (1000), the most recently pushed. The first 100 arrive before Dired shows the listing; the later pages load in the background one at a time, as GitHub asks of clients, and the buffer reverts once they are in. Until then the ~.~ line says how many are listed so far, and it says so too when the cap or a failed page ends the listing. The account of the token and its organizations list their private repositories as well; any other account lists its public ones. Without a token ~/github:~ says why it lists nothing and opens no buffer.
+- ~remoto-refresh~ in a listing fetches it again.
+- Embark's Dired target finder offers the repository actions on a repository line and the account actions on an account line or on an owner listing itself.
+- Specs for both listings: names under ~-al~ and ~-alF~, sorting, notes, the endpoint for each kind of account, background pages, the cap, a failed page, a refresh during a fetch, and Embark on listing lines.
+
+** Changed
+- ~..~ at a repository root goes up to the owner's listing, and ~..~ there goes up to ~/github:~; it used to stay at the root. ~expand-file-name~ resolves a ~..~ above a root the same way, so ~(expand-file-name "/github:o/r@main:/..")~ is ~/github:o/~. ~^~ still stays at a repository root.
+- ~file-exists-p~ of a bare ~/github:OWNER~ or ~/github:OWNER/REPO~ answers t once a cached listing holds the name, so ~RET~ on a listing line opens it. A name no listing holds still answers nil, which keeps the ~[Confirm]~ for a half-typed name at a file prompt.
+
+** Fixed
+- ~find-file~ and ~dired~ on ~/github:OWNER/..~ or ~/github:OWNER/.~ asked GitHub for a repository named ~..~ or ~.~, because the short-form rewrite read the dots as a repository name. The dots resolve first now.
+- ~(file-name-as-directory "/github:")~ gave ~/github:/~, so a Dired buffer of ~/github:~ would have named every entry ~/github:/OWNER~.
+- The Embark target finder took the ~.~ entry of a repository root for a file. It resolves ~.~ and ~..~ first now.
+
 * [2.2.0] - 2026-10-19
 
 ** Added

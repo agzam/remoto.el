@@ -114,7 +114,32 @@ every source older than an existing output file, so it must not exist."
   (it "returns nil outside remoto buffers"
     (with-temp-buffer
       (setq-local buffer-file-name "/home/me/x.el")
-      (expect (remoto--embark-target-finder) :to-be nil))))
+      (expect (remoto--embark-target-finder) :to-be nil)))
+
+  (it "finds a repository on a line of an owner listing, and an account above it"
+    (let ((remoto--listing-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal))
+          (remoto--authenticated-user "me")
+          (dired-listing-switches "-al"))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (endpoint)
+                (cond ((string-prefix-p "user/orgs" endpoint)
+                       '(((login . "acme") (description . "Acme tools"))))
+                      ((string-prefix-p "user/repos" endpoint)
+                       '(((name . "zeta") (description . "Newest push")
+                          (pushed_at . "2026-10-20T12:00:00Z") (size . 1)
+                          (default_branch . "main"))))
+                      (t (error "Unexpected endpoint %s" endpoint)))))
+      (dolist (case '(("/github:me/" "zeta" (remoto-repo "/github:me/zeta:/"))
+                      ("/github:" "acme" (remoto-owner "/github:acme"))))
+        (pcase-let ((`(,dir ,name ,target) case))
+          (let ((buf (dired-noselect dir)))
+            (unwind-protect
+                (with-current-buffer buf
+                  (goto-char (point-min))
+                  (re-search-forward (concat " " name " "))
+                  (expect (remoto--embark-target-finder) :to-equal target))
+              (kill-buffer buf))))))))
 
 ;;; Actions (repo-level: no API/cache needed)
 

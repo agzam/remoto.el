@@ -54,6 +54,7 @@
          (remoto--users-cache (make-hash-table :test 'equal))
          (remoto--dir-contents-cache (make-hash-table :test 'equal))
          (remoto--file-commits-cache (make-hash-table :test 'equal))
+         (remoto--listing-cache (make-hash-table :test 'equal))
          (remoto--auth-failed nil)
          (remoto--authenticated-user nil))
      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
@@ -475,7 +476,7 @@
             :to-equal "/github:owner/repo@main:"))
 
   (it "expand-file-name drops . and .. from absolute remoto paths"
-    (dolist (case '(("/src/.." . "/") ("/src/../" . "/") ("/.." . "/")
+    (dolist (case '(("/src/.." . "/") ("/src/../" . "/")
                     ("/src/." . "/src") ("/src/./" . "/src/")
                     ("/src/../README.md" . "/README.md")
                     ("/src/./main.el" . "/src/main.el")))
@@ -483,6 +484,31 @@
                (concat "/github:testowner/testrepo@main:" (car case)))
               :to-equal
               (concat "/github:testowner/testrepo@main:" (cdr case)))))
+
+  (it "expand-file-name climbs from a repository root to its owner, then to /github:"
+    (dolist (case '(("/github:o/r@main:/.." . "/github:o/")
+                    ("/github:o/r@main:/../" . "/github:o/")
+                    ("/github:o/r@main:/src/../.." . "/github:o/")
+                    ("/github:o/r:/.." . "/github:o/")
+                    ("/github:o/r@main:/../.." . "/github:")
+                    ("/github:o/r@main:/../../.." . "/github:")
+                    ("/github:o/r@main:/../x" . "/github:o/x")
+                    ("/github:o/.." . "/github:")
+                    ("/github:o/." . "/github:o/")
+                    ("/github:.." . "/github:")
+                    ("/github:." . "/github:")
+                    ("/github:o/r/src/.." . "/github:o/r")
+                    ("/github:o/r/src/../" . "/github:o/r/")
+                    ("/gh:o/r@main:/.." . "/github:o/")))
+      (expect (expand-file-name (car case)) :to-equal (cdr case))))
+
+  (it "expand-file-name resolves a relative .. above a repository root"
+    (expect (expand-file-name ".." "/github:o/r@main:/") :to-equal "/github:o/")
+    (expect (expand-file-name "../x/" "/github:o/r@main:/") :to-equal "/github:o/x/")
+    (expect (expand-file-name ".." "/github:o/") :to-equal "/github:")
+    (expect (expand-file-name "." "/github:o/") :to-equal "/github:o/")
+    (expect (expand-file-name ".." "/github:") :to-equal "/github:")
+    (expect (expand-file-name "agzam" "/github:") :to-equal "/github:agzam"))
 
   (it "expand-file-name leaves other absolute remoto paths as they are"
     (dolist (name '("/github:testowner/testrepo@main:/a"
@@ -800,7 +826,61 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
         (expect (remoto--format-dired-entry "x" plist t)
                 :to-match (concat " x" (regexp-quote mark) "\n\\'"))
         (expect (remoto--format-dired-entry "x" plist)
-                :to-match " x\n\\'")))))
+                :to-match " x\n\\'"))))
+
+  (it "takes the mode and the date of a listing entry from its attributes"
+    (expect (remoto--format-dired-entry
+             "r" `((type . "tree") (size . 2048) (perms . "drwx------")
+                   (time . ,(encode-time (iso8601-parse "2020-06-15T12:00:00Z")))))
+            :to-equal "drwx------  1 github github     2048 Jun 15  2020 r\n"))
+
+  (it "shows the hour of a date within six months, as ls does"
+    (expect (remoto--format-dired-entry
+             "r" `((type . "tree") (time . ,(time-subtract nil 3600))))
+            :to-match (rx " " (= 3 alpha) " " (in " 123") digit " "
+                          (= 2 digit) ":" (= 2 digit) " r\n" eos)))
+
+  (it "keeps a note out of the name, 4 columns past it"
+    (let* ((line (remoto--format-dired-entry
+                  "r" '((type . "tree") (note . "desc")) t))
+           (beg (text-property-any 0 (length line) 'dired-filename t line))
+           (end (next-single-property-change beg 'dired-filename line)))
+      (expect (substring line beg end) :to-equal "r")
+      (expect (substring line end) :to-equal "/    desc\n")))
+
+  (it "lines up notes and sizes across a listing"
+    (let* ((entries '(("a" (type . "tree") (size . 7) (note . "N1"))
+                      ("abcdef" (type . "tree") (size . 1234567890) (note . "N2"))))
+           (widths (remoto--listing-widths entries nil))
+           (lines (mapcar (lambda (e)
+                            (remoto--format-dired-entry (car e) (cdr e) nil widths))
+                          entries)))
+      (expect widths :to-equal '(10 . 6))
+      (expect (string-search "N1" (car lines))
+              :to-equal (string-search "N2" (cadr lines)))
+      (expect (cadr lines) :to-match " 1234567890 .* abcdef    N2\n")))
+
+  (it "lets a name past 40 columns move only its own note"
+    (let* ((long (make-string 60 ?x))
+           (entries `(("a" (type . "tree") (note . "N1"))
+                      (,long (type . "tree") (note . "N2"))))
+           (widths (remoto--listing-widths entries nil)))
+      (expect (cdr widths) :to-equal 40)
+      (expect (remoto--format-dired-entry "a" (cdr (car entries)) nil widths)
+              :to-match (concat " a" (make-string 43 ?\s) "N1\n"))
+      (expect (remoto--format-dired-entry long (cdr (cadr entries)) nil widths)
+              :to-match (concat " " long "    N2\n")))))
+
+(describe "remoto--ls-switch-p"
+  (it "finds a short option in a group of them, or its long form"
+    (expect (remoto--ls-switch-p "-aBhlt --group-directories-first" "t") :to-be-truthy)
+    (expect (remoto--ls-switch-p "-lt" "t") :to-be-truthy)
+    (expect (remoto--ls-switch-p "-al --classify" "F" "classify") :to-be-truthy))
+
+  (it "rejects the option inside a long option or an argument"
+    (expect (remoto--ls-switch-p "-al --time-style=+%F" "t") :not :to-be-truthy)
+    (expect (remoto--ls-switch-p "-al" "t") :not :to-be-truthy)
+    (expect (remoto--ls-switch-p nil "t") :not :to-be-truthy)))
 
 (describe "remoto--classify-p"
   (it "recognizes the switches Dired reads as -F"
@@ -2140,6 +2220,13 @@ using unauthenticated access until M-x remoto-reset-auth")
   (it "file-exists-p returns t for /github:owner/"
     (expect (remoto--handle-file-exists-p "/github:foobar/") :to-be t))
 
+  (it "file-name-as-directory leaves /github: as it is"
+    ;; Dired builds every name in a listing from this; /github:/OWNER
+    ;; would name no account.
+    (expect (file-name-as-directory "/github:") :to-equal "/github:")
+    (expect (file-name-as-directory "/gh:") :to-equal "/github:")
+    (expect (file-name-as-directory "/github:foobar") :to-equal "/github:foobar/"))
+
   (it "file-remote-p returns /github: for partial paths"
     (expect (remoto--handle-file-remote-p "/github:foobar/") :to-equal "/github:"))
 
@@ -2754,7 +2841,9 @@ Buffers BODY creates are killed afterwards."
 Return the buffer that RET leaves current."
   (with-current-buffer (dired-noselect dir)
     (goto-char (point-min))
-    (re-search-forward (concat " " (regexp-quote name) "[/*@]?$"))
+    (let ((case-fold-search nil))
+      (re-search-forward
+       (concat " " (regexp-quote name) "[/*@]?\\(?: .*\\)?$")))
     (dired-find-file)
     (current-buffer)))
 
@@ -2791,14 +2880,21 @@ Return the buffer that RET leaves current."
   (it "visits . and .. from a listing"
     (dolist (switches '("-al" "-alF"))
       (remoto-test-with-listing switches
-        (let ((root "/github:testowner/testrepo@main:/")
+        ;; .. at the root lists the owner, here without a token.
+        (spy-on 'remoto--api :and-call-fake
+                (lambda (endpoint)
+                  (if (string-prefix-p "users/testowner/repos" endpoint)
+                      (list (remoto-test--repo-item "testrepo" "2026-10-20T12:00:00Z"))
+                    (error "Unexpected endpoint %s" endpoint))))
+        (let ((remoto--auth-failed t)
+              (root "/github:testowner/testrepo@main:/")
               (src "/github:testowner/testrepo@main:/src/"))
           (with-current-buffer (remoto-test--visit-entry src "..")
             (expect dired-directory :to-equal root))
           (expect (remoto-test--visit-entry src ".")
                   :to-be (dired-noselect src))
-          (expect (remoto-test--visit-entry root "..")
-                  :to-be (dired-noselect root))))))
+          (with-current-buffer (remoto-test--visit-entry root "..")
+            (expect dired-directory :to-equal "/github:testowner/"))))))
 
   (it "visits a one-letter directory and a symlink"
     (remoto-test-with-listing "-alF"
@@ -2810,6 +2906,324 @@ Return the buffer that RET leaves current."
                             "/github:testowner/testrepo@main:/" "CHANGELOG")
         (expect buffer-file-name
                 :to-equal "/github:testowner/testrepo@main:/CHANGELOG")))))
+
+;;; Listings above the repository level
+
+(defun remoto-test--repo-item (name pushed &rest props)
+  "Return repository NAME, last pushed at PUSHED, as a list endpoint sends it.
+PROPS sets :desc, :private, :fork, :archived, :size and :branch."
+  `((name . ,name)
+    (description . ,(plist-get props :desc))
+    (private . ,(plist-get props :private))
+    (fork . ,(plist-get props :fork))
+    (archived . ,(plist-get props :archived))
+    (pushed_at . ,pushed)
+    (size . ,(or (plist-get props :size) 1))
+    (default_branch . ,(or (plist-get props :branch) "main"))))
+
+(defun remoto-test--repo-items (count prefix)
+  "Return COUNT repositories named PREFIX000, PREFIX001 and so on."
+  (cl-loop for i below count
+           collect (remoto-test--repo-item (format "%s%03d" prefix i)
+                                           "2026-01-01T00:00:00Z")))
+
+(defun remoto-test--listing-api (endpoint)
+  "Answer ENDPOINT as GitHub does for the token of the account \"me\"."
+  (cond
+   ((string-prefix-p "user/orgs" endpoint)
+    '(((login . "acme") (description . "Acme tools"))
+      ((login . "quiet") (description))))
+   ((string-prefix-p "user/repos?affiliation=owner&sort=pushed&" endpoint)
+    (list (remoto-test--repo-item "zeta" "2026-10-20T12:00:00Z"
+                                  :desc "Newest push" :size 9365)
+          (remoto-test--repo-item "mid" "2026-01-02T03:04:05Z"
+                                  :desc "Forked" :fork t)
+          (remoto-test--repo-item "alpha" "2020-01-02T03:04:05Z"
+                                  :private t :archived t :branch "trunk")))
+   ((string-prefix-p "orgs/acme/repos?sort=pushed&" endpoint)
+    (list (remoto-test--repo-item "tool" "2026-10-01T00:00:00Z" :private t)))
+   ((string-prefix-p "users/torvalds/repos?sort=pushed&" endpoint)
+    (list (remoto-test--repo-item "linux" "2026-10-20T00:00:00Z")))
+   ((string-match-p "/git/trees/" endpoint)
+    '((tree ((path . "README.md") (type . "blob") (size . 1) (sha . "a")
+             (mode . "100644")))))
+   (t (error "Unexpected endpoint %s" endpoint))))
+
+(defmacro remoto-test-with-listings (&rest body)
+  "Run BODY as the account \"me\" against `remoto-test--listing-api'.
+Buffers BODY creates are killed afterwards."
+  (declare (indent 0))
+  (let ((before (make-symbol "before")))
+    `(remoto-test-with-cache
+       (let ((remoto--authenticated-user "me")
+             (dired-listing-switches "-al")
+             (,before (buffer-list)))
+         (spy-on 'remoto--api :and-call-fake #'remoto-test--listing-api)
+         (unwind-protect (progn ,@body)
+           (dolist (buf (buffer-list))
+             (unless (memq buf ,before) (kill-buffer buf))))))))
+
+(defun remoto-test--listing-text (dir &optional switches)
+  "Return the text of the Dired listing of DIR under ls SWITCHES."
+  (with-current-buffer (dired-noselect dir (or switches "-al"))
+    (buffer-substring-no-properties (point-min) (point-max))))
+
+(defun remoto-test--with-big-owner (endpoint)
+  "Answer ENDPOINT with full first pages for the account \"big\"."
+  (if (string-prefix-p "users/big/repos" endpoint)
+      (remoto-test--repo-items 100 "a")
+    (remoto-test--listing-api endpoint)))
+
+(describe "Dired listing of /github:"
+  (it "lists the account of the token and its organizations"
+    (remoto-test-with-listings
+      (let ((text (remoto-test--listing-text "/github:")))
+        (expect text :to-match "^  drwxr-xr-x .* 2000 me +User$")
+        (expect text :to-match "^  drwxr-xr-x .* acme +Organization  Acme tools$")
+        (expect text :to-match "^  drwxr-xr-x .* quiet +Organization$"))
+      (expect (remoto-test--listed-names "/github:" "-alF")
+              :to-equal '("." ".." "acme" "me" "quiet"))))
+
+  (it "says why, and leaves no buffer, when no token answers"
+    (remoto-test-with-listings
+      (let ((remoto--authenticated-user nil)
+            (remoto--auth-failed t)
+            (before (buffer-list)))
+        (expect (dired-noselect "/github:") :to-throw 'user-error)
+        (expect (seq-difference (buffer-list) before) :to-be nil))))
+
+  (it "opens an account's listing from its line, and goes nowhere above"
+    (remoto-test-with-listings
+      (with-current-buffer (remoto-test--visit-entry "/github:" "acme")
+        (expect dired-directory :to-equal "/github:acme/")
+        (expect (buffer-string) :to-match " tool$"))
+      (with-current-buffer (remoto-test--visit-entry "/github:acme/" "..")
+        (expect dired-directory :to-equal "/github:"))
+      (with-current-buffer (remoto-test--visit-entry "/github:" "..")
+        (expect dired-directory :to-equal "/github:")))))
+
+(describe "Dired listing of /github:OWNER/"
+  (it "shows each repository's size, last push, mode and note"
+    (remoto-test-with-listings
+      (let ((text (remoto-test--listing-text "/github:me/")))
+        (expect text :to-match
+                (rx bol "  drwxr-xr-x  1 github github  9589760 " (= 12 nonl)
+                    " zeta" (>= 4 " ") "Newest push" eol))
+        (expect text :to-match
+                (rx bol "  drwxr-xr-x " (+ nonl) " mid" (>= 4 " ") "fork  Forked" eol))
+        (expect text :to-match
+                (rx bol "  dr-x------ " (+ nonl) " Jan  " (in "12") "  2020 alpha" eol)))))
+
+  (it "reads every name exactly under -al and -alF"
+    (remoto-test-with-listings
+      (dolist (switches '("-al" "-alF"))
+        (expect (remoto-test--listed-names "/github:me/" switches)
+                :to-equal '("." ".." "alpha" "mid" "zeta")))))
+
+  (it "sorts by name, and under -t by the last push, newest first"
+    (remoto-test-with-listings
+      (expect (remoto-test--listed-names "/github:me/" "-alt")
+              :to-equal '("." ".." "zeta" "mid" "alpha"))))
+
+  (it "lines the notes up where dired-hide-details-mode hides them"
+    ;; Dired hides a line from 4 columns past its name, for symlink targets.
+    (remoto-test-with-listings
+      (dolist (switches '("-al" "-alF"))
+        (with-current-buffer (dired-noselect "/github:me/" switches)
+          (let ((columns
+                 (mapcar (lambda (note)
+                           (goto-char (point-min))
+                           (search-forward note)
+                           (goto-char (match-beginning 0))
+                           (expect (get-text-property (point) 'invisible)
+                                   :to-be 'dired-hide-details-link)
+                           (current-column))
+                         '("Newest push" "fork  Forked"))))
+            (expect (car columns) :to-equal (cadr columns)))))))
+
+  (it "opens a repository's root at its default branch with one request"
+    (remoto-test-with-listings
+      (remoto-test--listing-text "/github:me/")
+      (spy-calls-reset 'remoto--api)
+      (with-current-buffer (remoto-test--visit-entry "/github:me/" "alpha")
+        (expect dired-directory :to-equal "/github:me/alpha@trunk:/")
+        (expect (buffer-string) :to-match "README\\.md"))
+      (expect (mapcar #'car (spy-calls-all-args 'remoto--api))
+              :to-equal '("repos/me/alpha/git/trees/trunk?recursive=1"))))
+
+  (it "climbs from a repository root to its owner, then to /github:"
+    (remoto-test-with-listings
+      (with-current-buffer (remoto-test--visit-entry "/github:me/" "zeta")
+        (expect dired-directory :to-equal "/github:me/zeta@main:/"))
+      (with-current-buffer (remoto-test--visit-entry "/github:me/zeta@main:/" "..")
+        (expect dired-directory :to-equal "/github:me/"))
+      (with-current-buffer (remoto-test--visit-entry "/github:me/" "..")
+        (expect dired-directory :to-equal "/github:"))))
+
+  (it "fails with the API's answer, and leaves no buffer, for an unknown owner"
+    (remoto-test-with-listings
+      (let ((before (buffer-list)))
+        (spy-on 'remoto--api :and-call-fake
+                (lambda (endpoint)
+                  (if (string-prefix-p "users/nobody/" endpoint)
+                      (user-error "Remoto: not found: %s" endpoint)
+                    (remoto-test--listing-api endpoint))))
+        (expect (dired-noselect "/github:nobody/") :to-throw 'user-error)
+        (expect (seq-difference (buffer-list) before) :to-be nil)))))
+
+(describe "the endpoint of an owner listing"
+  (it "lists the private repositories of the token's own account"
+    (remoto-test-with-listings
+      (remoto-test--listing-text "/github:me/")
+      (expect 'remoto--api :to-have-been-called-with
+              "user/repos?affiliation=owner&sort=pushed&per_page=100&page=1")))
+
+  (it "lists an organization of the token through the organization endpoint"
+    (remoto-test-with-listings
+      (expect (remoto-test--listing-text "/github:acme/")
+              :to-match "^  drwx------ .* tool$")
+      (expect 'remoto--api :to-have-been-called-with
+              "orgs/acme/repos?sort=pushed&per_page=100&page=1")))
+
+  (it "lists the public repositories of any other account, token or not"
+    (remoto-test-with-listings
+      (expect (remoto-test--listing-text "/github:torvalds/") :to-match " linux$")
+      (expect 'remoto--api :to-have-been-called-with
+              "users/torvalds/repos?sort=pushed&per_page=100&page=1"))
+    (remoto-test-with-listings
+      (let ((remoto--authenticated-user nil)
+            (remoto--auth-failed t))
+        (expect (remoto-test--listing-text "/github:torvalds/") :to-match " linux$")
+        (expect (mapcar #'car (spy-calls-all-args 'remoto--api))
+                :to-equal '("users/torvalds/repos?sort=pushed&per_page=100&page=1"))))))
+
+(describe "the pages of an owner listing"
+  (it "takes a short first page as the whole listing"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api-async)
+      (expect (remoto-test--listing-text "/github:torvalds/") :not :to-match "so far")
+      (expect 'remoto--api-async :not :to-have-been-called)))
+
+  (it "loads the later pages in the background, one at a time, and reverts once"
+    (remoto-test-with-listings
+      (let ((pending nil))
+        (spy-on 'remoto--api :and-call-fake #'remoto-test--with-big-owner)
+        (spy-on 'remoto--api-async :and-call-fake
+                (lambda (endpoint callback &optional _errback)
+                  (setq pending (append pending (list (cons endpoint callback))))))
+        (let ((buf (dired-noselect "/github:big/")))
+          (expect (with-current-buffer buf (buffer-string))
+                  :to-match " \\. +100 so far, fetching the rest$")
+          (expect (mapcar #'car pending)
+                  :to-equal '("users/big/repos?sort=pushed&per_page=100&page=2"))
+          (spy-on 'revert-buffer :and-call-through)
+          (funcall (cdr (pop pending)) (remoto-test--repo-items 100 "b"))
+          (expect 'revert-buffer :not :to-have-been-called)
+          (expect (mapcar #'car pending)
+                  :to-equal '("users/big/repos?sort=pushed&per_page=100&page=3"))
+          (funcall (cdr (pop pending)) (remoto-test--repo-items 5 "c"))
+          (expect pending :to-be nil)
+          (expect 'revert-buffer :to-have-been-called-times 1)
+          (with-current-buffer buf
+            (expect (buffer-string) :not :to-match "so far")
+            (expect (buffer-string) :to-match " a000$")
+            (expect (buffer-string) :to-match " c004$"))))))
+
+  (it "stops at remoto-listing-cap and says so on the . line"
+    (remoto-test-with-listings
+      (let ((remoto-listing-cap 150)
+            (pending nil))
+        (spy-on 'remoto--api :and-call-fake #'remoto-test--with-big-owner)
+        (spy-on 'remoto--api-async :and-call-fake
+                (lambda (_endpoint callback &optional _errback)
+                  (push callback pending)))
+        (let ((buf (dired-noselect "/github:big/")))
+          (funcall (pop pending) (remoto-test--repo-items 100 "b"))
+          (expect pending :to-be nil)
+          (with-current-buffer buf
+            (expect (buffer-string) :to-match
+                    " \\. +the 150 most recently pushed, as `remoto-listing-cap' allows$")
+            (expect (buffer-string) :to-match " b049$")
+            (expect (buffer-string) :not :to-match " b050$"))))))
+
+  (it "says when a later page failed, and leaves the retry to remoto-refresh"
+    ;; The revert that shows the failure must not fetch again: against a
+    ;; failing API that would loop.
+    (remoto-test-with-listings
+      (let ((errbacks nil))
+        (spy-on 'remoto--api :and-call-fake #'remoto-test--with-big-owner)
+        (spy-on 'remoto--api-async :and-call-fake
+                (lambda (_endpoint _callback &optional errback)
+                  (push errback errbacks)))
+        (with-current-buffer (dired-noselect "/github:big/")
+          (spy-calls-reset 'remoto--api)
+          (funcall (pop errbacks))
+          (expect (buffer-string) :to-match
+                  " \\. +100, the rest failed to load; `remoto-refresh' retries$")
+          (revert-buffer)
+          (expect 'remoto--api :not :to-have-been-called)
+          (expect errbacks :to-be nil)
+          (remoto-refresh)
+          (expect 'remoto--api :to-have-been-called-with
+                  "users/big/repos?sort=pushed&per_page=100&page=1")))))
+
+  (it "drops the late pages of a listing that remoto-refresh replaced"
+    (remoto-test-with-listings
+      (let ((pending nil))
+        (spy-on 'remoto--api :and-call-fake #'remoto-test--with-big-owner)
+        (spy-on 'remoto--api-async :and-call-fake
+                (lambda (_endpoint callback &optional _errback)
+                  (push callback pending)))
+        (with-current-buffer (dired-noselect "/github:big/")
+          (let ((late (car (last pending))))
+            (remoto-refresh)
+            (let ((fresh (gethash "/github:big/" remoto--listing-cache)))
+              (funcall late (remoto-test--repo-items 5 "z"))
+              (expect (gethash "/github:big/" remoto--listing-cache) :to-be fresh)
+              (expect (length (remoto--listing-entries fresh)) :to-equal 100)
+              (expect (buffer-string) :not :to-match " z000$")))))))
+
+  (it "remembers each default branch, so opening a listed repository asks for none"
+    (remoto-test-with-listings
+      (remoto-test--listing-text "/github:me/")
+      (expect (gethash "me/alpha" remoto--default-branch-cache) :to-equal "trunk")
+      (expect (remoto--maybe-rewrite "/github:me/alpha") :to-equal "/github:me/alpha@trunk:/")
+      (expect 'remoto--api :not :to-have-been-called-with "repos/me/alpha"))))
+
+(describe "file-exists-p of a bare account or repository name"
+  (it "answers t once a cached listing holds it, however old the listing"
+    (remoto-test-with-listings
+      (remoto-test--listing-text "/github:")
+      (remoto-test--listing-text "/github:me/")
+      (dolist (dir '("/github:" "/github:me/"))
+        (setf (remoto--listing-time (gethash dir remoto--listing-cache)) 0))
+      (expect (file-exists-p "/github:me/zeta") :to-be t)
+      (expect (file-exists-p "/gh:me/zeta") :to-be t)
+      (expect (file-exists-p "/github:acme") :to-be t)))
+
+  (it "keeps the confirmation for a name no listing holds"
+    (remoto-test-with-listings
+      (remoto-test--listing-text "/github:")
+      (remoto-test--listing-text "/github:me/")
+      (expect (file-exists-p "/github:me/zet") :to-be nil)
+      (expect (file-exists-p "/github:other/zeta") :to-be nil)
+      (expect (file-exists-p "/github:acm") :to-be nil)
+      (expect (file-exists-p "/github:acme#") :to-be nil))))
+
+(describe "remoto-refresh in a listing"
+  (it "fetches the listing of the buffer again"
+    (remoto-test-with-listings
+      (with-current-buffer (dired-noselect "/github:")
+        (spy-calls-reset 'remoto--api)
+        (remoto-refresh)
+        (expect 'remoto--api :to-have-been-called-with "user/orgs?per_page=100&page=1")
+        (expect (buffer-string) :to-match " acme "))
+      (with-current-buffer (dired-noselect "/github:me/")
+        (spy-calls-reset 'remoto--api)
+        (remoto-refresh)
+        (expect 'remoto--api :to-have-been-called-with
+                "user/repos?affiliation=owner&sort=pushed&per_page=100&page=1")
+        (expect (buffer-string) :to-match " zeta ")))))
 
 ;;; maybe-rewrite for partial canonical paths
 
@@ -2830,6 +3244,16 @@ Return the buffer that RET leaves current."
 
   (it "leaves non-github paths unchanged"
     (expect (remoto--maybe-rewrite "/home/user/file") :to-equal "/home/user/file"))
+
+  (it "resolves . and .. before it reads a short form"
+    ;; /github:o/.. matches the short form of a repository named "..".
+    (spy-on 'remoto--api)
+    (expect (remoto--maybe-rewrite "/github:o/..") :to-equal "/github:")
+    (expect (remoto--maybe-rewrite "/github:o/.") :to-equal "/github:o/")
+    (expect (remoto--maybe-rewrite "/gh:o/r@main:/..") :to-equal "/github:o/")
+    (expect (remoto--maybe-rewrite "/github:o/r@main:/src/..")
+            :to-equal "/github:o/r@main:/")
+    (expect 'remoto--api :not :to-have-been-called))
 
   (it "normalizes the /gh: shorthand before rewriting"
     (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
@@ -4450,6 +4874,21 @@ Returns the full path after completion, or INPUT if no completion."
       (remoto--api-async "search/z" #'ignore)
       (expect remoto--inflight-count :to-equal 0)))
 
+  (it "calls ERRBACK for a failed request and for one that never started"
+    (let ((remoto--inflight-count 0)
+          (remoto--auth-failed nil)
+          (remoto--effective-auth 'token)
+          (failed nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (resource &optional _params &rest args)
+                (if (equal resource "/late")
+                    (funcall (plist-get args :errorback) 'err 'h 's 'r)
+                  (error "boom"))))
+      (remoto--api-async "late" #'ignore (lambda () (push 'late failed)))
+      (remoto--api-async "never" #'ignore (lambda () (push 'never failed)))
+      (expect failed :to-equal '(never late))
+      (expect remoto--inflight-count :to-equal 0)))
+
   (it "stays positive when one of two overlapping fetches finishes"
     (let ((remoto--inflight-count 0)
           (remoto--auth-failed nil)
@@ -4882,6 +5321,31 @@ three functions the indicator asks are answered by a temp buffer."
         (expect (remoto--embark-target-at-point)
                 :to-equal
                 '(remoto-file . "/github:testowner/testrepo@main:/src/main.el")))))
+
+  (it "classifies the lines of the listings above the repositories"
+    (spy-on 'remoto--api)
+    (dolist (case '(("/github:me/" "/github:me/zeta" remoto-repo . "/github:me/zeta:/")
+                    ("/github:" "/github:acme" remoto-owner . "/github:acme")
+                    ("/github:me/" nil remoto-owner . "/github:me/")))
+      (pcase-let ((`(,dir ,file . ,target) case))
+        (with-temp-buffer
+          (dired-mode)
+          (setq-local dired-directory dir)
+          (spy-on 'dired-get-filename :and-return-value file)
+          (expect (remoto--embark-target-at-point) :to-equal target))))
+    (expect 'remoto--api :not :to-have-been-called))
+
+  (it "resolves the dots of the . and .. entries first"
+    (spy-on 'remoto--api)
+    (dolist (case '(("/github:me/zeta@main:/.." remoto-owner . "/github:me/")
+                    ("/github:me/zeta@main:/." remoto-repo . "/github:me/zeta@main:/")
+                    ("/github:me/.." . nil)))
+      (with-temp-buffer
+        (dired-mode)
+        (setq-local dired-directory "/github:me/")
+        (spy-on 'dired-get-filename :and-return-value (car case))
+        (expect (remoto--embark-target-at-point) :to-equal (cdr case))))
+    (expect 'remoto--api :not :to-have-been-called))
 
   (it "returns nil outside remoto buffers"
     (with-temp-buffer
