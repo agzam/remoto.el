@@ -1389,7 +1389,10 @@ request."
 
 (defun remoto--evil-ex-argument-p (filename)
   "Return non-nil when FILENAME is the argument of the running Evil ex command."
-  (when-let* (((bound-and-true-p evil-called-from-ex-p))
+  (when-let* (((if (boundp 'evil-called-from-ex-p)
+                   evil-called-from-ex-p
+                 ;; An Evil without that flag binds this around each command.
+                 (bound-and-true-p evil-ex-point)))
               (argument (bound-and-true-p evil-ex-argument))
               ((stringp argument)))
     (equal filename (remoto--normalize-shorthand argument))))

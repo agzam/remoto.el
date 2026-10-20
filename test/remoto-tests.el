@@ -733,6 +733,26 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
     (expect (file-remote-p "/gh:o/r/README.md" 'localname)
             :to-equal "/github:"))
 
+  (it "splits the argument for an Evil without evil-called-from-ex-p"
+    ;; Such an Evil binds `evil-ex-point' around each ex command only, and
+    ;; sets `evil-ex-argument' while the prompt is typed into.
+    (assume (not (boundp 'evil-called-from-ex-p)) "Evil is loaded")
+    (cl-progv '(evil-ex-point evil-ex-argument) (list 1 "/gh:o/r/README.md")
+      (expect (file-remote-p "/gh:o/r/README.md" 'localname)
+              :to-equal "o/r/README.md")
+      (expect (remoto-test--evil-rebuild "/gh:o/r/README.md")
+              :to-equal "/github:o/r/README.md"))
+    (cl-progv '(evil-ex-point evil-ex-argument) (list nil "/gh:o/r/README.md")
+      (expect (file-remote-p "/gh:o/r/README.md" 'localname)
+              :to-equal "/github:")))
+
+  (it "follows evil-called-from-ex-p over evil-ex-point when both exist"
+    ;; `:normal' binds `evil-called-from-ex-p' to nil for the keys it runs.
+    (cl-progv '(evil-called-from-ex-p evil-ex-point evil-ex-argument)
+        (list nil 1 "/github:o/r@main:/README.md")
+      (expect (file-remote-p "/github:o/r@main:/README.md" 'localname)
+              :to-equal "/github:o/r@main:")))
+
   (it "still honors CONNECTED inside the command"
     (let ((remoto--tree-cache (make-hash-table :test 'equal))
           (remoto--default-branch-cache (make-hash-table :test 'equal)))

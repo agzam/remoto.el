@@ -124,7 +124,7 @@ Evil's ex commands take remoto paths: ~:e~, ~:sp~, ~:vs~, ~:view~ and ~:new~ ope
 :e /gh:agzam/remoto.el#37
 #+end_example
 
-Inside a remoto path, ~#~ and ~%~ are literal: they do not name Evil's alternate and current file.
+In a name that starts with ~/gh:~ or ~/github:~, ~#~ and ~%~ are literal: they do not name Evil's alternate and current file. A relative name keeps Evil's meaning, so in a remoto Dired, ~:e C\#/Program.cs~ opens ~C#/Program.cs~.
 
 ** Embark integration
 
