@@ -3,6 +3,12 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [2.2.0] - 2026-10-19
+
+** Added
+- Evil's ex commands take remoto paths. ~:e /gh:OWNER/REPO/FILE~ and ~:e /github:OWNER/REPO@REF:/FILE~ reached ~find-file~ with the prefix twice, ~/github:/github:~, because Evil rebuilds a file argument from ~file-remote-p~ and its ~localname~, and remoto answered the prefix for ~localname~. remoto now answers the path after the prefix for the argument of the running ex command, so ~:e~, ~:sp~, ~:vs~, ~:view~ and ~:new~ open the path as ~C-x C-f~ does. Every other caller still gets the prefix: callers hand ~localname~ to local programs, and remoto runs none. Inside a remoto path, ~#~ and ~%~ stay literal instead of naming Evil's alternate and current file, so ~:e /gh:OWNER/REPO#N~ opens the issue or pull request.
+- Specs for the ~localname~ answer inside and outside an Evil ex command, without Evil loaded, under an Evil that lacks ~evil-called-from-ex-p~ (the releases on NonGNU ELPA and MELPA Stable), and for the ex command that brings remoto in.
+
 * [2.1.1] - 2026-10-16
 
 ** Fixed

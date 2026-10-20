@@ -186,7 +186,7 @@ This returns one directory level at a time. The tree cache stores what it has an
 | `expand-file-name` | Resolve `.` and `..` in absolute and relative remoto names, handle relative paths under remoto dirs; for partial paths (e.g. `/github:owner/`) concatenates directly |
 | `file-accessible-directory-p` | Delegates to `file-directory-p` - remote dirs are always readable |
 | `file-truename` | Return the path as-is (no symlink resolution) |
-| `file-remote-p` | Return the `/github:owner/repo@ref:` prefix (or method/host on request); handles partial paths |
+| `file-remote-p` | Return the `/github:owner/repo@ref:` prefix (or method/host on request); handles partial paths. `localname` is the prefix as well, so no caller hands a local program a remoto path, except for the argument of a running Evil ex command, which gets the path after the prefix with each bare `#` and `%` escaped: Evil rebuilds that argument from the two answers and would replace those with file names |
 | `file-local-copy` | Download to temp file, return temp path |
 | `make-nearby-temp-file` | Create temp file in system temp dir |
 | `file-name-directory` | Return directory part of remoto path; handles partial paths for pre-repo completion |

@@ -114,6 +114,18 @@ LSP makes no sense on a remote Git path, so remoto keeps lsp-mode and Eglot out 
 (setopt remoto-inhibited-functions '(lsp eglot-ensure flycheck-mode))
 #+end_src
 
+*** Evil
+
+Evil's ex commands take remoto paths: ~:e~, ~:sp~, ~:vs~, ~:view~ and ~:new~ open them as ~C-x C-f~ does.
+
+#+begin_example
+:e /gh:torvalds/linux/README
+:e /github:torvalds/linux@master:/Makefile
+:e /gh:agzam/remoto.el#37
+#+end_example
+
+In a name that starts with ~/gh:~ or ~/github:~, ~#~ and ~%~ are literal: they do not name Evil's alternate and current file. A relative name keeps Evil's meaning, so in a remoto Dired, ~:e C\#/Program.cs~ opens ~C#/Program.cs~.
+
 ** Embark integration
 
 Optional [[https://github.com/oantolin/embark][Embark]] integration lives in ~remoto-embark.el~. Embark is not a hard dependency; when it is installed the integration activates automatically, with nothing to configure. With it active, ~embark-act~ offers forge-agnostic actions on remoto targets in remoto file buffers, ~dired~, and ~/github:~ minibuffer completion (including ~embark-collect~).
