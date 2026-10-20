@@ -6,7 +6,7 @@
 ;; Assisted-by: ECA:claude-opus-5
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: April 24, 2026
-;; Version: 2.1.1
+;; Version: 2.2.0
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
 ;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
@@ -1387,6 +1387,25 @@ request."
                  remoto--default-branch-cache)
         (gethash (remoto--repo-key parsed) remoto--tree-cache))))
 
+(defun remoto--evil-ex-argument-p (filename)
+  "Return non-nil when FILENAME is the argument of the running Evil ex command."
+  (when-let* (((bound-and-true-p evil-called-from-ex-p))
+              (argument (bound-and-true-p evil-ex-argument))
+              ((stringp argument)))
+    (equal filename (remoto--normalize-shorthand argument))))
+
+(defun remoto--localname (filename prefix)
+  "Return the `localname' of FILENAME, whose remote prefix is PREFIX.
+That is PREFIX, since callers pass it to local programs and remoto runs
+none, except for an Evil ex argument: Evil rebuilds that from both
+answers and replaces a bare `#' or `%' in it, so both come back escaped."
+  (if (remoto--evil-ex-argument-p filename)
+      (replace-regexp-in-string
+       (rx (? "\\") (in "#%"))
+       (lambda (s) (if (string-prefix-p "\\" s) s (concat "\\" s)))
+       (substring filename (length prefix)) t t)
+    prefix))
+
 (defun remoto--handle-file-remote-p (filename &optional identification connected)
   "Return remote identification for FILENAME.
 Use IDENTIFICATION to select which remote field to report.
@@ -1406,11 +1425,13 @@ Handles partial paths for pre-repo completion."
           ('method "github")
           ('host (format "%s/%s" (remoto-path-owner parsed)
                          (remoto-path-repo parsed)))
+          ('localname (remoto--localname filename prefix))
           (_ prefix))
       ;; Partial path - still remote
       (pcase identification
         ('method "github")
         ('host "github.com")
+        ('localname (remoto--localname filename "/github:"))
         (_ "/github:")))))
 
 (defun remoto--handle-file-name-directory (filename)

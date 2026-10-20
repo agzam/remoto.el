@@ -619,6 +619,131 @@
                "/github:testowner/testrepo@main:/nope.txt")
               :to-be nil))))
 
+;;; Evil's ex argument
+
+(defmacro remoto-test-in-evil-ex (argument &rest body)
+  "Run BODY with the bindings Evil makes for an ex command given ARGUMENT."
+  (declare (indent 1))
+  `(cl-progv '(evil-called-from-ex-p evil-ex-argument) (list t ,argument)
+     ,@body))
+
+(defun remoto-test--evil-rebuild (name &optional current alternate)
+  "Rebuild NAME the way `evil-ex-replace-special-filenames' does.
+CURRENT and ALTERNATE stand for the files that `%' and `#' name."
+  (let ((remote (file-remote-p name))
+        (local (or (file-remote-p name 'localname) name)))
+    (when current
+      (setq local (replace-regexp-in-string
+                   "\\(^\\|[^\\\\]\\)\\(%\\)" current local t t 2)))
+    (when alternate
+      (setq local (replace-regexp-in-string
+                   "\\(^\\|[^\\\\]\\)\\(#\\)" alternate local t t 2)))
+    (concat remote (replace-regexp-in-string "\\\\\\([#%]\\)" "\\1" local t))))
+
+(describe "file-remote-p for the argument of an Evil ex command"
+  ;; Evil rebuilds a file argument from its prefix and `localname'.  Only
+  ;; that argument gets the path after the prefix; every other caller keeps
+  ;; the prefix, because callers hand `localname' to local programs.
+  (it "answers the path after the prefix for a canonical name"
+    (remoto-test-in-evil-ex "/github:o/r@main:/src/a:b.el"
+      (expect (file-remote-p "/github:o/r@main:/src/a:b.el" 'localname)
+              :to-equal "/src/a:b.el")))
+
+  (it "answers \"\" and \"/\" for a repository root"
+    (remoto-test-in-evil-ex "/github:o/r@main:"
+      (expect (file-remote-p "/github:o/r@main:" 'localname) :to-equal ""))
+    (remoto-test-in-evil-ex "/github:o/r@main:/"
+      (expect (file-remote-p "/github:o/r@main:/" 'localname) :to-equal "/")))
+
+  (it "answers the path after the prefix for a name without a ref"
+    (remoto-test-in-evil-ex "/github:o/r:/README.md"
+      (expect (file-remote-p "/github:o/r:/README.md" 'localname)
+              :to-equal "/README.md")))
+
+  (it "answers the text after /github: for a short name in either spelling"
+    (remoto-test-in-evil-ex "/gh:o/r/README.md"
+      (expect (file-remote-p "/gh:o/r/README.md" 'localname)
+              :to-equal "o/r/README.md"))
+    (remoto-test-in-evil-ex "/github:o/r/src/"
+      (expect (file-remote-p "/github:o/r/src/" 'localname)
+              :to-equal "o/r/src/")))
+
+  (it "lets Evil's rebuild give back every name it is given"
+    (dolist (name '("/github:o/r@main:/README.md" "/github:o/r@main:"
+                    "/github:o/r@main:/" "/github:o/r@v1.0:/src/"
+                    "/github:o/r:/README.md" "/github:o/r/README.md"
+                    "/github:o/r/" "/github:o/r" "/github:o/" "/github:"))
+      (remoto-test-in-evil-ex name
+        (expect (remoto-test--evil-rebuild name "/tmp/cur" "/tmp/alt")
+                :to-equal name)))
+    (remoto-test-in-evil-ex "/gh:o/r/README.md"
+      (expect (remoto-test--evil-rebuild "/gh:o/r/README.md")
+              :to-equal "/github:o/r/README.md")))
+
+  (it "escapes each # and % that Evil would replace with a file name"
+    (remoto-test-in-evil-ex "/gh:o/r#22"
+      (expect (file-remote-p "/gh:o/r#22" 'localname) :to-equal "o/r\\#22"))
+    (remoto-test-in-evil-ex "/github:o/r@main:/a#%b%"
+      (expect (file-remote-p "/github:o/r@main:/a#%b%" 'localname)
+              :to-equal "/a\\#\\%b\\%"))
+    (remoto-test-in-evil-ex "/gh:o/r\\#22"
+      (expect (file-remote-p "/gh:o/r\\#22" 'localname) :to-equal "o/r\\#22")))
+
+  (it "keeps # and % literal through Evil's rebuild"
+    (dolist (case '(("/gh:o/r#22" . "/github:o/r#22")
+                    ("/gh:o/r\\#22" . "/github:o/r#22")
+                    ("/github:o/r@main:/100%.md" . "/github:o/r@main:/100%.md")
+                    ("/github:o/r@main:/a#%b" . "/github:o/r@main:/a#%b")))
+      (remoto-test-in-evil-ex (car case)
+        (expect (remoto-test--evil-rebuild (car case) "/tmp/cur" "/tmp/alt")
+                :to-equal (cdr case)))))
+
+  (it "keeps the prefix for another name inside the same command"
+    (remoto-test-in-evil-ex "/gh:o/r/README.md"
+      (expect (file-remote-p "/github:o/r@main:/README.md" 'localname)
+              :to-equal "/github:o/r@main:")
+      (expect (file-local-name "/github:o/r@main:/README.md")
+              :to-equal "/github:o/r@main:")))
+
+  (it "keeps the other identifications as they are"
+    (remoto-test-in-evil-ex "/github:o/r@main:/README.md"
+      (expect (file-remote-p "/github:o/r@main:/README.md")
+              :to-equal "/github:o/r@main:")
+      (expect (file-remote-p "/github:o/r@main:/README.md" 'method)
+              :to-equal "github")
+      (expect (file-remote-p "/github:o/r@main:/README.md" 'host)
+              :to-equal "o/r")))
+
+  (it "keeps the prefix outside an ex command"
+    ;; Evil leaves `evil-ex-argument' set between commands.
+    (cl-progv '(evil-called-from-ex-p evil-ex-argument)
+        (list nil "/github:o/r@main:/README.md")
+      (expect (file-remote-p "/github:o/r@main:/README.md" 'localname)
+              :to-equal "/github:o/r@main:")))
+
+  (it "keeps the prefix for an ex command without an argument"
+    (remoto-test-in-evil-ex nil
+      (expect (file-remote-p "/github:o/r@main:/README.md" 'localname)
+              :to-equal "/github:o/r@main:")))
+
+  (it "keeps the prefix for every caller when Evil is not loaded"
+    (assume (not (boundp 'evil-called-from-ex-p)) "Evil is loaded")
+    (expect (file-local-name "/github:o/r@main:/etc/hosts")
+            :to-equal "/github:o/r@main:")
+    (expect (file-remote-p "/gh:o/r/README.md" 'localname)
+            :to-equal "/github:"))
+
+  (it "still honors CONNECTED inside the command"
+    (let ((remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (spy-on 'remoto--api)
+      (remoto-test-in-evil-ex "/github:o/r@main:/README.md"
+        (expect (file-remote-p "/github:o/r@main:/README.md" 'localname t)
+                :to-be nil)
+        (expect (file-remote-p "/github:o/r@main:/README.md" 'localname 'never)
+                :to-equal "/README.md"))
+      (expect 'remoto--api :not :to-have-been-called))))
+
 ;;; Dired listing format
 
 (describe "remoto--format-dired-entry"
@@ -5798,6 +5923,18 @@ of `completion-all-completions'; Vertico inserts a candidate as
                   :to-be nil)
           (expect global-remoto-mode :to-be-truthy))
       (remoto--drop-autoload-handler)
+      (global-remoto-mode 1)))
+
+  (it "splits the argument of an Evil ex command that brings remoto in"
+    (unwind-protect
+        (progn
+          (global-remoto-mode -1)
+          (remoto-test--push-bootstrap)
+          (spy-on 'message)
+          (remoto-test-in-evil-ex "/gh:o/r@main:/x"
+            (expect (remoto-test--evil-rebuild "/gh:o/r@main:/x")
+                    :to-equal "/github:o/r@main:/x"))
+          (expect global-remoto-mode :to-be-truthy))
       (global-remoto-mode 1)))
 
   (it "is dropped by remoto-unload-function when the mode never turned on"
