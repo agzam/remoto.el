@@ -3656,13 +3656,18 @@ release-2, and only main and release-1 have a tree."
               :to-equal '("/github:torvalds/linux@master:/" "Makefile"))))
 
   (it "passes local directories and canonical paths through untouched"
-    (spy-on 'remoto--maybe-rewrite :and-call-through)
-    (expect (remoto--dired-around-a (lambda (d &rest _) d) "/tmp/")
-            :to-equal "/tmp/")
-    (expect 'remoto--maybe-rewrite :not :to-have-been-called)
-    (expect (remoto--dired-around-a (lambda (d &rest _) d)
-                                    "/github:torvalds/linux@master:/src")
-            :to-equal "/github:torvalds/linux@master:/src")))
+    ;; A canonical name is checked against its tree, which may hold no
+    ;; such name; the mock tree answers without a request.
+    (remoto-test-with-cache
+      (spy-on 'remoto--maybe-rewrite :and-call-through)
+      (spy-on 'remoto--api)
+      (expect (remoto--dired-around-a (lambda (d &rest _) d) "/tmp/")
+              :to-equal "/tmp/")
+      (expect 'remoto--maybe-rewrite :not :to-have-been-called)
+      (expect (remoto--dired-around-a (lambda (d &rest _) d)
+                                      "/github:testowner/testrepo@main:/src")
+              :to-equal "/github:testowner/testrepo@main:/src")
+      (expect 'remoto--api :not :to-have-been-called))))
 
 ;;; ====================================================================
 ;;; TDD tests for v2 features: delimiter dispatch, #issues, @tags,
