@@ -55,7 +55,7 @@
          (remoto--dir-contents-cache (make-hash-table :test 'equal))
          (remoto--file-commits-cache (make-hash-table :test 'equal))
          (remoto--listing-cache (make-hash-table :test 'equal))
-         (remoto--repo-entry-cache (make-hash-table :test 'equal))
+         (remoto--entry-cache (make-hash-table :test 'equal))
          (remoto--auth-failed nil)
          (remoto--authenticated-user nil))
      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
@@ -2221,12 +2221,21 @@ using unauthenticated access until M-x remoto-reset-auth")
   (it "file-exists-p returns t for /github:owner/"
     (expect (remoto--handle-file-exists-p "/github:foobar/") :to-be t))
 
-  (it "file-name-as-directory leaves /github: as it is"
+  (it "file-name-as-directory leaves /github: and /github:OWNER/REPO@ as they are"
     ;; Dired builds every name in a listing from this; /github:/OWNER
-    ;; would name no account.
+    ;; would name no account, and /github:OWNER/REPO@/REF no ref.
     (expect (file-name-as-directory "/github:") :to-equal "/github:")
     (expect (file-name-as-directory "/gh:") :to-equal "/github:")
-    (expect (file-name-as-directory "/github:foobar") :to-equal "/github:foobar/"))
+    (expect (file-name-as-directory "/github:foobar") :to-equal "/github:foobar/")
+    (expect (file-name-as-directory "/github:o/r@") :to-equal "/github:o/r@")
+    (expect (file-name-as-directory "/github:o/r@main") :to-equal "/github:o/r@main/"))
+
+  (it "file-name-nondirectory of a canonical directory name is empty"
+    ;; Dired lists a directory whose name has a nondirectory part as a
+    ;; wildcard, and completion matches that part against the children.
+    (expect (file-name-nondirectory "/github:o/r@main:/src/") :to-equal "")
+    (expect (file-name-nondirectory "/github:o/r@main:/src") :to-equal "src")
+    (expect (file-name-nondirectory "/github:o/r@main:/") :to-equal ""))
 
   (it "file-remote-p returns /github: for partial paths"
     (expect (remoto--handle-file-remote-p "/github:foobar/") :to-equal "/github:"))
@@ -2897,6 +2906,13 @@ Return the buffer that RET leaves current."
           (with-current-buffer (remoto-test--visit-entry root "..")
             (expect dired-directory :to-equal "/github:testowner/"))))))
 
+  (it "lists a subdirectory as a directory, with no wildcard line"
+    (remoto-test-with-listing "-al"
+      (with-current-buffer (dired-noselect "/github:testowner/testrepo@main:/src/")
+        (expect (buffer-string) :not :to-match "wildcard")
+        (expect (remoto-test--listed-names "/github:testowner/testrepo@main:/src/" "-al")
+                :to-equal '("." ".." "main.el" "utils.el")))))
+
   (it "visits a one-letter directory and a symlink"
     (remoto-test-with-listing "-alF"
       (spy-on 'remoto--fetch-file-content :and-return-value "README.md")
@@ -3329,8 +3345,8 @@ repository than tool, and a search for anything else finds none."
       (expect (cdr (buffer-local-value 'dired-directory
                                        (find-file-noselect "/gh:acme/stitch env")))
               :to-equal '("stitch-api" "stitch-env"))
-      (expect (remoto--repo-matches "/github:acme/..") :to-be nil)
-      (expect (remoto--repo-matches "/github:acme/zeta@main:/..") :to-be nil)
+      (expect (remoto--query-matches "/github:acme/..") :to-be nil)
+      (expect (remoto--query-matches "/github:acme/zeta@main:/..") :to-be nil)
       (expect (seq-filter (lambda (args) (string-prefix-p "repos/" (car args)))
                           (spy-calls-all-args 'remoto--api))
               :to-be nil)))
@@ -3385,6 +3401,199 @@ repository than tool, and a search for anything else finds none."
       (expect (file-exists-p "/github:acme/stitch") :to-be nil)
       (expect (gethash "acme/stitch-env" remoto--default-branch-cache)
               :to-equal "trunk"))))
+
+(defun remoto-test--account-api (endpoint)
+  "Answer ENDPOINT as `remoto-test--listing-api' does, plus a user search.
+A search for qlik finds the user qlik, the organizations qlik-oss and
+qlik-trial, and jdoe, whose login lacks the word; qlik-trial has one
+repository."
+  (cond
+   ((string-prefix-p "search/users?q=qlik&" endpoint)
+    '((items ((login . "qlik-trial") (type . "Organization"))
+             ((login . "jdoe") (type . "User"))
+             ((login . "qlik") (type . "User"))
+             ((login . "qlik-oss") (type . "Organization")))))
+   ((string-prefix-p "search/users?" endpoint) '((items)))
+   ((string-prefix-p "users/qlik-trial/repos?sort=pushed&" endpoint)
+    (list (remoto-test--repo-item "stitch" "2026-10-01T00:00:00Z")))
+   (t (remoto-test--listing-api endpoint))))
+
+(describe "a bare account name"
+  (it "opens a Dired of the accounts whose login holds the typed words"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--account-api)
+      (with-current-buffer (find-file-noselect "/gh:qlik")
+        (expect dired-directory :to-equal '("/github:" "qlik" "qlik-oss" "qlik-trial"))
+        (expect (remoto-test--dired-names) :to-equal '("qlik" "qlik-oss" "qlik-trial"))
+        (expect (buffer-string) :to-match
+                (rx bol "  drwxr-xr-x " (+ nonl) " qlik-trial" (>= 4 " ") "Organization" eol))
+        (expect (buffer-string) :to-match
+                (rx bol "  drwxr-xr-x " (+ nonl) " qlik" (>= 4 " ") "User" eol)))
+      (expect (mapcar #'car (spy-calls-all-args 'remoto--api))
+              :to-equal '("search/users?q=qlik&per_page=100"))))
+
+  (it "takes the search of completion when it ran, asking nothing"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--account-api)
+      (remoto--search-cache-put
+       "\0users:qlik" (list (propertize "qlik-trial" 'remoto-acct-type "Organization")
+                            (propertize "jdoe" 'remoto-acct-type "User")))
+      (expect (buffer-local-value 'dired-directory (find-file-noselect "/gh:qlik"))
+              :to-equal '("/github:" "qlik-trial"))
+      (expect 'remoto--api :not :to-have-been-called)))
+
+  (it "opens an account from its line in the Dired of matches"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--account-api)
+      (with-current-buffer (remoto-test--visit-entry "/github:qlik" "qlik-trial")
+        (expect dired-directory :to-equal "/github:qlik-trial/")
+        (expect (remoto-test--dired-names) :to-equal '("." ".." "stitch")))))
+
+  (it "opens an account typed with its slash, with no search"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--account-api)
+      (expect (buffer-local-value 'dired-directory (find-file-noselect "/gh:qlik-trial/"))
+              :to-equal "/github:qlik-trial/")
+      (expect (seq-filter (lambda (args) (string-prefix-p "search/" (car args)))
+                          (spy-calls-all-args 'remoto--api))
+              :to-be nil)))
+
+  (it "says so, and leaves no buffer, when no account matches"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--account-api)
+      (let ((before (buffer-list)))
+        (expect (find-file-noselect "/gh:zzz")
+                :to-throw 'user-error '("Remoto: no account matches zzz"))
+        (expect (seq-difference (buffer-list) before) :to-be nil))))
+
+  (it "lets a failed search signal its own error"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (endpoint)
+                (if (string-prefix-p "search/" endpoint)
+                    (user-error "Remoto: access denied (rate limit or permissions): x")
+                  (remoto-test--account-api endpoint))))
+      (expect (find-file-noselect "/gh:qlik")
+              :to-throw 'user-error
+              '("Remoto: access denied (rate limit or permissions): x")))))
+
+(defun remoto-test--ref-api (endpoint)
+  "Answer ENDPOINT as `remoto-test--listing-api' does, plus the refs of acme/tool.
+Its branches are main, release-1 and feature/x, its tags v1.0 and
+release-2, and only main and release-1 have a tree."
+  (cond
+   ((string-prefix-p "repos/acme/tool/branches?" endpoint)
+    '(((name . "main")) ((name . "release-1")) ((name . "feature/x"))))
+   ((string-prefix-p "repos/acme/tool/tags?" endpoint)
+    '(((name . "v1.0")) ((name . "release-2"))))
+   ((string-match-p (rx bos "repos/acme/tool/git/trees/" (or "main" "release-1") "?")
+                    endpoint)
+    (remoto-test--listing-api endpoint))
+   ((string-prefix-p "repos/acme/tool/git/trees/" endpoint)
+    (user-error "%s%s" remoto--not-found endpoint))
+   (t (remoto-test--listing-api endpoint))))
+
+(defun remoto-test--asked-p (regexp)
+  "Return non-nil when a spied `remoto--api' call asked for REGEXP."
+  (seq-some (lambda (args) (string-match-p regexp (car args)))
+            (spy-calls-all-args 'remoto--api)))
+
+(describe "a ref of no tree"
+  (it "opens a Dired of the branches and tags that hold the typed words"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--ref-api)
+      (with-current-buffer (find-file-noselect "/gh:acme/tool@rel")
+        (expect dired-directory :to-equal '("/github:acme/tool@" "release-1" "release-2"))
+        (expect (remoto-test--dired-names) :to-equal '("release-1" "release-2"))
+        (expect (buffer-string) :to-match
+                (rx bol "  drwxr-xr-x " (+ nonl) " release-1" (>= 4 " ") "branch" eol))
+        (expect (buffer-string) :to-match
+                (rx bol "  drwxr-xr-x " (+ nonl) " release-2" (>= 4 " ") "tag" eol)))))
+
+  (it "lists every branch and tag after a bare @, but none with a slash"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--ref-api)
+      (expect (cdr (buffer-local-value 'dired-directory
+                                       (find-file-noselect "/gh:acme/tool@")))
+              :to-equal '("main" "release-1" "release-2" "v1.0"))
+      (expect (remoto-test--asked-p "/git/trees/") :to-be nil)))
+
+  (it "lines the notes up from one count of the widths per reading"
+    ;; Dired asks for each line on its own; counting the widths over all
+    ;; the names for each line made a long list of refs quadratic.
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--ref-api)
+      (spy-on 'remoto--listing-widths :and-call-through)
+      (with-current-buffer (find-file-noselect "/gh:acme/tool@")
+        (expect 'remoto--listing-widths :to-have-been-called-times 1)
+        (revert-buffer)
+        (expect 'remoto--listing-widths :to-have-been-called-times 2)
+        (let ((columns (mapcar (lambda (note)
+                                 (goto-char (point-min))
+                                 (re-search-forward (concat " " note "$"))
+                                 (- (match-beginning 0) (line-beginning-position)))
+                               '("branch" "tag"))))
+          (expect (car columns) :to-equal (cadr columns))))))
+
+  (it "opens a ref from its line at the root of its tree"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--ref-api)
+      (with-current-buffer (remoto-test--visit-entry "/github:acme/tool@rel" "release-1")
+        (expect dired-directory :to-equal "/github:acme/tool@release-1:/")
+        (expect (remoto-test--dired-names) :to-equal '("." ".." "README.md")))))
+
+  (it "opens a ref or a commit whose tree loads, asking for no list"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--ref-api)
+      (expect (buffer-local-value 'dired-directory (find-file-noselect "/gh:acme/tool@main"))
+              :to-equal "/github:acme/tool@main:/")
+      (expect (remoto-test--asked-p "/\\(branches\\|tags\\)") :to-be nil)))
+
+  (it "asks for no tree of a ref that a name cannot be"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--ref-api)
+      (expect (cdr (buffer-local-value 'dired-directory
+                                       (find-file-noselect "/gh:acme/tool@rel 2")))
+              :to-equal '("release-2"))
+      (expect (remoto-test--asked-p "/git/trees/") :to-be nil)))
+
+  (it "says so, and leaves no buffer, when no ref matches"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--ref-api)
+      (let ((before (buffer-list)))
+        (expect (find-file-noselect "/gh:acme/tool@zzz")
+                :to-throw 'user-error '("Remoto: no branch or tag of acme/tool matches zzz"))
+        (expect (seq-difference (buffer-list) before) :to-be nil)))))
+
+(describe "a missing file name"
+  (it "opens a Dired of the entries of its directory that hold the typed words"
+    (remoto-test-with-listing "-al"
+      (with-current-buffer (find-file-noselect "/gh:testowner/testrepo/read")
+        (expect dired-directory :to-equal '("/github:testowner/testrepo@main:/" "README.md"))
+        (expect (remoto-test--dired-names) :to-equal '("README.md")))))
+
+  (it "shows a matching directory as one line that opens it"
+    (remoto-test-with-listing "-alF"
+      (with-current-buffer (find-file-noselect "/github:testowner/testrepo@main:/s")
+        (expect (cdr dired-directory) :to-equal '("src"))
+        (expect (buffer-string) :to-match (rx bol "  drwxr-xr-x " (+ nonl) " src/" eol))
+        (goto-char (point-min))
+        (re-search-forward " src/$")
+        (dired-find-file)
+        (expect dired-directory :to-equal "/github:testowner/testrepo@main:/src/"))))
+
+  (it "lists the matches inside a subdirectory, for dired-noselect too"
+    (remoto-test-with-listing "-al"
+      (expect (buffer-local-value 'dired-directory
+                                  (dired-noselect "/gh:testowner/testrepo/src/ma"))
+              :to-equal '("/github:testowner/testrepo@main:/src/" "main.el"))))
+
+  (it "is no query when it exists, ends in a slash, holds a wildcard or matches nothing"
+    ;; One that matches nothing visits a new file, as a local name does.
+    (remoto-test-with-listing "-al"
+      (dolist (path '("README.md" "src/" "*.md" "zzz" "nodir/x"))
+        (expect (remoto--file-matches (concat "/github:testowner/testrepo@main:/" path))
+                :to-be nil)))))
 
 ;;; maybe-rewrite for partial canonical paths
 
@@ -4835,11 +5044,19 @@ Returns the full path after completion, or INPUT if no completion."
   (it "insert-directory generates dired-style listing"
     (remoto-test-with-pipeline
       (with-temp-buffer
-        (insert-directory (concat remoto-test--pipe-prefix "/") "-la")
+        (insert-directory (concat remoto-test--pipe-prefix "/") "-la" nil t)
         (let ((content (buffer-string)))
           (expect (length content) :to-be-greater-than 0)
           (expect content :to-match "README\\.md")
-          (expect content :to-match "src"))))))
+          (expect content :to-match "src")))))
+
+  (it "insert-directory gives a directory one line without FULL-DIRECTORY-P"
+    ;; As ls-lisp does; Dired asks so for each name of a list of names.
+    (remoto-test-with-pipeline
+      (with-temp-buffer
+        (insert-directory (concat remoto-test--pipe-prefix "/src") "-la")
+        (expect (buffer-string) :to-match
+                (rx bos "  drwxr-xr-x  1 github github " (+ nonl) " src\n" eos))))))
 
 ;;; Pipeline: auth forwarding
 
