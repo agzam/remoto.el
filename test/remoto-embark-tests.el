@@ -87,7 +87,8 @@ every source older than an existing output file, so it must not exist."
   (it "registers the branch keymap and ref transformer"
     (let ((kmap (assoc 'remoto-branch embark-keymap-alist))
           (fn (alist-get 'remoto-branch embark-transformer-alist)))
-      (expect kmap :to-equal '(remoto-branch remoto-embark-branch-map))
+      (expect kmap :to-equal
+              '(remoto-branch remoto-embark-branch-map remoto-embark-repo-map))
       (expect fn :to-be 'remoto--embark-transform-ref)))
 
   (it "registers the issue keymap and transformer"
@@ -139,7 +140,23 @@ every source older than an existing output file, so it must not exist."
                   (goto-char (point-min))
                   (re-search-forward (concat " " name " "))
                   (expect (remoto--embark-target-finder) :to-equal target))
-              (kill-buffer buf))))))))
+              (kill-buffer buf)))))))
+
+  (it "finds a branch on a line of a Dired of refs"
+    (with-temp-buffer
+      (dired-mode)
+      (setq-local dired-directory '("/github:o/r@" "main" "v1.0"))
+      (spy-on 'dired-get-filename :and-return-value "/github:o/r@main")
+      (expect (remoto--embark-target-finder)
+              :to-equal '(remoto-branch "/github:o/r@main:/")))))
+
+(describe "the actions of a branch target"
+  (it "copies the branch URL and keeps the repository actions"
+    (let ((map (embark--raw-action-keymap 'remoto-branch)))
+      (expect (lookup-key map "y") :to-be 'remoto-embark-copy-branch-url)
+      (expect (lookup-key map "n") :to-be 'remoto-embark-new-pr)
+      (expect (lookup-key map "c") :to-be 'remoto-embark-clone)
+      (expect (lookup-key map "s") :to-be 'remoto-embark-copy-ssh-url))))
 
 ;;; Actions (repo-level: no API/cache needed)
 

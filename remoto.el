@@ -2994,16 +2994,20 @@ same as the account typed as a query."
   (and (derived-mode-p 'dired-mode)
        (save-excursion (dired-goto-file name))))
 
-(defun remoto--sorted-names (dir names)
+(defun remoto--sorted-names (dir names query)
   "Return NAMES, lines of a Dired of DIR, in the order of `dired-listing-switches'.
-Their text properties go."
-  (mapcar #'car
-          (remoto--sort-entries
-           (mapcar (lambda (name)
-                     (let ((name (substring-no-properties name)))
-                       (cons name (remoto--entry-for (concat dir name)))))
-                   names)
-           dired-listing-switches)))
+A name that is QUERY, ignoring case, comes first: it is what was typed,
+and capitals sort first.  Their text properties go."
+  (let* ((sorted (mapcar #'car
+                         (remoto--sort-entries
+                          (mapcar (lambda (name)
+                                    (let ((name (substring-no-properties name)))
+                                      (cons name (remoto--entry-for (concat dir name)))))
+                                  names)
+                          dired-listing-switches)))
+         (exact (seq-find (lambda (name) (string-equal-ignore-case name query))
+                          sorted)))
+    (if exact (cons exact (delete exact sorted)) sorted)))
 
 (defun remoto--account-search (query)
   "Return the logins of the accounts in a search for QUERY.
@@ -3034,7 +3038,7 @@ Signal a `user-error' when no account matches."
                           `((type . "tree")
                             (note . ,(get-text-property 0 'remoto-acct-type login)))))
       (cons "/github:"
-            (or (remoto--sorted-names "/github:" logins)
+            (or (remoto--sorted-names "/github:" logins query)
                 (user-error "Remoto: no account matches %s" query))))))
 
 (defun remoto--owner-search (owner query)
@@ -3062,7 +3066,7 @@ repository matches, or when OWNER is no account."
                                (user-error "Remoto: no account %s" owner)
                              (signal (car err) (cdr err)))))))
       (cons dir
-            (or (remoto--sorted-names dir names)
+            (or (remoto--sorted-names dir names query)
                 (user-error "Remoto: no repository of %s matches %s"
                             owner query))))))
 
@@ -3092,7 +3096,7 @@ them for an empty QUERY; DIR is /github:OWNER/REPO@.  Signal a
                           `((type . "tree")
                             (note . ,(if (member ref branches) "branch" "tag")))))
       (cons dir
-            (or (remoto--sorted-names dir refs)
+            (or (remoto--sorted-names dir refs query)
                 (user-error "Remoto: no branch or tag of %s/%s%s" owner repo
                             (if (string-empty-p query)
                                 ""
