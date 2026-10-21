@@ -37,6 +37,8 @@ $(ELPA_DIR):
 	--eval "(package-install 'buttercup)" \
 	--eval "(package-install 'embark)" \
 	--eval "(package-install 'orderless)" \
+	--eval "(package-install 'vertico)" \
+	--eval "(package-install 'evil)" \
 	--eval "(package-install 'package-lint)"
 
 deps: $(ELPA_DIR)
