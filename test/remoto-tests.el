@@ -7451,6 +7451,180 @@ repository name, as `remoto--normalize-name' resolves it."
                     (push (cons name candidate) failures)))))))
         (expect failures :to-equal nil)))))
 
+;;; Conformance of a forge, from replayed answers
+
+;; One suite for every forge: a fixture kit names a path at each level
+;; and answers the forge's requests from recorded data, and the suite
+;; asserts the level table at every row.  GitHub's kit replays the
+;; answers of test/e2e/fixtures.jsonl at `remoto--api'.
+
+(defvar remoto-test--fixtures nil
+  "GitHub's recorded answers by resource, each (STATUS BODY), arrays as lists.")
+
+(defconst remoto-test--fixtures-file
+  (expand-file-name "e2e/fixtures.jsonl"
+                    (file-name-directory (or load-file-name buffer-file-name)))
+  "GitHub's recorded answers, the ones `make test-e2e' replays.")
+
+(defun remoto-test--load-fixtures ()
+  "Read the recorded answers plus the ones about the fake account."
+  (let ((table (make-hash-table :test 'equal))
+        (file remoto-test--fixtures-file))
+    (with-temp-buffer
+      (let ((coding-system-for-read 'utf-8))
+        (insert-file-contents file))
+      (dolist (line (split-string (buffer-string) "\n" t))
+        (let ((entry (json-parse-string line :object-type 'alist
+                                        :array-type 'list
+                                        :null-object nil :false-object nil)))
+          (puthash (alist-get 'resource entry)
+                   (list (alist-get 'status entry) (alist-get 'body entry))
+                   table))))
+    (puthash "/user" '(200 ((login . "remoto-e2e") (type . "User"))) table)
+    (puthash "/user/orgs?per_page=100&page=1"
+             '(200 (((login . "emacs-mirror")
+                     (description . "Mirrors of the GNU Emacs repositories"))))
+             table)
+    table))
+
+(defun remoto-test--fixture-api (endpoint)
+  "Answer ENDPOINT from the fixtures, as `remoto--api' would from GitHub."
+  (pcase-let ((`(,status ,body)
+               (gethash (concat "/" endpoint) remoto-test--fixtures
+                        '(404 ((message . "Not Found"))))))
+    (if (eql status 200)
+        body
+      (user-error "%s%s" remoto--not-found endpoint))))
+
+(defconst remoto-test--github-kit
+  (list :forge 'github
+        :root "/github:" :account "remoto-e2e" :org "emacs-mirror"
+        :owner "agzam" :repo "remoto.el" :ref "main" :tag "2.2.0"
+        :dir "test" :file "README.org" :topic "47"
+        :api #'remoto-test--fixture-api
+        :url "https://github.com/agzam/remoto.el"
+        :topic-url "https://github.com/agzam/remoto.el/pull/47")
+  "What the conformance suite needs to know about GitHub.")
+
+(defmacro remoto-test-with-kit (kit &rest body)
+  "Run BODY with the forge of KIT answering from its fixtures."
+  (declare (indent 1))
+  `(remoto-test-with-cache
+     (let ((remoto--authenticated-user (plist-get ,kit :account)))
+       (unless remoto-test--fixtures
+         (setq remoto-test--fixtures (remoto-test--load-fixtures)))
+       (spy-on 'remoto--api :and-call-fake (plist-get ,kit :api))
+       (spy-on 'remoto--api-async :and-call-fake
+               (lambda (endpoint callback &optional errback)
+                 (condition-case nil
+                     (funcall callback (funcall (plist-get ,kit :api) endpoint))
+                   (user-error (when errback (funcall errback))))))
+       ;; Loading remoto-topic would define the function over the spy.
+       (spy-on 'remoto--require-topic)
+       (spy-on 'remoto-topic-display :and-return-value (generate-new-buffer "*topic*"))
+       (let ((before (buffer-list)))
+         (unwind-protect (progn ,@body)
+           (dolist (buf (buffer-list))
+             (unless (memq buf before) (kill-buffer buf))))))))
+
+(defun remoto-test--kit-names (kit)
+  "Return the rows of the level table for KIT as (LEVEL . NAME)."
+  (let* ((root (plist-get kit :root))
+         (owner (concat root (plist-get kit :owner) "/"))
+         (repo (concat owner (plist-get kit :repo)))
+         (at (concat repo "@" (plist-get kit :ref) ":/")))
+    `((root . ,root)
+      (owner . ,owner)
+      (repo . ,(concat repo "/"))
+      (repo-at-ref . ,at)
+      (refs . ,(concat repo "@"))
+      (topics . ,(concat repo "#"))
+      (topic . ,(concat repo "#" (plist-get kit :topic)))
+      (dir . ,(concat at (plist-get kit :dir) "/"))
+      (file . ,(concat at (plist-get kit :file))))))
+
+(defun remoto-test--conformance (kit)
+  "Define the specs of the level table for the forge of KIT."
+  (let-alist (remoto-test--kit-names kit)
+    (it "treats the levels above a file as directories, a file and a topic as not"
+      (remoto-test-with-kit kit
+        (dolist (name (list .root .owner .repo .repo-at-ref .refs .dir))
+          (expect (file-directory-p name) :to-be t))
+        (dolist (name (list .topics .topic .file))
+          (expect (file-directory-p name) :to-be nil))))
+
+    (it "opens every level on RET except a bare delimiter"
+      (remoto-test-with-kit kit
+        (dolist (name (list .root .owner .repo .repo-at-ref .topic .dir .file))
+          (expect (file-exists-p name) :to-be t))
+        (dolist (name (list .refs .topics))
+          (expect (file-exists-p name) :to-be nil))))
+
+    (it "lists the account and its organizations at the root"
+      (remoto-test-with-kit kit
+        (let ((names (remoto-test--dired-names-of .root)))
+          (expect (member (plist-get kit :account) names) :to-be-truthy)
+          (expect (member (plist-get kit :org) names) :to-be-truthy))))
+
+    (it "lists the repositories of an owner"
+      (remoto-test-with-kit kit
+        (expect (member (plist-get kit :repo) (remoto-test--dired-names-of .owner))
+                :to-be-truthy)))
+
+    (it "lists the tree at the repository root and below"
+      (remoto-test-with-kit kit
+        (expect (member (plist-get kit :file) (remoto-test--dired-names-of .repo-at-ref))
+                :to-be-truthy)
+        (expect (member (plist-get kit :file) (remoto-test--dired-names-of .repo))
+                :to-be-truthy)
+        (expect (remoto-test--dired-names-of .dir) :not :to-be nil)))
+
+    (it "completes each level to the names one level down"
+      (remoto-test-with-kit kit
+        (expect (member (concat (plist-get kit :org) "/")
+                        (file-name-all-completions "" .root))
+                :to-be-truthy)
+        (expect (member (concat (plist-get kit :ref) ":")
+                        (file-name-all-completions "" .refs))
+                :to-be-truthy)
+        (expect (member (concat (plist-get kit :tag) ":")
+                        (file-name-all-completions "" .refs))
+                :to-be-truthy)
+        (expect (member (plist-get kit :topic) (file-name-all-completions "" .topics))
+                :to-be-truthy)
+        (expect (member (plist-get kit :file) (file-name-all-completions "" .repo-at-ref))
+                :to-be-truthy)
+        (expect (member (plist-get kit :file) (file-name-all-completions "" .repo))
+                :to-be-truthy)))
+
+    (it "reads a file"
+      (remoto-test-with-kit kit
+        (with-temp-buffer
+          (insert-file-contents .file)
+          (expect (buffer-size) :to-be-greater-than 0))))
+
+    (it "opens a topic in its own buffer"
+      (remoto-test-with-kit kit
+        (find-file-noselect .topic)
+        (expect 'remoto-topic-display :to-have-been-called-with
+                (plist-get kit :topic)
+                (concat (plist-get kit :root) (plist-get kit :owner) "/"
+                        (plist-get kit :repo)))))
+
+    (it "opens the URLs of the forge"
+      (remoto-test-with-kit kit
+        (expect (remoto--maybe-rewrite (plist-get kit :url)) :to-equal .repo-at-ref)
+        (find-file-noselect (plist-get kit :topic-url))
+        (expect 'remoto-topic-display :to-have-been-called)))))
+
+(defun remoto-test--dired-names-of (dir)
+  "Return the names of the lines of a Dired of DIR."
+  (with-current-buffer (dired-noselect dir)
+    (remoto-test--dired-names)))
+
+(describe "the GitHub forge, against the level table"
+  (remoto-test--conformance remoto-test--github-kit))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:
