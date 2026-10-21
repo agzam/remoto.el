@@ -2300,6 +2300,56 @@ using unauthenticated access until M-x remoto-reset-auth")
   (it "keeps the GitHub prefixes in the spelling of the autoload cookie"
     (expect remoto--handler-regexp :to-equal "\\`/\\(?:github\\|gh\\):")))
 
+(describe "the forge contract"
+  :var ((fake (remoto-forge-create :name 'fake :prefixes '("fake") :delimiters '(?@))))
+
+  (it "signals remoto-unsupported for data a forge does not provide"
+    (dolist (call (list (lambda () (remoto-forge-default-ref fake "o" "r"))
+                        (lambda () (remoto-forge-tree fake "o" "r" "main"))
+                        (lambda () (remoto-forge-content fake "o" "r" "main" "a"))
+                        (lambda () (remoto-forge-branches fake "o" "r"))
+                        (lambda () (remoto-forge-topics fake "o" "r"))
+                        (lambda () (remoto-forge-search-accounts fake "q" t))
+                        (lambda () (remoto-forge-owner-listing fake "/fake:o/"))))
+      (expect (condition-case err (funcall call) (remoto-unsupported (cadr err)))
+              :to-be 'fake)))
+
+  (it "answers nil, not an error, where nothing is a fine answer"
+    (expect (remoto-forge-user fake) :to-be nil)
+    (expect (remoto-forge-file-commits fake "o" "r" "main" "" '("a")) :to-be nil)
+    (expect (remoto-forge-url-input-p fake "https://x/o/r") :to-be nil)
+    (expect (remoto-forge-parse-url fake "https://x/o/r") :to-be nil)
+    (expect (remoto-forge-parse-topic-url fake "https://x/o/r/pull/1") :to-be nil)
+    (expect (remoto-forge-forget-refs fake "o" "r") :to-be nil))
+
+  (it "lists children from the tree where a forge has no cheaper answer"
+    (remoto-test-with-cache
+      (expect (mapcar #'car (remoto-forge-children fake "testowner" "testrepo"
+                                                   "main" "src"))
+              :to-equal '("main.el" "utils.el"))))
+
+  (it "dispatches the GitHub methods to the GitHub functions"
+    (spy-on 'remoto--fetch-branches :and-return-value '("main"))
+    (spy-on 'remoto--fetch-issue :and-return-value '((number . 1)))
+    (spy-on 'remoto--resolve-commit-sha :and-return-value "abc")
+    (expect (remoto-forge-branches remoto--github "o" "r") :to-equal '("main"))
+    (expect (remoto-forge-topic remoto--github "o" "r" "1") :to-equal '((number . 1)))
+    (expect (remoto-forge-commit-sha remoto--github "o" "r" "main") :to-equal "abc")
+    (expect 'remoto--fetch-branches :to-have-been-called-with "o" "r"))
+
+  (it "routes a URL to the forge that recognizes it"
+    (expect (remoto--url-forge "https://github.com/o/r") :to-be remoto--github)
+    (expect (remoto--url-forge "/home/me/x") :to-be nil)
+    (expect (remoto--canonical-path (remoto--url-path "https://github.com/o/r"))
+            :to-equal "/github:o/r:/")
+    (expect (remoto--canonical-path (remoto--url-path "o/r@v1"))
+            :to-equal "/github:o/r@v1:/")
+    (expect (remoto--url-path "not a repo") :to-throw 'user-error))
+
+  (it "finds a registered forge by name"
+    (expect (remoto--forge-named 'github) :to-be remoto--github)
+    (expect (remoto--forge-named 'nope) :to-be nil)))
+
 (describe "remoto--directory-level"
   (it "names the level of a directory"
     (expect (remoto--directory-level "/github:") :to-be 'root)
@@ -2632,13 +2682,13 @@ using unauthenticated access until M-x remoto-reset-auth")
            (repos (remoto--extract-search-repos data 'full_name)))
       (expect (car repos) :to-equal "torvalds/linux"))))
 
-(describe "remoto--search-owner-repos-sync"
+(describe "remoto--owner-search"
   (it "returns repos and populates cache on success"
     (spy-on 'remoto--api :and-return-value
             '((items . (((name . "linux") (description . "kernel"))
                          ((name . "libfdt") (description . ""))))))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
-      (let ((result (remoto--search-owner-repos-sync "torvalds" "lin")))
+      (let ((result (remoto--owner-search "torvalds" "lin")))
         (expect (length result) :to-equal 2)
         (expect (car result) :to-equal "linux")
         ;; Cache should be warm now
@@ -2647,11 +2697,13 @@ using unauthenticated access until M-x remoto-reset-auth")
           (expect hit :to-be-truthy)
           (expect (length cached) :to-equal 2)))))
 
-  (it "returns nil on API error without signaling"
+  (it "signals on an API error, which completion turns into no candidates"
     (spy-on 'remoto--api :and-call-fake
             (lambda (_) (error "network error")))
+    (spy-on 'remoto--search-owner-repos :and-return-value nil)
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
-      (expect (remoto--search-owner-repos-sync "torvalds" "lin")
+      (expect (remoto--owner-search "torvalds" "lin") :to-throw)
+      (expect (remoto--handle-file-name-all-completions "lin" "/github:torvalds/")
               :to-be nil))))
 
 (describe "remoto--recent-owner-repos-sync"
@@ -2678,11 +2730,11 @@ using unauthenticated access until M-x remoto-reset-auth")
 (describe "owner-level sync fallback in file-name-all-completions"
   (it "falls back to sync search when async returns nil"
     (spy-on 'remoto--search-owner-repos :and-return-value nil)
-    (spy-on 'remoto--search-owner-repos-sync :and-return-value '("linux"))
+    (spy-on 'remoto--owner-search :and-return-value '("linux"))
     (let ((completions (remoto--handle-file-name-all-completions
                         "lin" "/github:torvalds/")))
       (expect completions :to-equal '("linux/"))
-      (expect 'remoto--search-owner-repos-sync
+      (expect 'remoto--owner-search
               :to-have-been-called-with "torvalds" "lin")))
 
   (it "falls back to sync recent repos when async returns nil"
@@ -2696,18 +2748,18 @@ using unauthenticated access until M-x remoto-reset-auth")
 
   (it "skips sync fallback when async has results"
     (spy-on 'remoto--search-owner-repos :and-return-value '("linux"))
-    (spy-on 'remoto--search-owner-repos-sync)
+    (spy-on 'remoto--owner-search)
     (let ((completions (remoto--handle-file-name-all-completions
                         "lin" "/github:torvalds/")))
       (expect completions :to-equal '("linux/"))
-      (expect 'remoto--search-owner-repos-sync :not :to-have-been-called)))
+      (expect 'remoto--owner-search :not :to-have-been-called)))
 
   (it "skips sync search below min-search-chars"
     (let ((remoto-min-search-chars 3))
       (spy-on 'remoto--search-owner-repos :and-return-value nil)
-      (spy-on 'remoto--search-owner-repos-sync)
+      (spy-on 'remoto--owner-search)
       (remoto--handle-file-name-all-completions "li" "/github:torvalds/")
-      (expect 'remoto--search-owner-repos-sync :not :to-have-been-called))))
+      (expect 'remoto--owner-search :not :to-have-been-called))))
 
 (describe "completion style registration"
   (it "leaves the user's completion-category-overrides alone"
@@ -3427,7 +3479,7 @@ repository than tool, and a search for anything else finds none."
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
       ;; Completion at /github:acme/ searched for the typed text already.
-      (remoto--search-owner-repos-sync "acme" "stitch")
+      (remoto--owner-search "acme" "stitch")
       (spy-calls-reset 'remoto--api)
       (with-current-buffer (find-file-noselect "/gh:acme/stitch")
         (expect dired-directory :to-equal '("/github:acme/" "stitch-api" "stitch-env"))
@@ -3537,7 +3589,7 @@ repository than tool, and a search for anything else finds none."
   (it "gets one line from insert-directory without FULL-DIRECTORY-P"
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
-      (remoto--search-owner-repos-sync "acme" "stitch")
+      (remoto--owner-search "acme" "stitch")
       (with-temp-buffer
         (let ((default-directory "/github:acme/"))
           (remoto--handle-insert-directory "stitch-api" "-al" nil nil))
@@ -3554,7 +3606,7 @@ repository than tool, and a search for anything else finds none."
   (it "remembers a repository a search found, so that it exists and opens"
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
-      (remoto--search-owner-repos-sync "acme" "stitch")
+      (remoto--owner-search "acme" "stitch")
       (expect (file-exists-p "/github:acme/stitch-env") :to-be t)
       (expect (file-exists-p "/github:acme/stitch") :to-be nil)
       (expect (gethash "acme/stitch-env" remoto--default-branch-cache)

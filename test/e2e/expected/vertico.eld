@@ -453,26 +453,13 @@
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
   "async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=zzq%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzq%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzq%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /user/orgs?per_page=100&page=1"
-  "async /search/repositories?q=zzq%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzqq%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzqq%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzqq%20in%3Aname%20user%3Aagzam&per_page=100"
   "async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=zzqq%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzqqx%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzqqx%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzqqx%20in%3Aname%20user%3Aagzam&per_page=100"
   "async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=zzqqx%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzqqxx%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzqqxx%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzqqxx%20in%3Aname%20user%3Aagzam&per_page=100"
   "async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=zzqqxx%20in%3Aname%20user%3Aagzam&per_page=100"
-  "/repos/agzam/zzqqxx"))
+  "async /user/orgs?per_page=100&page=1" "/repos/agzam/zzqqxx"))
 
 ("ff /gh:agzam/remoto.el@zzqq" :buffer "*scratch*" :mode
  lisp-interaction-mode :error
@@ -944,26 +931,13 @@
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
   "async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=zzq%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzq%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzq%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /user/orgs?per_page=100&page=1"
-  "async /search/repositories?q=zzq%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzqq%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzqq%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzqq%20in%3Aname%20user%3Aagzam&per_page=100"
   "async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=zzqq%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzqqx%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzqqx%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzqqx%20in%3Aname%20user%3Aagzam&per_page=100"
   "async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=zzqqx%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzqqxx%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzqqxx%20in%3Aname%20user%3Aagzam&per_page=100"
-  "async /search/repositories?q=zzqqxx%20in%3Aname%20user%3Aagzam&per_page=100"
   "async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=zzqqxx%20in%3Aname%20user%3Aagzam&per_page=100"
-  "/repos/agzam/zzqqxx"))
+  "async /user/orgs?per_page=100&page=1" "/repos/agzam/zzqqxx"))
 
 ("dired /gh:agzam/remoto.el@zzqq" :buffer "*scratch*" :mode
  lisp-interaction-mode :error
