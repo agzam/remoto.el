@@ -14,6 +14,7 @@ Changes to the project, following Keep a Changelog conventions.
 - Embark's Dired target finder offers the repository actions on a repository line and the account actions on an account line or on an owner listing itself. On a line of a Dired of branches and tags it offers the branch actions: copy or browse the ref's URL, the compare view, a new pull request.
 - A branch or tag target, there or at the ~@~ prompt, keeps the repository actions too: clone, the clone URLs, the history.
 - A Dired of matches puts the name you typed first, ignoring case: ~/gh:agzam~ listed ~agzam~ below every login that starts with a capital.
+- ~make test-e2e~ types names and keys into the real commands under six completion setups (default, fido, Vertico, Vertico with Orderless, Evil, Embark) in batch Emacs, against GitHub answers recorded from public data, and compares where each case ends with ~test/e2e/expected~. CI runs it for every push and pull request. ~make test-e2e-update~ rewrites the expected states; ~make test-e2e-record~ records the answers a new case needs.
 - Specs for both listings: names under ~-al~ and ~-alF~, sorting, notes, the endpoint for each kind of account, background pages, the cap, a failed page, a refresh during a fetch, and Embark on listing lines. Specs for the matches at each level: accounts, repositories, refs and files, each with its search, its lines, ~RET~ on a line, and no match.
 
 ** Changed
