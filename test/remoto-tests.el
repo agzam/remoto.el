@@ -7205,6 +7205,163 @@ with what the same call does once the mode is on."
           (expect (hash-table-count remoto--default-branch-cache) :to-equal 0))
       (global-remoto-mode 1))))
 
+;;; Grammar invariants
+
+;; The rows come from the delimiter registry, so a delimiter registered
+;; later gets its rows without anyone listing them by hand.
+
+(defun remoto-test--grammar-rows ()
+  "Return every shape of a remoto name as (NAME . PARENT).
+PARENT is what .. names from NAME, nil where .. has no meaning: a
+query, a ref or a topic.  Above a short-form directory it is the bare
+repository name, as `remoto--normalize-name' resolves it."
+  (let* ((root "/github:")
+         (owner (concat root "testowner/"))
+         (repo (concat owner "testrepo"))
+         (rows (list (cons root root)
+                     (cons (concat root "testowner") nil)
+                     (cons owner root)
+                     (cons repo nil)
+                     (cons (concat repo "/") owner)
+                     (cons (concat repo "/src/") repo)
+                     (cons (concat repo "/src/main.el") nil)
+                     (cons (concat repo ":/") owner)
+                     (cons (concat repo ":/src/") (concat repo ":/"))
+                     (cons (concat repo ":/src/main.el") nil))))
+    (dolist (delimiter (mapcar #'cdr remoto--delimiters))
+      (let* ((c (char-to-string (remoto-delimiter-char delimiter)))
+             (ref-p (eq (remoto-delimiter-kind delimiter) 'ref))
+             (pick (if ref-p "main" "42")))
+        (push (cons (concat repo c) nil) rows)
+        (push (cons (concat repo c pick) nil) rows)
+        (when ref-p
+          (push (cons (concat repo c "rel/1") nil) rows)
+          (push (cons (concat repo c "main:/") owner) rows)
+          (push (cons (concat repo c "main:/src/") (concat repo c "main:/")) rows)
+          (push (cons (concat repo c "main:/src/main.el") nil) rows)
+          (push (cons (concat repo c "rel/1:/src/") (concat repo c "rel/1:/")) rows))))
+    (nreverse rows)))
+
+(defun remoto-test--grammar-failures (predicate)
+  "Return the names of the grammar rows for which PREDICATE is nil."
+  (seq-remove predicate (mapcar #'car (remoto-test--grammar-rows))))
+
+(defmacro remoto-test-with-grammar-data (&rest body)
+  "Run BODY with every fetcher answering for testowner/testrepo from stubs."
+  (declare (indent 0))
+  `(remoto-test-with-cache
+     (let ((remoto--authenticated-user "me"))
+       (spy-on 'remoto--fetch-user-orgs :and-return-value
+               (list (propertize "testowner" 'remoto-acct-type "Organization")))
+       (spy-on 'remoto--recent-owner-repos :and-return-value '("testrepo" "other"))
+       (spy-on 'remoto--fetch-branches :and-return-value '("main" "rel/1"))
+       (spy-on 'remoto--fetch-tags :and-return-value '("v1.0"))
+       (spy-on 'remoto--fetch-issues :and-return-value
+               '(((number . 42) (title . "An issue") (state . "open"))
+                 ((number . 7) (title . "A pull") (state . "open")
+                  (pull_request . ((url . "x"))))))
+       (spy-on 'remoto--default-branch :and-return-value "main")
+       (spy-on 'remoto--fetch-dir-children-light :and-call-fake
+               (lambda (_owner _repo _ref dir-path)
+                 (remoto--tree-children
+                  (remoto--parse-path
+                   (concat "/github:testowner/testrepo@main:/" dir-path)))))
+       (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+       (dolist (ref '("main" "rel/1"))
+         (puthash (concat "testowner/testrepo@" ref)
+                  (gethash "testowner/testrepo@main" remoto--tree-cache)
+                  remoto--tree-cache))
+       ,@body)))
+
+(describe "grammar invariants on every row"
+  (it "split a name into a directory that is its prefix and the rest"
+    (expect (remoto-test--grammar-failures
+             (lambda (name)
+               (let ((dir (file-name-directory name)))
+                 (and (string-prefix-p dir name)
+                      (equal (concat dir (file-name-nondirectory name)) name)))))
+            :to-equal nil))
+
+  (it "parse into a path that unparses to the same name"
+    (expect (remoto-test--grammar-failures
+             (lambda (name) (equal (remoto--unparse (remoto--parse name)) name)))
+            :to-equal nil))
+
+  (it "answer file-remote-p with a prefix of the name"
+    (expect (remoto-test--grammar-failures
+             (lambda (name) (string-prefix-p (file-remote-p name) name)))
+            :to-equal nil))
+
+  (it "expand to themselves"
+    (expect (remoto-test--grammar-failures
+             (lambda (name) (equal (expand-file-name name) name)))
+            :to-equal nil))
+
+  (it "resolve .. to the directory above, where .. has a meaning"
+    (expect (seq-remove (lambda (row)
+                          (or (null (cdr row))
+                              (equal (expand-file-name ".." (car row)) (cdr row))))
+                        (remoto-test--grammar-rows))
+            :to-equal nil))
+
+  (it "exist when they are directories, except where RET must ask first"
+    ;; A bare name that no listing holds and a delimiter with nothing
+    ;; after it are still being typed: `file-exists-p' is nil so that
+    ;; `find-file' asks to confirm, directory or not.
+    (remoto-test-with-grammar-data
+      (expect (remoto-test--grammar-failures
+               (lambda (name)
+                 (let* ((parsed (remoto--parse name))
+                        (level (remoto-path-level parsed))
+                        (query (remoto-path-query parsed))
+                        (guarded (if (memq level '(root owner tree))
+                                     (and (not (eq level 'tree))
+                                          (not (string-empty-p query)))
+                                   (string-empty-p query))))
+                   (if guarded
+                       (not (file-exists-p name))
+                     (or (not (file-directory-p name)) (file-exists-p name))))))
+              :to-equal nil)))
+
+  (it "keep a directory name through file-name-as-directory and back"
+    (remoto-test-with-grammar-data
+      (expect (remoto-test--grammar-failures
+               (lambda (name)
+                 (or (not (file-directory-p name))
+                     (let ((dir (file-name-as-directory name)))
+                       (and (file-directory-p dir)
+                            (equal (file-name-as-directory (directory-file-name dir))
+                                   dir))))))
+              :to-equal nil)))
+
+  (it "complete, at every directory, to names that parse one level down"
+    (remoto-test-with-grammar-data
+      (let (failures)
+        (dolist (name (mapcar #'car (remoto-test--grammar-rows)))
+          (when (and (file-directory-p name) (equal (file-name-directory name) name))
+            (let* ((level (remoto-path-level (remoto--parse name)))
+                   (candidates (file-name-all-completions "" name)))
+              (unless candidates (push (cons name 'no-candidates) failures))
+              (dolist (candidate candidates)
+                (let* ((joined (concat name candidate))
+                       (parsed (remoto--parse joined))
+                       (target (get-text-property 0 'remoto-target candidate)))
+                  (unless (and parsed
+                               (file-exists-p joined)
+                               (memq (remoto-path-level parsed)
+                                     (pcase level
+                                       ('root '(owner))
+                                       ('owner '(tree))
+                                       ('tree '(tree))
+                                       ((guard (eq (remoto--level-kind level) 'ref))
+                                        '(tree))
+                                       (_ (list level))))
+                               (or (null target)
+                                   (equal (remoto--unparse (remoto--parse target))
+                                          target)))
+                    (push (cons name candidate) failures)))))))
+        (expect failures :to-equal nil)))))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:
