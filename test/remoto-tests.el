@@ -2166,56 +2166,139 @@ using unauthenticated access until M-x remoto-reset-auth")
 
 ;;; Partial path parsing
 
-(describe "remoto--parse-partial-github-path"
-  (it "parses /github: as root level"
-    (let ((result (remoto--parse-partial-github-path "/github:")))
-      (expect (plist-get result :level) :to-equal 'root)
-      (expect (plist-get result :owner) :to-be nil)))
+(describe "remoto--parse"
+  (it "parses /github: as the root with an empty query"
+    (let ((p (remoto--parse "/github:")))
+      (expect (remoto-path-level p) :to-be 'root)
+      (expect (remoto-path-query p) :to-equal "")
+      (expect (remoto-path-directory p) :to-equal "/github:")))
 
-  (it "parses /github:owner/ as owner level"
-    (let ((result (remoto--parse-partial-github-path "/github:foobar/")))
-      (expect (plist-get result :level) :to-equal 'owner)
-      (expect (plist-get result :owner) :to-equal "foobar")))
+  (it "parses a bare account name as a query at the root"
+    (let ((p (remoto--parse "/github:foobar")))
+      (expect (remoto-path-level p) :to-be 'root)
+      (expect (remoto-path-query p) :to-equal "foobar")
+      (expect (remoto-path-directory p) :to-equal "/github:")))
 
-  (it "returns nil for bare /github:owner (no trailing slash)"
-    (expect (remoto--parse-partial-github-path "/github:foobar") :to-be nil))
+  (it "parses /github:owner/ as the owner level"
+    (let ((p (remoto--parse "/github:foobar/")))
+      (expect (remoto-path-level p) :to-be 'owner)
+      (expect (remoto-path-owner p) :to-equal "foobar")
+      (expect (remoto-path-query p) :to-equal "")))
 
-  (it "returns nil for full canonical paths"
-    (expect (remoto--parse-partial-github-path "/github:a/b@main:/src") :to-be nil))
+  (it "parses a bare repository name as a query at the owner level"
+    (let ((p (remoto--parse "/github:a/b")))
+      (expect (remoto-path-level p) :to-be 'owner)
+      (expect (remoto-path-query p) :to-equal "b")
+      (expect (remoto-path-directory p) :to-equal "/github:a/")))
 
-  (it "parses /github:owner/repo@ as repo level"
-    (let ((result (remoto--parse-partial-github-path "/github:torvalds/linux@")))
-      (expect (plist-get result :level) :to-equal 'repo)
-      (expect (plist-get result :owner) :to-equal "torvalds")
-      (expect (plist-get result :repo) :to-equal "linux")))
+  (it "parses /github:owner/repo@ as the refs level"
+    (let ((p (remoto--parse "/github:torvalds/linux@")))
+      (expect (remoto-path-level p) :to-be 'refs)
+      (expect (remoto-path-owner p) :to-equal "torvalds")
+      (expect (remoto-path-repo p) :to-equal "linux")
+      (expect (remoto-path-query p) :to-equal "")))
 
-  (it "returns nil for /github:owner/repo (no @)"
-    (expect (remoto--parse-partial-github-path "/github:a/b") :to-be nil)))
+  (it "keeps a ref with a slash as one query at the refs level"
+    (let ((p (remoto--parse "/github:o/r@release/2026.5")))
+      (expect (remoto-path-level p) :to-be 'refs)
+      (expect (remoto-path-query p) :to-equal "release/2026.5")
+      (expect (remoto-path-directory p) :to-equal "/github:o/r@")))
 
-(describe "remoto--parse-partial-canonical"
-  (it "parses /github:owner/repo without ref"
-    (let ((p (remoto--parse-partial-canonical "/github:torvalds/linux")))
+  (it "parses /github:owner/repo# as the topics level"
+    (let ((p (remoto--parse "/github:foobar/zapato#42")))
+      (expect (remoto-path-level p) :to-be 'topics)
+      (expect (remoto-path-query p) :to-equal "42")
+      (expect (remoto-path-directory p) :to-equal "/github:foobar/zapato#")))
+
+  (it "parses the short form as a tree on the default branch"
+    (let ((p (remoto--parse "/github:foobar/zapato/src/ma")))
+      (expect (remoto-path-level p) :to-be 'tree)
+      (expect (remoto-path-short p) :to-be t)
+      (expect (remoto-path-ref p) :to-be nil)
+      (expect (remoto-path-path p) :to-equal "/src/ma")
+      (expect (remoto-path-query p) :to-equal "ma")
+      (expect (remoto-path-directory p) :to-equal "/github:foobar/zapato/src/")))
+
+  (it "parses a canonical path, the ref ending at the colon"
+    (let ((p (remoto--parse "/github:o/r@feature/x:/a.el")))
+      (expect (remoto-path-level p) :to-be 'tree)
+      (expect (remoto-path-short p) :to-be nil)
+      (expect (remoto-path-ref p) :to-equal "feature/x")
+      (expect (remoto-path-path p) :to-equal "/a.el")
+      (expect (remoto-path-query p) :to-equal "a.el")
+      (expect (remoto-path-directory p) :to-equal "/github:o/r@feature/x:/")))
+
+  (it "keeps a canonical root without a slash after its colon as its own directory"
+    (let ((p (remoto--parse "/github:a/b@main:")))
+      (expect (remoto-path-path p) :to-equal "/")
+      (expect (remoto-path-query p) :to-equal "")
+      (expect (remoto-path-directory p) :to-equal "/github:a/b@main:")))
+
+  (it "treats a delimiter after no repository as a query at the owner level"
+    (let ((p (remoto--parse "/github:foo/#")))
+      (expect (remoto-path-level p) :to-be 'owner)
+      (expect (remoto-path-query p) :to-equal "#")))
+
+  (it "treats a delimiter after no repository name as a query at the root"
+    (let ((p (remoto--parse "/github:foobar#")))
+      (expect (remoto-path-level p) :to-be 'root)
+      (expect (remoto-path-query p) :to-equal "foobar#")))
+
+  (it "parses /github:/ as the root"
+    (let ((p (remoto--parse "/github:/")))
+      (expect (remoto-path-level p) :to-be 'root)
+      (expect (remoto-path-query p) :to-equal "/")))
+
+  (it "returns nil for other names"
+    (expect (remoto--parse "/home/user/file.el") :to-be nil)
+    (expect (remoto--parse "https://github.com/a/b") :to-be nil)
+    (expect (remoto--parse nil) :to-be nil))
+
+  (it "is inverted by remoto--unparse at every level"
+    (dolist (name '("/github:" "/github:foo" "/github:foo/" "/github:foo/bar"
+                    "/github:foo/bar@" "/github:foo/bar@v1" "/github:foo/bar@rel/1"
+                    "/github:foo/bar#" "/github:foo/bar#42"
+                    "/github:foo/bar/" "/github:foo/bar/src/" "/github:foo/bar/src/x"
+                    "/github:foo/bar:/" "/github:foo/bar@v1:/"
+                    "/github:foo/bar@rel/1:/a/b"))
+      (expect (remoto--unparse (remoto--parse name)) :to-equal name))))
+
+(describe "remoto--directory-level"
+  (it "names the level of a directory"
+    (expect (remoto--directory-level "/github:") :to-be 'root)
+    (expect (remoto--directory-level "/github:foobar/") :to-be 'owner)
+    (expect (remoto--directory-level "/github:foobar/zapato@") :to-be 'refs)
+    (expect (remoto--directory-level "/github:foobar/zapato#") :to-be 'topics)
+    (expect (remoto--directory-level "/github:foobar/zapato/") :to-be 'tree)
+    (expect (remoto--directory-level "/github:a/b@main:/src/") :to-be 'tree))
+
+  (it "is nil for a name with a query above the tree"
+    (expect (remoto--directory-level "/github:foobar") :to-be nil)
+    (expect (remoto--directory-level "/github:a/b") :to-be nil)
+    (expect (remoto--directory-level "/github:a/b@main") :to-be nil)
+    (expect (remoto--directory-level "/github:/") :to-be nil)))
+
+(describe "remoto--repo-root"
+  (it "names the repository of /github:owner/repo on its default branch"
+    (let ((p (remoto--repo-root (remoto--parse "/github:torvalds/linux"))))
       (expect (remoto-path-owner p) :to-equal "torvalds")
       (expect (remoto-path-repo p) :to-equal "linux")
       (expect (remoto-path-ref p) :to-be nil)
       (expect (remoto-path-path p) :to-equal "/")))
 
-  (it "parses /github:owner/repo@ref"
-    (let ((p (remoto--parse-partial-canonical "/github:torvalds/linux@v6.5")))
-      (expect (remoto-path-owner p) :to-equal "torvalds")
-      (expect (remoto-path-repo p) :to-equal "linux")
-      (expect (remoto-path-ref p) :to-equal "v6.5")))
+  (it "names the repository of /github:owner/repo@ref at that ref"
+    (expect (remoto-path-ref (remoto--repo-root (remoto--parse "/github:torvalds/linux@v6.5")))
+            :to-equal "v6.5")
+    (expect (remoto-path-ref (remoto--repo-root (remoto--parse "/github:o/r@v6.5/")))
+            :to-equal "v6.5")
+    (expect (remoto-path-ref (remoto--repo-root (remoto--parse "/github:o/r@rel/1")))
+            :to-equal "rel/1"))
 
-  (it "parses with trailing slash"
-    (let ((p (remoto--parse-partial-canonical "/github:torvalds/linux/")))
-      (expect (remoto-path-owner p) :to-equal "torvalds")
-      (expect (remoto-path-repo p) :to-equal "linux")))
-
-  (it "returns nil for full canonical path"
-    (expect (remoto--parse-partial-canonical "/github:a/b@main:/src") :to-be nil))
-
-  (it "returns nil for /github: alone"
-    (expect (remoto--parse-partial-canonical "/github:") :to-be nil)))
+  (it "is nil for a canonical path, a topic, the root and a delimiter alone"
+    (expect (remoto--repo-root (remoto--parse "/github:a/b@main:/src")) :to-be nil)
+    (expect (remoto--repo-root (remoto--parse "/github:agzam/spacehammer#193")) :to-be nil)
+    (expect (remoto--repo-root (remoto--parse "/github:")) :to-be nil)
+    (expect (remoto--repo-root (remoto--parse "/github:a/b@")) :to-be nil)))
 
 ;;; Partial path file operations
 
@@ -3565,13 +3648,22 @@ release-2, and only main and release-1 have a tree."
         (expect (buffer-string) :to-match
                 (rx bol "  drwxr-xr-x " (+ nonl) " release-2" (>= 4 " ") "tag" eol)))))
 
-  (it "lists every branch and tag after a bare @, but none with a slash"
+  (it "lists every branch and tag after a bare @, a slash in a ref included"
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake #'remoto-test--ref-api)
       (expect (cdr (buffer-local-value 'dired-directory
                                        (find-file-noselect "/gh:acme/tool@")))
-              :to-equal '("main" "release-1" "release-2" "v1.0"))
+              :to-equal '("feature/x" "main" "release-1" "release-2" "v1.0"))
       (expect (remoto-test--asked-p "/git/trees/") :to-be nil)))
+
+  (it "opens the tree of a ref with a slash from its Dired line"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--ref-api)
+      (find-file-noselect "/gh:acme/tool@")
+      (expect (file-exists-p "/github:acme/tool@feature/x") :to-be t)
+      (expect (file-directory-p "/github:acme/tool@feature/x") :to-be t)
+      (expect (remoto--maybe-rewrite "/github:acme/tool@feature/x")
+              :to-equal "/github:acme/tool@feature/x:/")))
 
   (it "lines the notes up from one count of the widths per reading"
     ;; Dired asks for each line on its own; counting the widths over all
@@ -3764,75 +3856,24 @@ Returns the full path after completion, or INPUT if no completion."
 
 ;;; ---- Partial path parsing: new levels ----
 
-(describe "remoto--parse-partial-github-path new levels"
-  ;; files-default: /github:owner/repo/
-  (it "parses /github:owner/repo/ as files-default level"
-    (let ((result (remoto--parse-partial-github-path "/github:foobar/zapato/")))
-      (expect (plist-get result :level) :to-equal 'files-default)
-      (expect (plist-get result :owner) :to-equal "foobar")
-      (expect (plist-get result :repo) :to-equal "zapato")))
+(describe "remoto--parse on degenerate names"
+  (it "reads a repository with dots, hyphens and underscores"
+    (expect (remoto-path-repo (remoto--parse "/github:agzam/remoto.el#"))
+            :to-equal "remoto.el")
+    (expect (remoto-path-repo (remoto--parse "/github:foo/my-repo@"))
+            :to-equal "my-repo")
+    (expect (remoto-path-repo (remoto--parse "/github:foo/my_repo/"))
+            :to-equal "my_repo"))
 
-  (it "parses /github:owner/repo/subdir/ as files-default level"
-    (let ((result (remoto--parse-partial-github-path "/github:foobar/zapato/src/")))
-      (expect (plist-get result :level) :to-equal 'files-default)
-      (expect (plist-get result :owner) :to-equal "foobar")
-      (expect (plist-get result :repo) :to-equal "zapato")))
+  (it "reads a double slash as a query at the root"
+    (let ((p (remoto--parse "/github://")))
+      (expect (remoto-path-level p) :to-be 'root)
+      (expect (remoto-path-query p) :to-equal "//")))
 
-  ;; issues: /github:owner/repo#
-  (it "parses /github:owner/repo# as issues level"
-    (let ((result (remoto--parse-partial-github-path "/github:foobar/zapato#")))
-      (expect (plist-get result :level) :to-equal 'issues)
-      (expect (plist-get result :owner) :to-equal "foobar")
-      (expect (plist-get result :repo) :to-equal "zapato")))
-
-  ;; delimiter without repo - invalid
-  (it "returns nil for /github:owner# (no repo)"
-    (expect (remoto--parse-partial-github-path "/github:foobar#") :to-be nil))
-
-  (it "returns nil for /github:owner@ (no repo)"
-    (expect (remoto--parse-partial-github-path "/github:foobar@") :to-be nil))
-
-  ;; repo with special characters
-  (it "parses repo with dots"
-    (let ((result (remoto--parse-partial-github-path "/github:agzam/remoto.el#")))
-      (expect (plist-get result :level) :to-equal 'issues)
-      (expect (plist-get result :repo) :to-equal "remoto.el")))
-
-  (it "parses repo with hyphens"
-    (let ((result (remoto--parse-partial-github-path "/github:foo/my-repo@")))
-      (expect (plist-get result :level) :to-equal 'repo)
-      (expect (plist-get result :repo) :to-equal "my-repo")))
-
-  (it "parses repo with underscores"
-    (let ((result (remoto--parse-partial-github-path "/github:foo/my_repo/")))
-      (expect (plist-get result :level) :to-equal 'files-default)
-      (expect (plist-get result :repo) :to-equal "my_repo")))
-
-  ;; empty/degenerate segments
-  (it "returns nil for /github:/"
-    (expect (remoto--parse-partial-github-path "/github:/") :to-be nil))
-
-  (it "returns nil for /github://"
-    (expect (remoto--parse-partial-github-path "/github://") :to-be nil))
-
-  (it "returns nil for /github:foo/#"
-    (expect (remoto--parse-partial-github-path "/github:foo/#") :to-be nil))
-
-  (it "returns nil for /github:foo/# (empty repo before #)"
-    (expect (remoto--parse-partial-github-path "/github:foo/#") :to-be nil))
-
-  ;; existing levels still work
-  (it "still parses /github: as root"
-    (let ((result (remoto--parse-partial-github-path "/github:")))
-      (expect (plist-get result :level) :to-equal 'root)))
-
-  (it "still parses /github:owner/ as owner"
-    (let ((result (remoto--parse-partial-github-path "/github:foobar/")))
-      (expect (plist-get result :level) :to-equal 'owner)))
-
-  (it "still parses /github:owner/repo@ as repo (branches)"
-    (let ((result (remoto--parse-partial-github-path "/github:foobar/zapato@")))
-      (expect (plist-get result :level) :to-equal 'repo))))
+  (it "reads a delimiter with no repository as a query, not a level"
+    (expect (remoto-path-level (remoto--parse "/github:foobar@")) :to-be 'root)
+    (expect (remoto--directory-level "/github:foobar@") :to-be nil)
+    (expect (remoto--directory-level "/github:foo/#") :to-be nil)))
 
 ;;; ---- file-name-directory with # delimiter ----
 
@@ -4533,12 +4574,6 @@ Returns the full path after completion, or INPUT if no completion."
       (expect (buffer-live-p buf) :to-be nil))))
 
 ;;; ---- parse-partial-canonical rejects #NUM paths ----
-
-(describe "parse-partial-canonical rejects # delimiter"
-  (it "returns nil for /github:owner/repo#123"
-    (expect (remoto--parse-partial-canonical "/github:agzam/spacehammer#193") :to-be nil))
-  (it "still parses /github:owner/repo without #"
-    (expect (remoto--parse-partial-canonical "/github:agzam/spacehammer") :not :to-be nil)))
 
 ;;; ---- maybe-rewrite preserves #NUM paths ----
 

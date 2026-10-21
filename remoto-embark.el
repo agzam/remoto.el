@@ -139,22 +139,16 @@ already-canonical targets pass through unchanged after shorthand expansion;
 non-strings and unrecognized strings are returned as-is."
   (if (not (stringp target))
       target
-    (let ((path (remoto--normalize-shorthand target)))
+    (let* ((path (remoto--normalize-shorthand target))
+           (parsed (remoto--parse path)))
       (cond
-       ((remoto--parse-path path) path)
-       ((string-match-p (rx "#" (+ digit) eos) path) path)
-       ((string-match (rx bos "/github:"
-                          (group (+ (not (in "/@:#"))))            ; owner
-                          "/"
-                          (group (+ (not (in "/@:#"))))            ; repo
-                          (group (? "@" (+ (not (in "/:#")))))     ; @ref
-                          (group (* nonl))                         ; rest
-                          eos)
-                      path)
-        (let ((rest (match-string 4 path)))
-          (format "/github:%s/%s%s:%s"
-                  (match-string 1 path) (match-string 2 path) (match-string 3 path)
-                  (if (string-empty-p rest) "/" rest))))
+       ((null parsed) path)
+       ((and (eq (remoto-path-level parsed) 'tree)
+             (remoto-path-short parsed))
+        (format "/github:%s/%s:%s" (remoto-path-owner parsed)
+                (remoto-path-repo parsed) (remoto-path-path parsed)))
+       ((remoto--repo-root parsed)
+        (remoto--canonical-path (remoto--repo-root parsed)))
        (t path)))))
 
 (defun remoto--embark-classify (path fallback &optional ref)
