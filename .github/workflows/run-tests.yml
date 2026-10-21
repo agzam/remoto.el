@@ -37,7 +37,7 @@ jobs:
         run: make test-embark
 
       - name: Run E2E tests
-        run: make -j4 test-e2e
+        run: make -k -j4 test-e2e
         timeout-minutes: 10
 
       - name: Lint

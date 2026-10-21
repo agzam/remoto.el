@@ -628,29 +628,55 @@ waiting for keys that batch Emacs never gets."
 
 ;;; Expected states
 
-(defun remoto-e2e--expected-file ()
-  "Return the file of the expected states of the profile."
-  (expand-file-name (format "expected/%s.eld" remoto-e2e-profile)
+(defun remoto-e2e--expected-file (&optional version)
+  "Return the file of the expected states of the profile.
+With VERSION, an Emacs major version, the file of the states that differ
+there from those of Emacs 30 and later."
+  (expand-file-name (format (if version "expected/emacs-%2$d/%1$s.eld"
+                              "expected/%s.eld")
+                            remoto-e2e-profile version)
                     remoto-e2e--dir))
 
-(defun remoto-e2e--read-expected ()
-  "Return the expected states of the profile, an alist by case name."
-  (when (file-exists-p (remoto-e2e--expected-file))
+(defconst remoto-e2e--version
+  (and (< emacs-major-version 30) emacs-major-version)
+  "The Emacs major version whose states differ, or nil from Emacs 30 on.")
+
+(defun remoto-e2e--read-states (file)
+  "Return the states in FILE, an alist by case name."
+  (when (file-exists-p file)
     (with-temp-buffer
-      (insert-file-contents (remoto-e2e--expected-file))
+      (insert-file-contents file)
       (let (states)
         (condition-case nil
             (while t (push (read (current-buffer)) states))
           (end-of-file nil))
         (nreverse states)))))
 
+(defun remoto-e2e--read-expected ()
+  "Return the expected states of the profile on this Emacs."
+  (append (and remoto-e2e--version
+               (remoto-e2e--read-states
+                (remoto-e2e--expected-file remoto-e2e--version)))
+          (remoto-e2e--read-states (remoto-e2e--expected-file))))
+
 (defun remoto-e2e--write-expected (results)
-  "Write RESULTS, an alist by case name, as the expected states."
-  (make-directory (file-name-directory (remoto-e2e--expected-file)) t)
-  (let ((coding-system-for-write 'utf-8-unix)
-        (print-length nil)
-        (print-level nil))
-    (with-temp-file (remoto-e2e--expected-file)
+  "Write RESULTS, an alist by case name, as the expected states.
+On an Emacs before 30, only the states that differ from Emacs 30's."
+  (let* ((file (remoto-e2e--expected-file remoto-e2e--version))
+         (base (and remoto-e2e--version
+                    (remoto-e2e--read-states (remoto-e2e--expected-file))))
+         (results (if base
+                      (seq-filter (lambda (result)
+                                    (remoto-e2e--diff
+                                     (cdr (assoc (car result) base))
+                                     (cdr result)))
+                                  results)
+                    results))
+         (coding-system-for-write 'utf-8-unix)
+         (print-length nil)
+         (print-level nil))
+    (make-directory (file-name-directory file) t)
+    (with-temp-file file
       (insert ";; -*- mode: lisp-data -*-\n;; Written by make test-e2e-update.\n")
       (dolist (result results)
         (insert "\n")
@@ -681,8 +707,7 @@ waiting for keys that batch Emacs never gets."
                                           (remoto-e2e--update nil)
                                           ((not (assoc name expected))
                                            "no expected state")
-                                          ((not (equal want state))
-                                           (remoto-e2e--diff want state)))))
+                                          (t (remoto-e2e--diff want state)))))
                       (if (not problem)
                           (princ (format "ok   %s | %s\n" remoto-e2e-profile name))
                         (cl-incf failed)
