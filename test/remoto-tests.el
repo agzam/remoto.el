@@ -2263,6 +2263,43 @@ using unauthenticated access until M-x remoto-reset-auth")
                     "/github:foo/bar@rel/1:/a/b"))
       (expect (remoto--unparse (remoto--parse name)) :to-equal name))))
 
+(describe "remoto-register-forge"
+  (it "adds a forge under its prefixes, shorthand included"
+    (let ((remoto--forges (copy-alist remoto--forges))
+          (remoto--handler-regexp remoto--handler-regexp)
+          (file-name-handler-alist (copy-alist file-name-handler-alist))
+          (fake (remoto-forge-create :name 'fake :prefixes '("fake" "fk")
+                                     :host "fake.example" :delimiters '(?@))))
+      (remoto-register-forge fake)
+      (expect (remoto--canonical-forge "/fake:o/r") :to-be fake)
+      (expect (remoto--canonical-forge "/fk:o/r") :to-be nil)
+      (expect (remoto--normalize-shorthand "/fk:o/r") :to-equal "/fake:o/r")
+      (expect (remoto--normalize-shorthand "/gh:o/r") :to-equal "/github:o/r")
+      (expect (string-match-p remoto--handler-regexp "/fk:o") :to-be 0)
+      (expect (string-match-p remoto--handler-regexp "/github:o") :to-be 0)
+      (expect (cdr (assoc remoto--handler-regexp file-name-handler-alist))
+              :to-be #'remoto-file-name-handler)
+      (expect (remoto--forge-type "/fk:o/r") :to-be 'fake)))
+
+  (it "parses with the delimiters of the forge only"
+    (let ((remoto--forges (copy-alist remoto--forges))
+          (remoto--handler-regexp remoto--handler-regexp)
+          (file-name-handler-alist (copy-alist file-name-handler-alist)))
+      (remoto-register-forge
+       (remoto-forge-create :name 'fake :prefixes '("fake") :delimiters '(?@)))
+      (let ((topic (remoto--parse "/fake:o/r#1"))
+            (ref (remoto--parse "/fake:o/r@v1:/a")))
+        (expect (remoto-path-level topic) :to-be 'owner)
+        (expect (remoto-path-query topic) :to-equal "r#1")
+        (expect (remoto-path-level ref) :to-be 'tree)
+        (expect (remoto-path-ref ref) :to-equal "v1")
+        (expect (remoto--unparse ref) :to-equal "/fake:o/r@v1:/a")
+        (expect (file-remote-p "/fake:o/r@v1:/a" 'method) :to-equal "fake")
+        (expect (file-remote-p "/fake:o" 'host) :to-equal nil))))
+
+  (it "keeps the GitHub prefixes in the spelling of the autoload cookie"
+    (expect remoto--handler-regexp :to-equal "\\`/\\(?:github\\|gh\\):")))
+
 (describe "remoto--directory-level"
   (it "names the level of a directory"
     (expect (remoto--directory-level "/github:") :to-be 'root)
@@ -5912,7 +5949,7 @@ three functions the indicator asks are answered by a temp buffer."
 
   (it "makes a root candidate carrying the canonical owner path"
     (let ((cand (remoto--owner-candidate
-                 (propertize "agzam" 'remoto-acct-type "User"))))
+                 (propertize "agzam" 'remoto-acct-type "User") "/github:")))
       (expect (get-text-property 0 'remoto-target cand)
               :to-equal "/github:agzam")
       (expect (get-text-property 0 'remoto-acct-type cand)

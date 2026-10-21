@@ -145,7 +145,7 @@ non-strings and unrecognized strings are returned as-is."
        ((null parsed) path)
        ((and (eq (remoto-path-level parsed) 'tree)
              (remoto-path-short parsed))
-        (format "/github:%s/%s:%s" (remoto-path-owner parsed)
+        (format "%s%s/%s:%s" (remoto--path-prefix parsed) (remoto-path-owner parsed)
                 (remoto-path-repo parsed) (remoto-path-path parsed)))
        ((remoto--repo-root parsed)
         (remoto--canonical-path (remoto--repo-root parsed)))

@@ -46,13 +46,81 @@
 (require 'ghub)
 (require 'iso8601)
 
-;;;; Path parsing
+;;;; Forges
 
-(defconst remoto--handler-regexp "\\`/\\(?:github\\|gh\\):"
-  "Regexp matching remoto file paths.
-Matches the canonical /github: prefix and its /gh: shorthand alias.
-Spelled out rather than built with `rx' because the autoload cookie on
-`remoto-autoload-file-name-handler' repeats it as a literal.")
+(cl-defstruct (remoto-forge (:constructor remoto-forge-create)
+                            (:copier nil))
+  "A source of repositories that remoto paths name.
+PREFIXES are the path prefixes without slash or colon, the first one
+canonical; DELIMITERS the characters after OWNER/REPO it supports."
+  name prefixes host delimiters repo-end)
+
+(cl-defstruct (remoto-github (:include remoto-forge)
+                             (:constructor remoto-github-create)
+                             (:copier nil))
+  "The GitHub forge.")
+
+(defvar remoto--forges nil
+  "Alist of (PREFIX . FORGE) for every prefix of every registered forge.")
+
+(defvar remoto--handler-regexp "\\`/\\(?:github\\|gh\\):"
+  "Regexp matching remoto file paths: every prefix of every forge.
+`remoto-register-forge' rebuilds it.  The autoload cookie on
+`remoto-autoload-file-name-handler' repeats the GitHub prefixes as a
+literal, in this spelling.")
+
+(defun remoto--prefix (forge)
+  "Return the canonical path prefix of FORGE, such as /github:."
+  (concat "/" (car (remoto-forge-prefixes forge)) ":"))
+
+(defun remoto--refresh-handler ()
+  "Point the entry of `file-name-handler-alist' at the current prefixes."
+  (when (bound-and-true-p global-remoto-mode)
+    (setq file-name-handler-alist
+          (rassq-delete-all #'remoto-file-name-handler file-name-handler-alist))
+    (push (cons remoto--handler-regexp #'remoto-file-name-handler)
+          file-name-handler-alist)))
+
+(defun remoto-register-forge (forge)
+  "Register FORGE under each of its prefixes and refresh the handler regexp.
+Register the delimiters of FORGE with `remoto-register-delimiter' first."
+  (setf (remoto-forge-repo-end forge)
+        (rx-to-string `(in "/:" ,@(mapcar #'char-to-string
+                                          (remoto-forge-delimiters forge)))
+                      t))
+  (dolist (prefix (remoto-forge-prefixes forge))
+    (if-let* ((entry (assoc prefix remoto--forges)))
+        (setcdr entry forge)
+      (setq remoto--forges (append remoto--forges (list (cons prefix forge))))))
+  (setq remoto--handler-regexp
+        (concat "\\`/\\(?:"
+                (mapconcat #'regexp-quote (mapcar #'car remoto--forges) "\\|")
+                "\\):"))
+  (remoto--refresh-handler))
+
+(defun remoto--prefix-of (string)
+  "Return (PREFIX . FORGE) for the registered prefix at the head of STRING."
+  (seq-find (lambda (entry)
+              (string-prefix-p (concat "/" (car entry) ":") string))
+            remoto--forges))
+
+(defun remoto--canonical-forge (string)
+  "Return the forge whose canonical prefix is the head of STRING, or nil."
+  (when-let* (((stringp string))
+              (entry (remoto--prefix-of string))
+              ((equal (car entry) (car (remoto-forge-prefixes (cdr entry))))))
+    (cdr entry)))
+
+(defun remoto--after-prefix (name)
+  "Return the text of the remoto NAME after its canonical prefix."
+  (substring name (length (remoto--prefix (remoto--canonical-forge name)))))
+
+(defvar remoto--github
+  (remoto-github-create :name 'github :prefixes '("github" "gh")
+                        :host "github.com" :delimiters '(?@ ?#))
+  "The GitHub forge.  A `remoto-path' built without a forge is GitHub's.")
+
+;;;; Path parsing
 
 (cl-defstruct (remoto-delimiter (:constructor remoto-delimiter-create)
                                 (:copier nil))
@@ -62,24 +130,18 @@ Spelled out rather than built with `rx' because the autoload cookie on
 (defvar remoto--delimiters nil
   "Alist of (CHAR . `remoto-delimiter') that `remoto--parse' reads.")
 
-(defvar remoto--repo-end-regexp (rx (in "/:"))
-  "Regexp matching the character that ends a repository name.
-`remoto-register-delimiter' adds every delimiter to it.")
-
 (defun remoto-register-delimiter (char level kind)
   "Register CHAR as the delimiter after OWNER/REPO that opens LEVEL.
 KIND is `ref' when the text after CHAR names a ref and a colon then
 starts its tree, as `@' does, or `topic' when it names a topic that
-opens in a buffer of its own, as `#' does."
+opens in a buffer of its own, as `#' does.  A forge lists the
+delimiters it supports; the others are plain characters in its paths."
   (setf (alist-get char remoto--delimiters)
-        (remoto-delimiter-create :char char :level level :kind kind))
-  (setq remoto--repo-end-regexp
-        (rx-to-string `(in "/:" ,@(mapcar (lambda (d) (char-to-string (car d)))
-                                         remoto--delimiters))
-                      t)))
+        (remoto-delimiter-create :char char :level level :kind kind)))
 
 (remoto-register-delimiter ?@ 'refs 'ref)
 (remoto-register-delimiter ?# 'topics 'topic)
+(remoto-register-forge remoto--github)
 
 (defun remoto--delimiter-of (level)
   "Return the `remoto-delimiter' that opens LEVEL, or nil."
@@ -95,16 +157,16 @@ opens in a buffer of its own, as `#' does."
                            (:copier nil))
   "Parsed components of a remoto path.
 LEVEL names the directory the path is in, QUERY the text after it.
-SHORT marks the /github:OWNER/REPO/PATH form, a tree on the default branch."
-  owner repo ref path level query string short)
+SHORT marks the /PREFIX:OWNER/REPO/PATH form, a tree on the default branch."
+  (forge remoto--github) owner repo ref path level query string short)
 
-(defun remoto--parse-tree (string owner repo ref raw short)
-  "Build the `remoto-path' of STRING, a tree path, from OWNER, REPO and REF.
-RAW is the text after the colon, or after the repository in the SHORT
-form.  A directory ends in a slash, so the query is what follows the
-last one."
+(defun remoto--parse-tree (forge string owner repo ref raw short)
+  "Build the `remoto-path' of STRING, a tree path of FORGE, from its parts.
+OWNER, REPO and REF name the tree; RAW is the text after the colon, or
+after the repository in the SHORT form.  A directory ends in a slash,
+so the query is what follows the last one."
   (remoto-path-create
-   :owner owner :repo repo
+   :forge forge :owner owner :repo repo
    :ref (and ref (not (string-empty-p ref)) ref)
    :path (if (string-empty-p raw) "/" raw)
    :level 'tree
@@ -116,39 +178,43 @@ last one."
 
 (defun remoto--parse (string)
   "Parse STRING, a partial or canonical remoto path, into a `remoto-path'.
-Return nil unless STRING starts with /github:.  Every string with the
-prefix parses: LEVEL is the deepest directory it names and QUERY the text
-after that directory, so `remoto-path-directory' plus QUERY is STRING."
-  (when (and (stringp string) (string-prefix-p "/github:" string))
-    (let* ((rest (substring string (length "/github:")))
+Return nil unless STRING starts with the canonical prefix of a forge.
+Every string with one parses: LEVEL is the deepest directory it names
+and QUERY the text after that, so `remoto-path-directory' + QUERY is STRING."
+  (when-let* ((forge (remoto--canonical-forge string)))
+    (let* ((rest (substring string (length (remoto--prefix forge))))
            (slash (string-search "/" rest))
            (owner (and slash (substring rest 0 slash)))
            (after-owner (and slash (substring rest (1+ slash))))
            (end (and after-owner
-                     (string-match-p remoto--repo-end-regexp after-owner)))
+                     (string-match-p (remoto-forge-repo-end forge) after-owner)))
            (repo (and end (substring after-owner 0 end))))
       (cond
-       ;; /github:QUERY, or /github:/... with no account name
+       ;; /PREFIX:QUERY, or /PREFIX:/... with no account name
        ((or (null slash) (string-empty-p owner))
-        (remoto-path-create :level 'root :query rest :path "/" :string string))
-       ;; /github:OWNER/QUERY: no delimiter yet, or one after no name
-       ((or (null end) (string-empty-p repo))
-        (remoto-path-create :level 'owner :owner owner :query after-owner
+        (remoto-path-create :forge forge :level 'root :query rest
                             :path "/" :string string))
+       ;; /PREFIX:OWNER/QUERY: no delimiter yet, or one after no name
+       ((or (null end) (string-empty-p repo))
+        (remoto-path-create :forge forge :level 'owner :owner owner
+                            :query after-owner :path "/" :string string))
        (t
         (let ((char (aref after-owner end))
               (tail (substring after-owner (1+ end))))
           (pcase char
-            (?: (remoto--parse-tree string owner repo nil tail nil))
-            (?/ (remoto--parse-tree string owner repo nil (concat "/" tail) t))
+            (?: (remoto--parse-tree forge string owner repo nil tail nil))
+            (?/ (remoto--parse-tree forge string owner repo nil
+                                    (concat "/" tail) t))
             (_
              (let* ((delimiter (alist-get char remoto--delimiters))
                     (colon (and (eq (remoto-delimiter-kind delimiter) 'ref)
                                 (string-search ":" tail))))
                (if colon
-                   (remoto--parse-tree string owner repo (substring tail 0 colon)
+                   (remoto--parse-tree forge string owner repo
+                                       (substring tail 0 colon)
                                        (substring tail (1+ colon)) nil)
-                 (remoto-path-create :level (remoto-delimiter-level delimiter)
+                 (remoto-path-create :forge forge
+                                     :level (remoto-delimiter-level delimiter)
                                      :owner owner :repo repo :query tail
                                      :path "/" :string string)))))))))))
 
@@ -174,38 +240,38 @@ Returns nil if FILENAME does not match the canonical format."
               ((not (remoto-path-short parsed))))
     parsed))
 
-(defun remoto--canonical-path (parsed)
-  "Build a canonical remoto path string from PARSED `remoto-path'."
-  (format "/github:%s/%s%s:%s"
-          (remoto-path-owner parsed)
-          (remoto-path-repo parsed)
-          (if (remoto-path-ref parsed)
-              (concat "@" (remoto-path-ref parsed))
-            "")
-          (or (remoto-path-path parsed) "/")))
+(defun remoto--path-prefix (parsed)
+  "Return the canonical prefix of the forge of PARSED, such as /github:."
+  (remoto--prefix (remoto-path-forge parsed)))
 
 (defun remoto--tree-prefix (parsed)
-  "Return the /github:OWNER/REPO[@REF]: prefix of the canonical PARSED."
-  (format "/github:%s/%s%s:"
+  "Return the /PREFIX:OWNER/REPO[@REF]: prefix of the canonical PARSED."
+  (format "%s%s/%s%s:"
+          (remoto--path-prefix parsed)
           (remoto-path-owner parsed)
           (remoto-path-repo parsed)
           (if (remoto-path-ref parsed)
               (concat "@" (remoto-path-ref parsed))
             "")))
 
+(defun remoto--canonical-path (parsed)
+  "Build a canonical remoto path string from PARSED `remoto-path'."
+  (concat (remoto--tree-prefix parsed) (or (remoto-path-path parsed) "/")))
+
 (defun remoto--unparse (parsed)
   "Build the remoto path string of PARSED, the inverse of `remoto--parse'.
 A canonical tree path comes back with the slash after its colon."
-  (let ((owner (remoto-path-owner parsed))
+  (let ((prefix (remoto--path-prefix parsed))
+        (owner (remoto-path-owner parsed))
         (repo (remoto-path-repo parsed))
         (query (remoto-path-query parsed)))
     (pcase (remoto-path-level parsed)
-      ('root (concat "/github:" query))
-      ('owner (concat "/github:" owner "/" query))
+      ('root (concat prefix query))
+      ('owner (concat prefix owner "/" query))
       ('tree (if (remoto-path-short parsed)
-                 (concat "/github:" owner "/" repo (remoto-path-path parsed))
+                 (concat prefix owner "/" repo (remoto-path-path parsed))
                (remoto--canonical-path parsed)))
-      (level (concat "/github:" owner "/" repo
+      (level (concat prefix owner "/" repo
                      (char-to-string
                       (remoto-delimiter-char (remoto--delimiter-of level)))
                      query)))))
@@ -896,14 +962,15 @@ For truncated trees, fetches the directory on demand."
 (defun remoto--dot-component-p (name)
   "Return non-nil when the remoto NAME has a . or .. component."
   (string-match-p (rx (or bos "/") (** 1 2 ".") (or "/" eos))
-                  (substring name (length "/github:"))))
+                  (remoto--after-prefix name)))
 
 (defun remoto--normalize-name (name)
   "Resolve the . and .. components of the remoto NAME, collapse its slashes.
 The levels above a repository are directories too: .. at a repository
-root names its owner, and .. at an owner names /github:.  A canonical
+root names its owner, and .. at an owner names the prefix.  A canonical
 root keeps the slash after its colon; any other trailing slash stays."
-  (let ((parts nil)
+  (let ((prefix (remoto--prefix (remoto--canonical-forge name)))
+        (parts nil)
         (dir (string-suffix-p "/" name)))
     (dolist (part (remoto--name-components name))
       (pcase part
@@ -912,12 +979,12 @@ root keeps the slash after its colon; any other trailing slash stays."
         (_ (push part parts))))
     (pcase-let ((`(,owner ,repo . ,path) (nreverse parts)))
       (cond
-       ((null owner) "/github:")
-       ((null repo) (concat "/github:" owner "/"))
+       ((null owner) prefix)
+       ((null repo) (concat prefix owner "/"))
        ((string-suffix-p ":" repo)
-        (concat "/github:" owner "/" repo "/" (string-join path "/")
+        (concat prefix owner "/" repo "/" (string-join path "/")
                 (and path dir "/")))
-       (t (concat "/github:" owner "/" repo
+       (t (concat prefix owner "/" repo
                   (and path (concat "/" (string-join path "/")))
                   (and dir "/")))))))
 
@@ -928,29 +995,29 @@ may hold slashes of its own."
   (if-let* ((parsed (remoto--parse-path name)))
       (cons (remoto-path-owner parsed)
             (cons (substring (remoto--tree-prefix parsed)
-                             (+ (length "/github:")
+                             (+ (length (remoto--path-prefix parsed))
                                 (length (remoto-path-owner parsed))
                                 1))
                   (split-string (remoto-path-path parsed) "/" t)))
-    (split-string (substring name (length "/github:")) "/" t)))
+    (split-string (remoto--after-prefix name) "/" t)))
 
 (defun remoto--file-name-prefix (filename)
-  "Extract the /github:owner/repo@ref: prefix from FILENAME."
+  "Extract the /PREFIX:owner/repo@ref: prefix from FILENAME."
   (when-let* ((parsed (remoto--parse-path filename)))
     (remoto--tree-prefix parsed)))
 
 ;;;; File-name handler
 
-(defconst remoto--shorthand-prefix "/gh:"
-  "Shorthand alias for the canonical /github: prefix.")
-
 (defun remoto--normalize-shorthand (arg)
-  "Rewrite a leading /gh: shorthand in ARG to the canonical /github:.
-A non-string ARG, or a string lacking the shorthand prefix, is returned
+  "Rewrite a leading shorthand prefix in ARG, such as /gh:, to its forge's.
+A non-string ARG, or a string lacking a shorthand prefix, is returned
 unchanged so downstream handlers only ever see canonical paths."
-  (if (and (stringp arg)
-           (string-prefix-p remoto--shorthand-prefix arg))
-      (concat "/github:" (substring arg (length remoto--shorthand-prefix)))
+  (if-let* (((stringp arg))
+            (entry (remoto--prefix-of arg))
+            (forge (cdr entry))
+            ((not (equal (car entry) (car (remoto-forge-prefixes forge))))))
+      (concat (remoto--prefix forge)
+              (substring arg (+ 2 (length (car entry)))))
     arg))
 
 (defun remoto-file-name-handler (operation &rest args)
@@ -987,7 +1054,7 @@ A bare account or repository name exists once a cached listing holds it."
       ;; line of their listing; a delimiter after no repository names nothing.
       ((or 'root 'owner)
        (cond ((member query '("" "/")) t)
-             ((string-match-p remoto--repo-end-regexp query) nil)
+             ((not (remoto--bare-name parsed)) nil)
              (t (and (remoto--listed-p filename) t))))
       ;; /github:OWNER/REPO@REF is a line of a Dired of matching refs; the
       ;; delimiter alone is still being typed.
@@ -1024,7 +1091,7 @@ Also returns t for partial paths like /github: and /github:OWNER/."
       ;; by shape; a delimiter after no repository is a line of nothing.
       ((or 'root 'owner)
        (cond ((member query '("" "/")) t)
-             ((not (string-match-p remoto--repo-end-regexp query)) t)
+             ((remoto--bare-name parsed) t)
              (t (and (remoto--entry-for filename) t))))
       ;; /github:OWNER/REPO@ is the Dired of refs; a ref in it is a line of
       ;; a Dired of matching refs.
@@ -1130,12 +1197,12 @@ Pass FULL, MATCH, NOSORT, and ID-FORMAT through unchanged."
 
 (defvar remoto-min-search-chars) ; forward-decl for byte-compiler
 
-(defun remoto--owner-candidate (owner)
-  "Return a /github: root completion candidate for account OWNER.
+(defun remoto--owner-candidate (owner prefix)
+  "Return a root completion candidate for account OWNER under PREFIX.
 Preserves OWNER's text properties (used for affixation) and attaches a
 `remoto-target' of the canonical owner path so Embark can act on it."
   (propertize (concat owner "/")
-              'remoto-target (concat "/github:" (substring-no-properties owner))))
+              'remoto-target (concat prefix (substring-no-properties owner))))
 
 (defun remoto--minibuffer-input ()
   "Contents of the current buffer when it is an active completion minibuffer."
@@ -1219,6 +1286,7 @@ fetches populate the cache in the background.
 An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
   (let* ((parsed (remoto--parse directory))
          (level (and parsed (remoto-path-level parsed)))
+         (prefix (and parsed (remoto--path-prefix parsed)))
          (owner (and parsed (remoto-path-owner parsed)))
          (repo (and parsed (remoto-path-repo parsed))))
     (when (and parsed
@@ -1228,12 +1296,13 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
         ('root
          ;; Empty query + authenticated: show user + orgs
          ;; Non-empty: search users/orgs matching the query (non-blocking)
-         (let ((query (remoto--completion-query file directory)))
+         (let ((query (remoto--completion-query file directory))
+               (candidate (lambda (acct) (remoto--owner-candidate acct prefix))))
            (if (string-empty-p query)
                (when-let* ((user remoto--authenticated-user))
                  (let* ((orgs (remoto--fetch-user-orgs user))
                         (all (cons (propertize user 'remoto-acct-type "User") orgs)))
-                   (mapcar #'remoto--owner-candidate all)))
+                   (mapcar candidate all)))
              (when-let* ((result (remoto--search-users query)))
                (let ((filtered (seq-filter (lambda (u) (string-prefix-p file u))
                                            result)))
@@ -1241,7 +1310,7 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
                  ;; warm by the time the user types "/"
                  (when-let* ((top (car filtered)))
                    (remoto--prefetch-owner-repos top))
-                 (mapcar #'remoto--owner-candidate filtered))))))
+                 (mapcar candidate filtered))))))
         ('owner
          ;; Repo completion at /github:OWNER/
          ;; Try cached/async results first; on cold-cache nil, fall
@@ -1264,7 +1333,7 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
                        ;; Carry the full canonical path so Embark actions can
                        ;; resolve a bare candidate (see `remoto--embark-transform').
                        (put-text-property 0 (length cand) 'remoto-target
-                                          (format "/github:%s/%s:/" owner name)
+                                          (format "%s%s/%s:/" prefix owner name)
                                           cand)
                        cand))
                    repos)))
@@ -1283,16 +1352,16 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
                                              (propertize (concat b ":")
                                                         'remoto-ref-type "branch"
                                                         'remoto-target
-                                                        (format "/github:%s/%s@%s:/"
-                                                                owner repo b)))
+                                                        (format "%s%s/%s@%s:/"
+                                                                prefix owner repo b)))
                                            branches)))
                      (tag-set (when (listp tags)
                                 (mapcar (lambda (tg)
                                           (propertize (concat tg ":")
                                                      'remoto-ref-type "tag"
                                                      'remoto-target
-                                                     (format "/github:%s/%s@%s:/"
-                                                             owner repo tg)))
+                                                     (format "%s%s/%s@%s:/"
+                                                             prefix owner repo tg)))
                                         tags))))
                  (thread-last (append branch-set tag-set)
                    (seq-filter (lambda (r)
@@ -1326,8 +1395,8 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
                (when filtered
                  (mapcar (lambda (name)
                            (propertize name 'remoto-target
-                                       (format "/github:%s/%s@%s:/%s%s"
-                                               owner repo branch subpath name)))
+                                       (format "%s%s/%s@%s:/%s%s"
+                                               prefix owner repo branch subpath name)))
                          filtered))))))
         ('topics
          ;; Issue/PR completion at /github:OWNER/REPO#
@@ -1366,8 +1435,8 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
                                              'remoto-topic-title title
                                              'remoto-topic-state state
                                              'remoto-target
-                                             (format "/github:%s/%s#%s"
-                                                     owner repo num))))
+                                             (format "%s%s/%s#%s"
+                                                     prefix owner repo num))))
                              issues))
                     (filtered
                      (if (or (string-empty-p file)
@@ -1436,17 +1505,16 @@ ignored since remoto paths always qualify."
     (cond
      ;; Absolute remoto path.  Primitives such as `file-exists-p' expand
      ;; their argument first, so this is where . and .. must resolve.
-     ((string-prefix-p "/github:" name)
+     ((remoto--canonical-forge name)
       (if (remoto--dot-component-p name)
           (remoto--normalize-name name)
         name))
      ;; Local absolute or home-relative path - never resolve under remoto
-     ((or (and (string-prefix-p "/" name)
-              (not (string-prefix-p "/github:" name)))
+     ((or (string-prefix-p "/" name)
           (string-prefix-p "~" name))
       (expand-file-name name))
      ;; Relative path under a remoto directory
-     ((and dir (string-prefix-p "/github:" dir))
+     ((and dir (remoto--canonical-forge dir))
       (if-let* ((parsed (remoto--parse-path dir))
                 (prefix (remoto--file-name-prefix dir)))
           (remoto--normalize-name
@@ -1506,24 +1574,24 @@ making remoto fetch a tree just to classify a path.  The symbol `never'
 means the opposite - answer, but never open a connection - so it reads
 like a nil CONNECTED here, where no answer costs one.
 Handles partial paths for pre-repo completion."
-  (when (and (string-prefix-p "/github:" filename)
-             (or (not connected)
-                 (eq connected 'never)
-                 (remoto--reached-p filename)))
+  (when-let* ((forge (remoto--canonical-forge filename))
+              ((or (not connected)
+                   (eq connected 'never)
+                   (remoto--reached-p filename))))
     (if-let* ((parsed (remoto--parse-path filename))
               (prefix (remoto--file-name-prefix filename)))
         (pcase identification
-          ('method "github")
+          ('method (symbol-name (remoto-forge-name forge)))
           ('host (format "%s/%s" (remoto-path-owner parsed)
                          (remoto-path-repo parsed)))
           ('localname (remoto--localname filename prefix))
           (_ prefix))
       ;; Partial path - still remote
       (pcase identification
-        ('method "github")
-        ('host "github.com")
-        ('localname (remoto--localname filename "/github:"))
-        (_ "/github:")))))
+        ('method (symbol-name (remoto-forge-name forge)))
+        ('host (remoto-forge-host forge))
+        ('localname (remoto--localname filename (remoto--prefix forge)))
+        (_ (remoto--prefix forge))))))
 
 (defun remoto--handle-file-name-directory (filename)
   "Return directory part of remote FILENAME: the level it is in.
@@ -1588,8 +1656,8 @@ recognize it here."
               ((eq (remoto-path-level parsed) 'topics))
               (query (remoto-path-query parsed))
               ((string-match-p (rx bos (+ digit) eos) query)))
-    (cons (format "/github:%s/%s" (remoto-path-owner parsed)
-                  (remoto-path-repo parsed))
+    (cons (format "%s%s/%s" (remoto--path-prefix parsed)
+                  (remoto-path-owner parsed) (remoto-path-repo parsed))
           query)))
 
 (defun remoto--handle-insert-file-contents
@@ -1839,7 +1907,7 @@ and without it FILENAME gets its one line, as with ls-lisp.  /github: and
     (cond
      (entry (remoto--insert-entry-line filename switches))
      (dir (when (or full-directory-p
-                    (equal filename "/github:")
+                    (equal filename dir)
                     (string-suffix-p "/" filename))
             (remoto--insert-listing dir switches)))
      (t
@@ -2128,16 +2196,15 @@ line-fragment builders `line' and `region'.  Templates are expanded with
   %s  start line (in the `line' and `region' templates)
   %e  end line (in the `region' template)
 
-Supporting another forge (GitLab, Codeberg, ...) is a matter of adding
-an entry here and teaching `remoto--parse-path' the new path prefix.")
+A forge registered with `remoto-register-forge' needs an entry here
+under its name.")
 
 (defun remoto--forge-type (path)
   "Return the forge symbol for remoto PATH, or nil when undetermined.
 Derived from the path prefix, e.g. \"/github:...\" -> `github'."
-  (when (and (stringp path)
-             (string-match (rx bos "/" (group (+ (not (in "/:")))) ":") path))
-    (let ((prefix (match-string 1 path)))
-      (if (member prefix '("github" "gh")) 'github (intern prefix)))))
+  (when-let* (((stringp path))
+              (entry (remoto--prefix-of path)))
+    (remoto-forge-name (cdr entry))))
 
 (defun remoto--url-encode-path (path)
   "Percent-encode each segment of PATH for a web URL, keeping the slashes."
@@ -2661,9 +2728,10 @@ repositories: the two levels above a repository."
                        (remoto--handle-file-name-as-directory filename)))
               (query (remoto-path-query parsed)))
     (pcase (remoto-path-level parsed)
-      ('root (and (member query '("" "/")) "/github:"))
+      ('root (and (member query '("" "/")) (remoto--path-prefix parsed)))
       ('owner (and (string-empty-p query)
-                   (format "/github:%s/" (remoto-path-owner parsed)))))))
+                   (format "%s%s/" (remoto--path-prefix parsed)
+                           (remoto-path-owner parsed)))))))
 
 (defun remoto--refs-dir-p (filename)
   "Return non-nil when FILENAME is a /github:OWNER/REPO@ directory."
@@ -2677,7 +2745,8 @@ A bare name holds no slash, colon or delimiter: it is one line of a
 listing, not a path into it."
   (let ((query (remoto-path-query parsed)))
     (and (not (string-empty-p query))
-         (not (string-match-p remoto--repo-end-regexp query))
+         (not (string-match-p (remoto-forge-repo-end (remoto-path-forge parsed))
+                              query))
          query)))
 
 (defun remoto--bare-repo-parts (filename)
@@ -2707,11 +2776,12 @@ Those are the lines of a listing or of a Dired of matches."
 Return ENTRY."
   (puthash (downcase name) entry remoto--entry-cache))
 
-(defun remoto--remember-repo (full-name item)
+(defun remoto--remember-repo (prefix full-name item)
   "Remember the Dired line and default branch of the repository ITEM.
-FULL-NAME is its OWNER/REPO; ITEM comes from a list or a search endpoint."
+PREFIX is the prefix of its forge and FULL-NAME its OWNER/REPO; ITEM
+comes from a list or a search endpoint."
   (when full-name
-    (remoto--remember (concat "/github:" full-name)
+    (remoto--remember (concat prefix full-name)
                       (cdr (remoto--repo-entry item)))
     (when-let* ((branch (alist-get 'default_branch item)))
       (puthash full-name branch remoto--default-branch-cache))))
@@ -2740,17 +2810,18 @@ DIR is what `remoto--listing-dir' returns."
   (let ((cached (gethash dir remoto--listing-cache)))
     (cond
      ((and cached (remoto--listing-fresh-p cached)) cached)
-     ((equal dir "/github:")
-      (puthash dir (remoto--listing-create :entries (remoto--account-entries))
+     ((eq (remoto--directory-level dir) 'root)
+      (puthash dir (remoto--listing-create :entries (remoto--account-entries dir))
                remoto--listing-cache))
      (t (remoto--fetch-owner-listing dir)))))
 
-(defun remoto--account-entries ()
+(defun remoto--account-entries (dir)
   "Return listing entries for the account of the token and its organizations.
-Signal a `user-error' without a token, since no other request names them."
+DIR is the root being listed.  Signal a `user-error' without a token,
+since no other request names them."
   (let ((user (or (remoto--get-authenticated-user)
-                  (user-error "Remoto: /github: lists your account and \
-organizations, which needs a GitHub token"))))
+                  (user-error "Remoto: %s lists your account and \
+organizations, which needs a GitHub token" dir))))
     (mapcar (lambda (account)
               (let ((type (or (get-text-property 0 'remoto-acct-type account)
                               "User"))
@@ -2762,17 +2833,18 @@ organizations, which needs a GitHub token"))))
                                    type))))))
             (cons user (remoto--fetch-user-orgs user)))))
 
-(defun remoto--owner-endpoint (owner)
+(defun remoto--owner-endpoint (prefix owner)
   "Return the endpoint that lists OWNER's repositories, newest push first.
 The account of the token and its organizations have endpoints that list
-private repositories too; any other account lists its public ones."
+private repositories too; any other account lists its public ones.
+PREFIX names the root whose listing holds the organizations."
   (let ((user (remoto--get-authenticated-user)))
     (cond
      ((null user) (format "users/%s/repos?sort=pushed" owner))
      ((string-equal-ignore-case owner user)
       "user/repos?affiliation=owner&sort=pushed")
      ((seq-some (lambda (entry) (string-equal-ignore-case owner (car entry)))
-                (cdr (remoto--listing-entries (remoto--listing "/github:"))))
+                (cdr (remoto--listing-entries (remoto--listing prefix))))
       (format "orgs/%s/repos?sort=pushed" owner))
      (t (format "users/%s/repos?sort=pushed" owner)))))
 
@@ -2795,12 +2867,13 @@ drwx------, an archived one dr-xr-xr-x, and a fork says so in its note."
                       (concat (and (alist-get 'fork item) "fork  ")
                               (alist-get 'description item))))))))
 
-(defun remoto--add-listing-page (listing owner items)
-  "Add ITEMS, one page of OWNER's repositories, to LISTING and set its state.
+(defun remoto--add-listing-page (listing dir owner items)
+  "Add ITEMS, one page of OWNER's repositories, to LISTING, the one of DIR.
 Each repository is remembered on the way, so opening a listed one asks
 for nothing but its tree."
   (dolist (item items)
-    (remoto--remember-repo (format "%s/%s" owner (alist-get 'name item)) item))
+    (remoto--remember-repo (remoto--prefix (remoto--canonical-forge dir))
+                           (format "%s/%s" owner (alist-get 'name item)) item))
   (let ((entries (append (remoto--listing-entries listing)
                          (mapcar #'remoto--repo-entry items))))
     (setf (remoto--listing-entries listing) (seq-take entries remoto-listing-cap)
@@ -2813,11 +2886,12 @@ for nothing but its tree."
 (defun remoto--fetch-owner-listing (dir)
   "Fetch the first page of the owner listing DIR and cache the listing.
 When more pages follow, they load in the background."
-  (let* ((owner (substring dir (length "/github:") -1))
-         (endpoint (remoto--owner-endpoint owner))
+  (let* ((parsed (remoto--parse dir))
+         (owner (remoto-path-owner parsed))
+         (endpoint (remoto--owner-endpoint (remoto--path-prefix parsed) owner))
          (items (remoto--api (remoto--listing-page-endpoint endpoint 1)))
          (listing (puthash dir (remoto--listing-create) remoto--listing-cache)))
-    (remoto--add-listing-page listing owner items)
+    (remoto--add-listing-page listing dir owner items)
     (when (eq (remoto--listing-state listing) 'fetching)
       (message "Remoto: listing the first %d repositories of %s, fetching the rest"
                (length items) owner)
@@ -2833,7 +2907,7 @@ ends it; OWNER names the account for the cache and the messages."
    (remoto--listing-page-endpoint endpoint page)
    (lambda (items)
      (when (eq listing (gethash dir remoto--listing-cache))
-       (remoto--add-listing-page listing owner items)
+       (remoto--add-listing-page listing dir owner items)
        (if (eq (remoto--listing-state listing) 'fetching)
            (remoto--fetch-listing-page dir listing owner endpoint (1+ page))
          (remoto--listing-done dir listing owner))))
@@ -2940,14 +3014,15 @@ Signal a `user-error' when no account matches."
               ((eq (remoto-path-level parsed) 'root))
               (query (remoto--bare-name parsed))
               ((not (remoto--dired-line-p name))))
-    (let ((logins (seq-filter (lambda (login) (remoto--words-match-p query login))
+    (let ((prefix (remoto--path-prefix parsed))
+          (logins (seq-filter (lambda (login) (remoto--words-match-p query login))
                               (remoto--account-search query))))
       (dolist (login logins)
-        (remoto--remember (concat "/github:" login)
+        (remoto--remember (concat prefix login)
                           `((type . "tree")
                             (note . ,(get-text-property 0 'remoto-acct-type login)))))
-      (cons "/github:"
-            (or (remoto--sorted-names "/github:" logins query)
+      (cons prefix
+            (or (remoto--sorted-names prefix logins query)
                 (user-error "Remoto: no account matches %s" query))))))
 
 (defun remoto--owner-search (owner query)
@@ -2967,7 +3042,8 @@ repository matches, or when OWNER is no account."
   (when-let* ((parts (remoto--bare-repo-parts name))
               ((not (remoto--repository-p (car parts) (cdr parts)))))
     (pcase-let* ((`(,owner . ,query) parts)
-                 (dir (format "/github:%s/" owner))
+                 (dir (format "%s%s/" (remoto--prefix (remoto--canonical-forge name))
+                              owner))
                  (names (condition-case err
                             (remoto--owner-search owner query)
                           (user-error
@@ -2990,7 +3066,7 @@ them for an empty QUERY; DIR is /github:OWNER/REPO@.  Signal a
               (repo (remoto-path-repo parsed))
               (query (string-remove-suffix "/" (remoto-path-query parsed)))
               ((not (remoto--ref-p owner repo query))))
-    (let* ((dir (format "/github:%s/%s@" owner repo))
+    (let* ((dir (format "%s%s/%s@" (remoto--path-prefix parsed) owner repo))
            (branches (remoto--fetch-branches owner repo))
            (refs (seq-filter (lambda (ref) (remoto--words-match-p query ref))
                              (seq-uniq (append branches
@@ -3032,7 +3108,7 @@ The names are /github:QUERY, /github:OWNER/QUERY and
 /github:OWNER/REPO@QUERY; NAMES are the accounts, repositories or refs
 that match QUERY, for a Dired of DIR."
   (when-let* ((name (remoto--normalize-shorthand filename))
-              ((string-prefix-p "/github:" name))
+              ((remoto--canonical-forge name))
               ;; /github:OWNER/.. names no repository called "..".
               (name (if (remoto--dot-component-p name)
                         (remoto--normalize-name name)
@@ -3158,7 +3234,8 @@ NAME-KEY selects the JSON field for the repo name (default `name').
 Each repository is remembered on the way, so that a search match gets a
 Dired line and opens like a line of a listing."
   (mapcar (lambda (item)
-            (remoto--remember-repo (alist-get 'full_name item) item)
+            (remoto--remember-repo (remoto--prefix remoto--github)
+                                   (alist-get 'full_name item) item)
             (propertize (alist-get (or name-key 'name) item)
                         'remoto-repo-desc
                         (or (alist-get 'description item) "")))
@@ -3406,7 +3483,8 @@ QUERY is the text after the delimiter."
 (defun remoto--browse-completions (string)
   "Return completion candidates for STRING in `remoto-browse'.
 Handles search, branch, and issue modes."
-  (pcase-let ((`(,mode ,owner ,repo ,query) (remoto--browse-parse-input string)))
+  (pcase-let ((`(,mode ,owner ,repo ,query) (remoto--browse-parse-input string))
+              (root (remoto--prefix remoto--github)))
     (pcase mode
       ('issues
        (let* ((prefix (format "%s/%s#" owner repo))
@@ -3439,8 +3517,8 @@ Handles search, branch, and issue modes."
                                           'remoto-topic-title title
                                           'remoto-topic-state state
                                           'remoto-target
-                                          (format "/github:%s/%s#%s"
-                                                  owner repo num))))
+                                          (format "%s%s/%s#%s"
+                                                  root owner repo num))))
                           issues)))
              (sort candidates
                    (lambda (a b)
@@ -3463,16 +3541,16 @@ Handles search, branch, and issue modes."
                                          (propertize (concat prefix b)
                                                      'remoto-ref-type "branch"
                                                      'remoto-target
-                                                     (format "/github:%s/%s@%s:/"
-                                                             owner repo b)))
+                                                     (format "%s%s/%s@%s:/"
+                                                             root owner repo b)))
                                        branches)))
                  (tag-set (when (listp tags)
                             (mapcar (lambda (tg)
                                       (propertize (concat prefix tg)
                                                   'remoto-ref-type "tag"
                                                   'remoto-target
-                                                  (format "/github:%s/%s@%s:/"
-                                                          owner repo tg)))
+                                                  (format "%s%s/%s@%s:/"
+                                                          root owner repo tg)))
                                     tags))))
              (seq-filter (lambda (r)
                            (or (string-empty-p query)
@@ -3501,8 +3579,8 @@ Handles search, branch, and issue modes."
                                             (display (if dir? (concat name "/") name)))
                                        (propertize (concat prefix subpath display)
                                                    'remoto-target
-                                                   (format "/github:%s/%s@%s:/%s%s"
-                                                           owner repo branch
+                                                   (format "%s%s/%s@%s:/%s%s"
+                                                           root owner repo branch
                                                            subpath display))))
                                    children))))
              (if (string-empty-p file-part)
@@ -3512,7 +3590,7 @@ Handles search, branch, and issue modes."
        (mapcar (lambda (cand)
                  (let ((c (copy-sequence cand)))
                    (put-text-property 0 (length c) 'remoto-target
-                                      (format "/github:%s:/"
+                                      (format "%s%s:/" root
                                               (substring-no-properties c))
                                       c)
                    c))
@@ -3615,7 +3693,8 @@ opens need the file-name handler for as long as they live."
             (repo (match-string 2 input))
             (number (match-string 3 input)))
         (remoto--require-topic)
-        (remoto-topic-display number (format "/github:%s/%s" owner repo))))
+        (remoto-topic-display number (format "%s%s/%s" (remoto--prefix remoto--github)
+                                             owner repo))))
      ;; Files mode: owner/repo/[subpath]
      ((string-match (rx bos (group (+ (not (in "/@#"))))
                         "/" (group (+ (not (in "/@#"))))
@@ -3625,7 +3704,8 @@ opens need the file-name handler for as long as they live."
              (repo (match-string 2 input))
              (subpath (match-string 3 input))
              (canonical (remoto--maybe-rewrite
-                         (format "/github:%s/%s/%s" owner repo subpath))))
+                         (format "%s%s/%s/%s" (remoto--prefix remoto--github)
+                                 owner repo subpath))))
         (if (and (remoto--parse-path canonical)
                  (equal "tree"
                         (alist-get 'type
@@ -3684,7 +3764,7 @@ Also handles partial canonical paths like /github:OWNER/REPO and the
 /gh: shorthand prefix.  Otherwise return INPUT unchanged.  The . and ..
 components resolve first: a short form reads /github:OWNER/.. as a repo."
   (setq input (remoto--normalize-shorthand input))
-  (when (and (string-prefix-p "/github:" input)
+  (when (and (remoto--canonical-forge input)
              (remoto--dot-component-p input))
     (setq input (remoto--normalize-name input)))
   (let* ((parsed (remoto--parse input))
@@ -3703,7 +3783,8 @@ components resolve first: a short form reads /github:OWNER/.. as a repo."
                            (when b (puthash repo-id b remoto--default-branch-cache))
                            b))))
         (if branch
-            (format "/github:%s/%s@%s:/%s" owner repo branch subpath)
+            (format "%s%s/%s@%s:/%s" (remoto--path-prefix parsed)
+                    owner repo branch subpath)
           input)))
      ;; Partial canonical path: /github:owner/repo or /github:owner/repo@ref
      (root
@@ -3734,7 +3815,7 @@ every Dired command calls, so each buffer gets a canonical directory."
             ((stringp raw))
             (dir (remoto--normalize-shorthand raw))
             ((or (remoto--github-input-p dir)
-                 (string-prefix-p "/github:" dir))))
+                 (remoto--canonical-forge dir))))
       (apply orig-fn
              (if (consp dir-or-list)
                  (cons (remoto--maybe-rewrite dir) (cdr dir-or-list))
@@ -3751,7 +3832,8 @@ nothing opens a Dired of the names that match it."
   ;; A pull request or issue web URL is the topic, not the repository root
   ;; the URL parser would make of it.
   (when-let* ((topic (remoto--parse-topic-url filename)))
-    (setq filename (apply #'format "/github:%s/%s#%s" topic)))
+    (setq filename (apply #'format "%s%s/%s#%s" (remoto--prefix remoto--github)
+                          topic)))
   ;; Check for #NUM BEFORE rewrite (rewrite would mangle the # delimiter)
   (if-let* ((topic (remoto--topic-path filename)))
       (progn
@@ -4010,7 +4092,7 @@ Vertico prepend the directory twice (e.g. /github: + /github:owner ->
 already canonicalized by `substitute-in-file-name', so EFFECTIVE is /github:.
 Args: ORIG, STRING, PRED, ACTION."
   (let ((effective (substitute-in-file-name string)))
-    (if (not (and (eq action 'metadata) (string-prefix-p "/github:" effective)))
+    (if (not (and (eq action 'metadata) (remoto--canonical-forge effective)))
         (funcall orig string pred action)
       (let* ((dir (or (file-name-directory effective) ""))
              (extra (remoto--completion-metadata dir))
