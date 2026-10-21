@@ -3011,9 +3011,10 @@ and capitals sort first.  Their text properties go."
 
 (defun remoto--account-search (query)
   "Return the logins of the accounts in a search for QUERY.
-The search that completion at /github: ran answers from its cache.
-Without one it runs here, where a failure signals instead of matching none."
-  (let ((key (concat "\0users:" (downcase query))))
+Not from completion's cache: that may hold a shorter query's top 30
+narrowed down, which can lack QUERY itself.  The search is cached apart,
+and a failure signals instead of matching none."
+  (let ((key (concat "\0users-search:" (downcase query))))
     (pcase-let ((`(,hit ,logins) (remoto--search-cache-get key)))
       (if hit
           logins

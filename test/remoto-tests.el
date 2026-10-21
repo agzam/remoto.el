@@ -3473,24 +3473,29 @@ repository."
   (it "puts the account typed first, whatever its case"
     ;; Capitals sort first, which put Qlik-PE and QlikSense above qlik.
     (remoto-test-with-listings
-      (spy-on 'remoto--api :and-call-fake #'remoto-test--account-api)
-      (remoto--search-cache-put
-       "\0users:qlik" (mapcar (lambda (login) (propertize login 'remoto-acct-type "User"))
-                              '("qlik-trial" "QlikSense" "qlik" "Qlik-PE")))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (endpoint)
+                (if (string-prefix-p "search/users?" endpoint)
+                    `((items ,@(mapcar (lambda (login) `((login . ,login) (type . "User")))
+                                       '("qlik-trial" "QlikSense" "qlik" "Qlik-PE"))))
+                  (remoto-test--listing-api endpoint))))
       (with-current-buffer (find-file-noselect "/gh:Qlik")
         (expect (cdr dired-directory)
                 :to-equal '("qlik" "Qlik-PE" "QlikSense" "qlik-trial"))
         (expect (dired-get-filename 'verbatim t) :to-equal "qlik"))))
 
-  (it "takes the search of completion when it ran, asking nothing"
+  (it "searches for the typed name, though completion cached a narrowed list"
+    ;; Completion narrows qlik from the top 30 of qli, which can lack qlik.
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake #'remoto-test--account-api)
       (remoto--search-cache-put
-       "\0users:qlik" (list (propertize "qlik-trial" 'remoto-acct-type "Organization")
-                            (propertize "jdoe" 'remoto-acct-type "User")))
-      (expect (buffer-local-value 'dired-directory (find-file-noselect "/gh:qlik"))
-              :to-equal '("/github:" "qlik-trial"))
-      (expect 'remoto--api :not :to-have-been-called)))
+       "\0users:qlik" (list (propertize "qlik-trial" 'remoto-acct-type "Organization")))
+      (expect (cdr (buffer-local-value 'dired-directory (find-file-noselect "/gh:qlik")))
+              :to-equal '("qlik" "qlik-oss" "qlik-trial"))
+      (kill-buffer (find-file-noselect "/gh:qlik"))
+      (find-file-noselect "/gh:qlik")
+      (expect (mapcar #'car (spy-calls-all-args 'remoto--api))
+              :to-equal '("search/users?q=qlik&per_page=100"))))
 
   (it "opens an account from its line in the Dired of matches"
     (remoto-test-with-listings
