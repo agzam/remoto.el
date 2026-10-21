@@ -914,7 +914,14 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
   (it "make-directory signals for new dirs"
     (remoto-test-with-cache
       (expect (make-directory "/github:testowner/testrepo@main:/newdir")
-              :to-throw 'user-error))))
+              :to-throw 'user-error)))
+
+  (it "make-directory signals for a repository no listing holds"
+    ;; Dired's + would otherwise add a line for a repository it never made.
+    (remoto-test-with-listings
+      (remoto-test--listing-text "/github:me/")
+      (expect (make-directory "/github:me/newrepo") :to-throw 'user-error)
+      (expect (make-directory "/github:me/zeta") :not :to-throw))))
 
 ;;; copy-file
 
@@ -1912,6 +1919,10 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
   ;; ghub has no per-status error symbols; the code is the first datum.
   (it "says not found on 404"
     (remoto-test--ghub-fails-with 404)
+    (expect (remoto-test--ghub-get-message) :to-equal "Remoto: not found: repos/o/r"))
+
+  (it "says not found on 422, a search of an account that does not exist"
+    (remoto-test--ghub-fails-with 422)
     (expect (remoto-test--ghub-get-message) :to-equal "Remoto: not found: repos/o/r"))
 
   (it "says access denied on 403"
@@ -3187,6 +3198,24 @@ Buffers BODY creates are killed afterwards."
           (expect 'remoto--api :to-have-been-called-with
                   "users/big/repos?sort=pushed&per_page=100&page=1")))))
 
+  (it "fetches no page again when the pages took longer than the cache lives"
+    ;; The revert at the end found the listing stale and fetched it all again.
+    (remoto-test-with-listings
+      (let ((remoto-repo-cache-ttl 5)
+            (pending nil))
+        (spy-on 'remoto--api :and-call-fake #'remoto-test--with-big-owner)
+        (spy-on 'remoto--api-async :and-call-fake
+                (lambda (_endpoint callback &optional _errback)
+                  (push callback pending)))
+        (with-current-buffer (dired-noselect "/github:big/")
+          (setf (remoto--listing-time (gethash "/github:big/" remoto--listing-cache))
+                (- (float-time) 60))
+          (spy-calls-reset 'remoto--api)
+          (funcall (pop pending) (remoto-test--repo-items 5 "b"))
+          (expect 'remoto--api :not :to-have-been-called)
+          (expect pending :to-be nil)
+          (expect (buffer-string) :to-match " b004$")))))
+
   (it "drops the late pages of a listing that remoto-refresh replaced"
     (remoto-test-with-listings
       (let ((pending nil))
@@ -3357,6 +3386,15 @@ repository than tool, and a search for anything else finds none."
       (let ((before (buffer-list)))
         (expect (find-file-noselect "/gh:acme/zzz")
                 :to-throw 'user-error '("Remoto: no repository of acme matches zzz"))
+        (expect (seq-difference (buffer-list) before) :to-be nil))))
+
+  (it "names the owner when GitHub cannot search an account that does not exist"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (endpoint) (user-error "%s%s" remoto--not-found endpoint)))
+      (let ((before (buffer-list)))
+        (expect (find-file-noselect "/gh:nobody/tool")
+                :to-throw 'user-error '("Remoto: no account nobody"))
         (expect (seq-difference (buffer-list) before) :to-be nil))))
 
   (it "lets a failed search or repository check signal its own error"
@@ -3563,7 +3601,17 @@ release-2, and only main and release-1 have a tree."
       (let ((before (buffer-list)))
         (expect (find-file-noselect "/gh:acme/tool@zzz")
                 :to-throw 'user-error '("Remoto: no branch or tag of acme/tool matches zzz"))
-        (expect (seq-difference (buffer-list) before) :to-be nil)))))
+        (expect (seq-difference (buffer-list) before) :to-be nil))))
+
+  (it "forgets the branches and tags on remoto-refresh in the Dired of refs"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--ref-api)
+      (with-current-buffer (find-file-noselect "/gh:acme/tool@rel")
+        (expect (gethash "acme/tool" remoto--tags-cache) :not :to-be nil)
+        (remoto-refresh)
+        (expect (gethash "acme/tool" remoto--branches-cache) :to-be nil)
+        (expect (gethash "acme/tool" remoto--tags-cache) :to-be nil)
+        (expect (remoto-test--dired-names) :to-equal '("release-1" "release-2"))))))
 
 (describe "a missing file name"
   (it "opens a Dired of the entries of its directory that hold the typed words"

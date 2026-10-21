@@ -422,7 +422,7 @@ Return the value or signal the condition the synchronous call would."
       (_ (error "Remoto: no reply for %s" resource)))))
 
 (defconst remoto--not-found "Remoto: not found: "
-  "How the `user-error' for an answer of 404 starts.
+  "How the `user-error' for an answer of 404 starts, or of 422 to a search.
 Callers that take a missing resource for an answer test for it: a child
 error of `user-error' would print its message in quotes.")
 
@@ -447,7 +447,8 @@ JSON API endpoint."
     ;; PAYLOAD); there are no per-status error symbols to match on.
     (ghub-http-error
      (pcase (cadr err)
-       (404 (user-error "%s%s" remoto--not-found endpoint))
+       ;; A search answers 422 when its user: qualifier names no account.
+       ((or 404 422) (user-error "%s%s" remoto--not-found endpoint))
        (403 (user-error "Remoto: access denied (rate limit or permissions): %s"
                         endpoint))
        (401 (user-error "Remoto: authentication failed; \
@@ -2022,8 +2023,11 @@ or /github:OWNER/REPO@/REF."
   nil)
 
 (defun remoto--handle-make-directory (dir &optional _parents)
-  "Ignore existing DIR and signal an error otherwise."
-  (unless (remoto--handle-file-directory-p dir)
+  "Ignore existing DIR and signal an error otherwise.
+Any name below an owner is a directory by its shape, so it must exist
+too, or Dired adds a line for the repository that `+' did not create."
+  (unless (and (remoto--handle-file-directory-p dir)
+               (remoto--handle-file-exists-p dir))
     (user-error "Remoto: repository is read-only")))
 
 (defun remoto--handle-abbreviate-file-name (filename)
@@ -2164,7 +2168,8 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
 ;;;###autoload
 (defun remoto-refresh ()
   "Invalidate cached tree for the current repo, re-fetch on next access.
-In a listing of /github: or /github:OWNER/, fetch that listing again."
+In a listing of /github: or /github:OWNER/, fetch that listing again.  In
+a Dired of branches and tags, forget the repository's branches and tags."
   (interactive)
   (let* ((dir (or dired-directory default-directory))
          (dir (if (consp dir) (car dir) dir))
@@ -2184,6 +2189,14 @@ In a listing of /github: or /github:OWNER/, fetch that listing again."
                          (remoto-path-repo resolved))
                  remoto--branches-cache)
         (message "Remoto: cache cleared for %s" key)
+        (when (derived-mode-p 'dired-mode)
+          (revert-buffer))))
+     ((string-match (rx bos "/github:" (group (+ (not (in "/:@#")))) "/"
+                        (group (+ (not (in "/:@#")))) "@" eos)
+                    dir)
+      (let ((repo-id (format "%s/%s" (match-string 1 dir) (match-string 2 dir))))
+        (remoto--forget-refs repo-id)
+        (message "Remoto: cache cleared for %s" repo-id)
         (when (derived-mode-p 'dired-mode)
           (revert-buffer))))
      (t (user-error "Remoto: not in a remoto buffer")))))
@@ -2639,6 +2652,11 @@ Otherwise searches by repository name."
             tags)
         (user-error nil)))))
 
+(defun remoto--forget-refs (repo-id)
+  "Drop the cached branches and tags of REPO-ID, an OWNER/REPO."
+  (remhash repo-id remoto--branches-cache)
+  (remhash repo-id remoto--tags-cache))
+
 (defvar remoto--issues-cache (make-hash-table :test 'equal)
   "Cache for issue listings.  key -> (TIMESTAMP . ISSUES-ALIST).")
 
@@ -2802,8 +2820,8 @@ the name has to open it.  A name that a search found counts too."
 
 (defun remoto--listing-fresh-p (listing)
   "Return non-nil when LISTING may be shown without fetching it again.
-One whose later pages failed stays fresh too: the revert that shows the
-failure would otherwise fetch it again, and fail again."
+Its time renews when the background pages end, failed or not: the revert
+that shows the end would otherwise fetch it all again, and again."
   (or (zerop remoto-repo-cache-ttl)
       (< (- (float-time) (remoto--listing-time listing))
          remoto-repo-cache-ttl)))
@@ -2926,6 +2944,7 @@ repositories of %s, as `remoto-listing-cap' allows" count owner))
       ('failed (message "Remoto: listing the repositories of %s stopped \
 after %d; M-x remoto-refresh retries" owner count))
       (_ (message "Remoto: listed all %d repositories of %s" count owner))))
+  (setf (remoto--listing-time listing) (float-time))
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when (and (derived-mode-p 'dired-mode)
@@ -3031,13 +3050,19 @@ Without one it runs here, where a failure signals instead of matching none."
   "Return (DIR . NAMES) when NAME, a bare /github:OWNER/QUERY, is no repository.
 NAMES are the owner's repositories that the search of completion finds
 for QUERY; DIR is the owner's listing.  Signal a `user-error' when no
-repository matches."
+repository matches, or when OWNER is no account."
   (when-let* ((parts (remoto--bare-repo-parts name))
               ((not (remoto--repository-p (car parts) (cdr parts)))))
     (pcase-let* ((`(,owner . ,query) parts)
-                 (dir (format "/github:%s/" owner)))
+                 (dir (format "/github:%s/" owner))
+                 (names (condition-case err
+                            (remoto--owner-search owner query)
+                          (user-error
+                           (if (string-prefix-p remoto--not-found (cadr err))
+                               (user-error "Remoto: no account %s" owner)
+                             (signal (car err) (cdr err)))))))
       (cons dir
-            (or (remoto--sorted-names dir (remoto--owner-search owner query))
+            (or (remoto--sorted-names dir names)
                 (user-error "Remoto: no repository of %s matches %s"
                             owner query))))))
 
