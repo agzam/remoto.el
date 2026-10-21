@@ -61,14 +61,26 @@ Any other error is a bug and propagates."
 
 (defun remoto--embark-target-at-point ()
   "Return (TYPE . PATH) for the remoto target in the current buffer, or nil.
-TYPE is one of `remoto-repo', `remoto-dir', `remoto-file'.  Works in remoto
-file buffers and in Dired (the entry at point, else the directory)."
-  (when-let* ((path (if (derived-mode-p 'dired-mode)
-                        (or (dired-get-filename nil t)
-                            (and (stringp dired-directory) dired-directory))
-                      buffer-file-name))
-              (ctx (remoto--embark-context-or-nil path)))
-    (cons (plist-get ctx :type) path)))
+TYPE is `remoto-repo', `remoto-dir', `remoto-file', `remoto-owner' for an
+account, or `remoto-branch' on a line of a Dired of branches and tags;
+Dired gives the entry at point, else the directory.  Dots resolve first."
+  (when-let* ((raw (if (derived-mode-p 'dired-mode)
+                       (or (dired-get-filename nil t)
+                           (and (stringp dired-directory) dired-directory))
+                     buffer-file-name))
+              ((string-match-p remoto--handler-regexp raw))
+              (name (remoto--normalize-shorthand raw))
+              (path (remoto--embark-canonicalize
+                     (if (remoto--dot-component-p name)
+                         (remoto--normalize-name name)
+                       name)))
+              (type (remoto--embark-classify
+                     path nil
+                     (and (derived-mode-p 'dired-mode)
+                          (consp dired-directory)
+                          (string-suffix-p "@" (car dired-directory))
+                          'ref))))
+    (cons type path)))
 
 (defun remoto--embark-target-finder ()
   "Embark target finder for remoto file and Dired buffers.
@@ -150,9 +162,9 @@ non-strings and unrecognized strings are returned as-is."
 Classifies by shape: an issue/PR (a trailing `#N'), an account/owner
 \(`/FORGE:OWNER'), otherwise the repo, directory, or file type from the
 context layer.  A bare `@REF' root is the branch or tag only when REF is
-non-nil, which a branch or tag completion candidate provides; the same
-path from a Dired buffer is the repository at that ref, whose actions
-\(clone, remote URLs, history) are the useful ones there.  PATH is
+non-nil, which a branch or tag completion candidate and a line of a Dired
+of refs provide; the same path as a Dired's directory is the repository
+at that ref, whose actions (clone, remote URLs, history) apply.  PATH is
 normalized with `remoto--embark-canonicalize' first, so the shorthand and
 file-name forms classify like the canonical one."
   (let ((path (remoto--embark-canonicalize path)))
@@ -456,7 +468,9 @@ calling it more than once is harmless."
   (add-to-list 'embark-keymap-alist '(remoto-repo remoto-embark-repo-map))
   (add-to-list 'embark-keymap-alist '(remoto-dir remoto-embark-dir-map))
   (add-to-list 'embark-keymap-alist '(remoto-file remoto-embark-file-map))
-  (add-to-list 'embark-keymap-alist '(remoto-branch remoto-embark-branch-map))
+  ;; A branch or tag is its repository too: clone, clone URLs, history.
+  (add-to-list 'embark-keymap-alist
+               '(remoto-branch remoto-embark-branch-map remoto-embark-repo-map))
   (add-to-list 'embark-keymap-alist '(remoto-issue remoto-embark-issue-map))
   (add-to-list 'embark-keymap-alist '(remoto-owner remoto-embark-owner-map))
   ;; Fallback for the generic `remoto' completion category: reuse the repo

@@ -6,7 +6,7 @@
 ;; Assisted-by: ECA:claude-opus-5
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: April 24, 2026
-;; Version: 2.2.0
+;; Version: 2.3.0
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
 ;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
@@ -44,6 +44,7 @@
 (require 'files-x)
 (require 'format-spec)
 (require 'ghub)
+(require 'iso8601)
 
 ;;;; Path parsing
 
@@ -110,6 +111,7 @@ Format: owner/repo@ref."
 ;;;; GitHub API
 
 (declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
+(declare-function dired-goto-file "dired" (file))
 
 (defgroup remoto nil
   "Browse GitHub repos without cloning."
@@ -419,6 +421,11 @@ Return the value or signal the condition the synchronous call would."
                 (signal (car err) (cdr err))))
       (_ (error "Remoto: no reply for %s" resource)))))
 
+(defconst remoto--not-found "Remoto: not found: "
+  "How the `user-error' for an answer of 404 starts, or of 422 to a search.
+Callers that take a missing resource for an answer test for it: a child
+error of `user-error' would print its message in quotes.")
+
 (defun remoto--ghub-get (resource auth endpoint)
   "Call `ghub-get' on RESOURCE with AUTH, translating errors.
 ENDPOINT is used in error messages for context.  Always passes
@@ -440,7 +447,8 @@ JSON API endpoint."
     ;; PAYLOAD); there are no per-status error symbols to match on.
     (ghub-http-error
      (pcase (cadr err)
-       (404 (user-error "Remoto: not found: %s" endpoint))
+       ;; A search answers 422 when its user: qualifier names no account.
+       ((or 404 422) (user-error "%s%s" remoto--not-found endpoint))
        (403 (user-error "Remoto: access denied (rate limit or permissions): %s"
                         endpoint))
        (401 (user-error "Remoto: authentication failed; \
@@ -550,6 +558,27 @@ Use after adding a GitHub token to auth-source."
 (defvar remoto--users-cache (make-hash-table :test 'equal)
   "Cache: query string -> (TIMESTAMP . USER-NAMES).
 Entries expire after `remoto-search-cache-ttl' seconds.")
+
+(cl-defstruct (remoto--listing (:constructor remoto--listing-create)
+                               (:copier nil))
+  "The entries of a Dired listing above the repository level.
+ENTRIES is a list of (NAME . ATTRIBUTES) in the order the API sent them.
+STATE is nil once complete, `fetching' while later pages load, `capped'
+when `remoto-listing-cap' cut it short, and `failed' when a page failed."
+  (time (float-time))
+  entries
+  state)
+
+(defvar remoto--listing-cache (make-hash-table :test 'equal)
+  "Cache: listing directory -> `remoto--listing'.
+The directories are /github:, which lists the accounts of the token, and
+/github:OWNER/, which lists OWNER's repositories.")
+
+(defvar remoto--entry-cache (make-hash-table :test 'equal)
+  "Cache: remoto name, downcased -> the attributes of its Dired line.
+The names are /github:ACCOUNT, /github:OWNER/REPO and /github:OWNER/REPO@REF;
+listing pages and searches fill it, so a name that a search found gets a
+line and opens though no cached listing holds it.")
 
 
 (defun remoto--resolve-ref (parsed)
@@ -754,6 +783,34 @@ For truncated trees, fetches the directory on demand."
           (concat normalized "/")
         normalized))))
 
+(defun remoto--dot-component-p (name)
+  "Return non-nil when the remoto NAME has a . or .. component."
+  (string-match-p (rx (or bos "/") (** 1 2 ".") (or "/" eos))
+                  (substring name (length "/github:"))))
+
+(defun remoto--normalize-name (name)
+  "Resolve the . and .. components of the remoto NAME, collapse its slashes.
+The levels above a repository are directories too: .. at a repository
+root names its owner, and .. at an owner names /github:.  A canonical
+root keeps the slash after its colon; any other trailing slash stays."
+  (let ((parts nil)
+        (dir (string-suffix-p "/" name)))
+    (dolist (part (split-string (substring name (length "/github:")) "/" t))
+      (pcase part
+        ("." nil)
+        (".." (pop parts))
+        (_ (push part parts))))
+    (pcase-let ((`(,owner ,repo . ,path) (nreverse parts)))
+      (cond
+       ((null owner) "/github:")
+       ((null repo) (concat "/github:" owner "/"))
+       ((string-suffix-p ":" repo)
+        (concat "/github:" owner "/" repo "/" (string-join path "/")
+                (and path dir "/")))
+       (t (concat "/github:" owner "/" repo
+                  (and path (concat "/" (string-join path "/")))
+                  (and dir "/")))))))
+
 (defun remoto--file-name-prefix (filename)
   "Extract the /github:owner/repo@ref: prefix from FILENAME."
   (when (string-match (rx bos "/github:"
@@ -801,7 +858,8 @@ resolved handler receives only canonical paths."
 (defun remoto--handle-file-exists-p (filename)
   "Return t if FILENAME exists or is openable.
 Returns nil for mid-completion paths (no selection made yet),
-triggering variable `confirm-nonexistent-file-or-buffer' on RET."
+triggering variable `confirm-nonexistent-file-or-buffer' on RET.
+A bare account or repository name exists once a cached listing holds it."
   (cond
    ;; /github: and /github:owner/ - directory-like, exist for navigation
    ((string-match (rx bos "/github:" (? "/") eos) filename) t)
@@ -809,6 +867,9 @@ triggering variable `confirm-nonexistent-file-or-buffer' on RET."
                       (+ (not (in "/:@#")))
                       "/" eos)
                   filename) t)
+   ;; /github:owner - a line of the /github: listing
+   ((string-match (rx bos "/github:" (+ (not (in "/:@#"))) eos) filename)
+    (and (remoto--listed-p filename) t))
    ;; /github:owner/repo/ - openable as dired on default branch
    ((string-match (rx bos "/github:"
                       (+ (not (in "/:@#")))
@@ -824,14 +885,15 @@ triggering variable `confirm-nonexistent-file-or-buffer' on RET."
                       "#"
                       (+ digit) eos)
                   filename) t)
-   ;; /github:owner/repo (bare) - NOT openable, still needs delimiter
+   ;; /github:owner/repo (bare) - still needs a delimiter, unless it is a
+   ;; line of the owner's listing
    ((string-match (rx bos "/github:"
                       (+ (not (in "/:@#")))
                       "/"
                       (+ (not (in "/:@#")))
                       eos)
                   filename)
-    nil)
+    (and (remoto--listed-p filename) t))
    ;; /github:owner/repo# or /github:owner/repo@ - delimiter without selection
    ((string-match (rx bos "/github:"
                       (+ (not (in "/:@#")))
@@ -847,14 +909,16 @@ triggering variable `confirm-nonexistent-file-or-buffer' on RET."
     nil)
    ;; Full canonical path - check tree
    (t
-    (when-let* ((parsed (remoto--parse-path filename)))
-      ;; The repository root at a ref is openable on its shape alone, the
-      ;; way /github:owner/repo/ above is.  Answering it from the tree
-      ;; would cost one recursive tree per ref, because completion asks
-      ;; this of every candidate it offers at the @ level.
-      (if (string-empty-p (remoto--tree-lookup-key (remoto-path-path parsed)))
-          t
-        (and (remoto--tree-entry parsed) t))))))
+    (if-let* ((parsed (remoto--parse-path filename)))
+        ;; The repository root at a ref is openable on its shape alone, the
+        ;; way /github:owner/repo/ above is.  Answering it from the tree
+        ;; would cost one recursive tree per ref, because completion asks
+        ;; this of every candidate it offers at the @ level.
+        (if (string-empty-p (remoto--tree-lookup-key (remoto-path-path parsed)))
+            t
+          (and (remoto--tree-entry parsed) t))
+      ;; /github:owner/repo@ref - a line of a Dired of matching refs
+      (and (remoto--entry-for filename) t)))))
 
 (defun remoto--handle-access-file (filename string)
   "Return nil when FILENAME can be read, else signal `file-missing'.
@@ -876,10 +940,11 @@ Also returns t for partial paths like /github: and /github:OWNER/."
    ((remoto--parse-partial-github-path
      (remoto--handle-file-name-as-directory filename))
     t)
-   (t
-    (when-let* ((parsed (remoto--parse-path filename))
-                (entry (remoto--tree-entry parsed)))
-      (equal "tree" (alist-get 'type entry))))))
+   ((remoto--parse-path filename)
+    (when-let* ((entry (remoto--tree-entry (remoto--parse-path filename))))
+      (equal "tree" (alist-get 'type entry))))
+   ;; /github:owner/repo@ref - a line of a Dired of matching refs
+   (t (and (remoto--entry-for filename) t))))
 
 (defun remoto--handle-file-accessible-directory-p (filename)
   "Return t if FILENAME is an accessible directory.
@@ -893,8 +958,12 @@ Delegates to `file-directory-p' - remote dirs are always readable."
     (equal "blob" (alist-get 'type entry))))
 
 (defun remoto--handle-file-readable-p (filename)
-  "Return non-nil if remote FILENAME is readable."
-  (remoto--handle-file-exists-p filename))
+  "Return non-nil if remote FILENAME is readable.
+A directory reads though `file-exists-p' denies /github:OWNER and
+/github:OWNER/REPO@ for the [Confirm] of a half-typed name: Dired asks
+this of them before it lists the names that match there."
+  (or (remoto--handle-file-exists-p filename)
+      (remoto--handle-file-directory-p filename)))
 
 (defun remoto--handle-file-writable-p (_filename)
   "Remote repos are never writable."
@@ -1348,11 +1417,8 @@ ignored since remoto paths always qualify."
      ;; Absolute remoto path.  Primitives such as `file-exists-p' expand
      ;; their argument first, so this is where . and .. must resolve.
      ((string-prefix-p "/github:" name)
-      (if-let* ((prefix (remoto--file-name-prefix name))
-                (path (substring name (length prefix)))
-                ((string-match-p (rx (or bos "/") (** 1 2 ".") (or "/" eos))
-                                 path)))
-          (concat prefix (remoto--normalize-path path))
+      (if (remoto--dot-component-p name)
+          (remoto--normalize-name name)
         name))
      ;; Local absolute or home-relative path - never resolve under remoto
      ((or (and (string-prefix-p "/" name)
@@ -1363,11 +1429,13 @@ ignored since remoto paths always qualify."
      ((and dir (string-prefix-p "/github:" dir))
       (if-let* ((parsed (remoto--parse-path dir))
                 (prefix (remoto--file-name-prefix dir)))
-          (let* ((dir-path (remoto-path-path parsed))
-                 (combined (concat dir-path "/" name)))
-            (concat prefix (remoto--normalize-path combined)))
+          (remoto--normalize-name
+           (concat prefix (remoto-path-path parsed) "/" name))
         ;; Partial path (e.g. /github:owner/ or /github:owner/repo@)
-        (concat dir name)))
+        (let ((joined (concat dir name)))
+          (if (remoto--dot-component-p joined)
+              (remoto--normalize-name joined)
+            joined))))
      ;; Not our path, delegate
      (t (expand-file-name name dir)))))
 
@@ -1578,12 +1646,11 @@ Handles partial paths including # and files-default short forms."
    ((and (not (remoto--parse-path filename))
          (string-match (rx bos "/github:" (group (+ anything)) eos) filename))
     (match-string 1 filename))
-   ;; Full canonical path
+   ;; Full canonical path.  A directory name keeps nothing after its slash,
+   ;; or Dired lists it as a wildcard and completion matches its own name.
    (t
     (if-let* ((parsed (remoto--parse-path filename)))
-        (thread-last (remoto-path-path parsed)
-          (directory-file-name)
-          (file-name-nondirectory))
+        (file-name-nondirectory (remoto-path-path parsed))
       (file-name-nondirectory filename)))))
 
 ;;;; File content fetching
@@ -1717,56 +1784,190 @@ VISIT, BEG, END, REPLACE as per `insert-file-contents'."
    ((equal mode-str "120000") "lrwxrwxrwx")
    (t                   "-rw-r--r--")))
 
-(defun remoto--classify-p (switches)
-  "Return non-nil when ls options ask for -F file type indicators.
+(defun remoto--ls-switch-p (switches short &optional long)
+  "Return non-nil when ls options ask for SHORT, or for LONG spelled out.
 SWITCHES holds the options as a string, the way Dired passes them.
-Like Dired, look for a short-option group holding F, or --classify."
+Like Dired, look for SHORT in a group of short options."
   (and (stringp switches)
        (let ((case-fold-search nil))
-         (string-match-p (rx (or bos " ")
-                             (or (seq "-" (* alnum) "F")
-                                 (seq "--classify" eow)))
-                         switches))))
+         (string-match-p
+          (rx-to-string `(seq (or bos " ")
+                              (or (seq "-" (* alnum) ,short)
+                                  ,@(and long `((seq "--" ,long eow))))))
+          switches))))
 
-(defun remoto--format-dired-entry (name plist &optional classify)
+(defun remoto--classify-p (switches)
+  "Return non-nil when ls options ask for -F file type indicators.
+SWITCHES holds the options as a string, the way Dired passes them."
+  (remoto--ls-switch-p switches "F" "classify"))
+
+(defun remoto--ls-indicator (plist classify)
+  "Return the ls -F type indicator for an entry with PLIST, if CLASSIFY."
+  (let ((mode (alist-get 'mode plist)))
+    (cond ((not classify) "")
+          ((equal "tree" (alist-get 'type plist)) "/")
+          ((equal mode "120000") "@")
+          ((equal mode "100755") "*")
+          (t ""))))
+
+(defun remoto--ls-time (time)
+  "Format TIME as ls -l does, or the fixed date of tree entries when nil.
+Within the last six months it shows the hour, before that the year.
+English month names, as in the fixed date, keep the columns aligned."
+  (let ((system-time-locale "C"))
+    (cond ((null time) "Jan  1  2000")
+          ((< (float-time (time-subtract nil time)) (* 182 24 60 60))
+           (format-time-string "%b %e %H:%M" time))
+          (t (format-time-string "%b %e  %Y" time)))))
+
+(defun remoto--format-dired-entry (name plist &optional classify widths)
   "Format a single Dired line for NAME with PLIST attributes.
-CLASSIFY appends the ls -F type indicator.  The `dired-filename'
-property marks NAME, so Dired reads it exactly under any switches.
-No leading spaces - Dired and dired-subtree add their own."
+CLASSIFY appends the ls -F type indicator.  WIDTHS, the size and name
+column widths, line up a listing; a note in PLIST starts 4 columns past
+the names, where `dired-hide-details-mode' hides it with symlink targets."
   (let* ((dir? (equal "tree" (alist-get 'type plist)))
-         (size (or (alist-get 'size plist) 0))
-         (mode (or (alist-get 'mode plist) "100644"))
-         (perms (remoto--mode-to-string mode dir?)))
-    (format "%s  1 github github %8d Jan  1  2000 %s%s\n"
-            perms size (propertize name 'dired-filename t)
-            (cond ((not classify) "")
-                  (dir? "/")
-                  ((equal mode "120000") "@")
-                  ((equal mode "100755") "*")
-                  (t "")))))
+         (indicator (remoto--ls-indicator plist classify))
+         (note (alist-get 'note plist)))
+    (concat (or (alist-get 'perms plist)
+                (remoto--mode-to-string (alist-get 'mode plist) dir?))
+            "  1 github github "
+            (string-pad (number-to-string (or (alist-get 'size plist) 0))
+                        (or (car widths) 8) nil t)
+            " " (remoto--ls-time (alist-get 'time plist)) " "
+            ;; Dired reads exactly the name by this property, whatever
+            ;; the switches; a name with a note after it needs it as well.
+            (propertize name 'dired-filename t)
+            indicator
+            (and note (not (string-empty-p note))
+                 (concat (make-string (max 4 (- (+ 4 (or (cdr widths) 0))
+                                                (string-width name)
+                                                (length indicator)))
+                                      ?\s)
+                         note))
+            "\n")))
+
+(defun remoto--listing-widths (entries classify)
+  "Return the size and name column widths that line up ENTRIES.
+CLASSIFY counts the ls -F indicator into the name.  The name column
+stops at 40, so that one long name moves only its own note."
+  (cons (apply #'max 8 (mapcar (lambda (entry)
+                                 (length (number-to-string
+                                          (or (alist-get 'size (cdr entry)) 0))))
+                               entries))
+        (min 40 (apply #'max 0 (mapcar (lambda (entry)
+                                         (+ (string-width (car entry))
+                                            (length (remoto--ls-indicator
+                                                     (cdr entry) classify))))
+                                       entries)))))
+
+(defun remoto--listing-note (listing)
+  "Return the note on the . line of LISTING, or nil once it is complete.
+Not the total line: Dired deletes that under the default `dired-free-space'."
+  (let ((count (length (remoto--listing-entries listing))))
+    (pcase (remoto--listing-state listing)
+      ('fetching (format "%d so far, fetching the rest" count))
+      ('capped (format "the %d most recently pushed, as `remoto-listing-cap' allows"
+                       count))
+      ('failed (format "%d, the rest failed to load; `remoto-refresh' retries"
+                       count)))))
+
+(defun remoto--sort-entries (entries switches)
+  "Return listing ENTRIES in the order that ls would give them.
+That is by name, or with -t in the ls options SWITCHES by the last push,
+newest first."
+  (let ((entries (sort (copy-sequence entries)
+                       (lambda (a b) (string< (car a) (car b))))))
+    (if (remoto--ls-switch-p switches "t")
+        (sort entries
+              (lambda (a b)
+                (time-less-p (or (alist-get 'time (cdr b)) 0)
+                             (or (alist-get 'time (cdr a)) 0))))
+      entries)))
+
+(defun remoto--insert-listing (dir switches)
+  "Insert the Dired listing of DIR, accounts or repositories.
+SWITCHES are the ls options, which decide the order."
+  (let* ((listing (remoto--listing dir))
+         (classify (remoto--classify-p switches))
+         (lines (append (list (cons "." `((note . ,(remoto--listing-note listing))
+                                          ,@remoto--dir-entry))
+                              (cons ".." remoto--dir-entry))
+                        (remoto--sort-entries (remoto--listing-entries listing)
+                                              switches)))
+         (widths (remoto--listing-widths lines classify)))
+    (insert "total 0\n")
+    (dolist (line lines)
+      (insert (remoto--format-dired-entry (car line) (cdr line)
+                                          classify widths)))))
+
+(defvar-local remoto--entry-widths nil
+  "(NAMES . WIDTHS) for the Dired of a list of names in this buffer.
+Dired asks for each line on its own, and the widths need all the names;
+the first name of each reading computes them again.")
+
+(defun remoto--insert-entry-line (filename switches)
+  "Insert the Dired line of FILENAME, an account, repository or ref.
+SWITCHES are the ls options.  A Dired of a list of names asks for each
+line on its own; the names in `dired-directory' line the notes up."
+  (let* ((classify (remoto--classify-p switches))
+         (dir (remoto--handle-file-name-directory filename))
+         (name (remoto--handle-file-name-nondirectory filename))
+         (listed (bound-and-true-p dired-directory))
+         (names (if (and (consp listed)
+                         (equal dir (car listed))
+                         (member name (cdr listed)))
+                    (cdr listed)
+                  (list name))))
+    (unless (and (eq names (car remoto--entry-widths))
+                 (not (equal name (car names))))
+      (setq remoto--entry-widths
+            (cons names
+                  (remoto--listing-widths
+                   (mapcar (lambda (each)
+                             (cons each (or (remoto--entry-for (concat dir each))
+                                            remoto--dir-entry)))
+                           names)
+                   classify))))
+    ;; Two columns of our own: Dired gives a list of names whose lines
+    ;; bring none one column per line and then two more.
+    (insert "  " (remoto--format-dired-entry
+                  name (or (remoto--entry-for filename) remoto--dir-entry)
+                  classify (cdr remoto--entry-widths)))))
 
 (defun remoto--handle-insert-directory
     (filename switches &optional _wildcard full-directory-p)
   "Insert a Dired-format listing for remote FILENAME.
-SWITCHES may ask for -F indicators; FULL-DIRECTORY-P forces a listing.
-A short form such as /github:OWNER/REPO/ is resolved here: the first
-Dired of a session reaches this handler with the name the caller typed."
-  (when-let* ((parsed (remoto--parse-path (remoto--maybe-rewrite filename)))
-              (entry (remoto--tree-entry parsed)))
-    (let ((classify (remoto--classify-p switches)))
-      (cond
-       ((or full-directory-p
-            (equal "tree" (alist-get 'type entry)))
-        (insert "total 0\n")
-        (insert (remoto--format-dired-entry "." remoto--dir-entry classify))
-        (insert (remoto--format-dired-entry ".." remoto--dir-entry classify))
-        (dolist (child (remoto--tree-children parsed))
-          (insert (remoto--format-dired-entry
-                   (car child) (cdr child) classify))))
-       (t
-        (let ((name (file-name-nondirectory
-                     (directory-file-name (remoto-path-path parsed)))))
-          (insert (remoto--format-dired-entry name entry classify))))))))
+SWITCHES may ask for -F indicators; FULL-DIRECTORY-P asks for a listing
+and without it FILENAME gets its one line, as with ls-lisp.  /github: and
+/github:OWNER/ list accounts and repositories."
+  ;; A Dired of a list of names passes each one relative to its directory,
+  ;; and the first Dired of a session passes a short form as typed.
+  (let* ((filename (expand-file-name filename))
+         (entry (and (not full-directory-p) (remoto--entry-name-p filename)))
+         (filename (if entry filename (remoto--maybe-rewrite filename)))
+         (dir (and (not entry) (remoto--listing-dir filename)))
+         (classify (remoto--classify-p switches)))
+    (cond
+     (entry (remoto--insert-entry-line filename switches))
+     (dir (when (or full-directory-p
+                    (equal filename "/github:")
+                    (string-suffix-p "/" filename))
+            (remoto--insert-listing dir switches)))
+     (t
+      (when-let* ((parsed (remoto--parse-path filename))
+                  (entry (remoto--tree-entry parsed)))
+        (if full-directory-p
+            (progn
+              (insert "total 0\n")
+              (insert (remoto--format-dired-entry "." remoto--dir-entry classify))
+              (insert (remoto--format-dired-entry ".." remoto--dir-entry classify))
+              (dolist (child (remoto--tree-children parsed))
+                (insert (remoto--format-dired-entry
+                         (car child) (cdr child) classify))))
+          (insert "  " (remoto--format-dired-entry
+                        (file-name-nondirectory
+                         (directory-file-name (remoto-path-path parsed)))
+                        entry classify))))))))
 
 (defun remoto--handle-file-local-copy (filename)
   "Download remote FILENAME to a temp file, return temp path."
@@ -1792,8 +1993,16 @@ Pass DIR-FLAG and SUFFIX through to `make-temp-file'."
 ;;;; Additional operations needed by dired and other Emacs internals
 
 (defun remoto--handle-file-name-as-directory (filename)
-  "Append / to FILENAME if not already present."
-  (if (string-suffix-p "/" filename)
+  "Append / to FILENAME if not already present.
+/github: and /github:OWNER/REPO@ are directory names as they are: with a
+slash after them, every name their Dired holds would read /github:/OWNER
+or /github:OWNER/REPO@/REF."
+  (if (or (string-suffix-p "/" filename)
+          (string-match-p (rx bos "/github:"
+                              (? (+ (not (in "/:@#"))) "/"
+                                 (+ (not (in "/:@#"))) "@")
+                              eos)
+                          filename))
       filename
     (concat filename "/")))
 
@@ -1814,8 +2023,11 @@ Pass DIR-FLAG and SUFFIX through to `make-temp-file'."
   nil)
 
 (defun remoto--handle-make-directory (dir &optional _parents)
-  "Ignore existing DIR and signal an error otherwise."
-  (unless (remoto--handle-file-directory-p dir)
+  "Ignore existing DIR and signal an error otherwise.
+Any name below an owner is a directory by its shape, so it must exist
+too, or Dired adds a line for the repository that `+' did not create."
+  (unless (and (remoto--handle-file-directory-p dir)
+               (remoto--handle-file-exists-p dir))
     (user-error "Remoto: repository is read-only")))
 
 (defun remoto--handle-abbreviate-file-name (filename)
@@ -1955,21 +2167,39 @@ Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
 
 ;;;###autoload
 (defun remoto-refresh ()
-  "Invalidate cached tree for the current repo, re-fetch on next access."
+  "Invalidate cached tree for the current repo, re-fetch on next access.
+In a listing of /github: or /github:OWNER/, fetch that listing again.  In
+a Dired of branches and tags, forget the repository's branches and tags."
   (interactive)
   (let* ((dir (or dired-directory default-directory))
+         (dir (if (consp dir) (car dir) dir))
+         (listing-dir (remoto--listing-dir dir))
          (parsed (remoto--parse-path dir)))
-    (if parsed
-        (let* ((resolved (remoto--resolve-ref parsed))
-               (key (remoto--repo-key resolved)))
-          (remhash key remoto--tree-cache)
-          (remhash (format "%s/%s" (remoto-path-owner resolved)
-                           (remoto-path-repo resolved))
-                   remoto--branches-cache)
-          (message "Remoto: cache cleared for %s" key)
-          (when (derived-mode-p 'dired-mode)
-            (revert-buffer)))
-      (user-error "Remoto: not in a remoto buffer"))))
+    (cond
+     (listing-dir
+      (remhash listing-dir remoto--listing-cache)
+      (message "Remoto: cache cleared for %s" listing-dir)
+      (when (derived-mode-p 'dired-mode)
+        (revert-buffer)))
+     (parsed
+      (let* ((resolved (remoto--resolve-ref parsed))
+             (key (remoto--repo-key resolved)))
+        (remhash key remoto--tree-cache)
+        (remhash (format "%s/%s" (remoto-path-owner resolved)
+                         (remoto-path-repo resolved))
+                 remoto--branches-cache)
+        (message "Remoto: cache cleared for %s" key)
+        (when (derived-mode-p 'dired-mode)
+          (revert-buffer))))
+     ((string-match (rx bos "/github:" (group (+ (not (in "/:@#")))) "/"
+                        (group (+ (not (in "/:@#")))) "@" eos)
+                    dir)
+      (let ((repo-id (format "%s/%s" (match-string 1 dir) (match-string 2 dir))))
+        (remoto--forget-refs repo-id)
+        (message "Remoto: cache cleared for %s" repo-id)
+        (when (derived-mode-p 'dired-mode)
+          (revert-buffer))))
+     (t (user-error "Remoto: not in a remoto buffer")))))
 
 ;;;; Forge web URLs
 
@@ -2288,14 +2518,11 @@ queries that returned zero results."
   (puthash key (cons (float-time) results) remoto--search-cache)
   results)
 
-(defun remoto--api-async (endpoint callback)
+(defun remoto--api-async (endpoint callback &optional errback)
   "Call GitHub REST API ENDPOINT asynchronously via ghub.
-CALLBACK receives the parsed JSON response.  Errors are silently
-dropped since async callers cannot meaningfully handle them in the
-completion context.  Always passes `:host \"api.github.com\"'
-explicitly to avoid ghub resolving to the HTML site.
-A shared in-flight counter drives the fetch indicator and is
-decremented on success, error, and synchronous failure."
+CALLBACK receives the parsed JSON response; on a failure ERRBACK, when
+non-nil, is called with no arguments.  The `:host' is explicit, or ghub
+may resolve the HTML site.  The call counts toward the fetch indicator."
   (let* ((resource (concat "/" endpoint))
          (auth (cond (remoto--auth-failed 'none)
                      (remoto--effective-auth remoto--effective-auth)
@@ -2319,8 +2546,9 @@ decremented on success, error, and synchronous failure."
                                 (funcall callback value))
                     :errorback (lambda (&rest _)
                                  (remoto--inflight-dec)
-                                 nil)))
-      (error (remoto--inflight-dec) nil))))
+                                 (when errback (funcall errback)))))
+      (error (remoto--inflight-dec)
+             (when errback (funcall errback))))))
 
 (defun remoto--debounce (key fn)
   "Schedule FN after `remoto-debounce-delay' seconds of idle time.
@@ -2424,6 +2652,11 @@ Otherwise searches by repository name."
             tags)
         (user-error nil)))))
 
+(defun remoto--forget-refs (repo-id)
+  "Drop the cached branches and tags of REPO-ID, an OWNER/REPO."
+  (remhash repo-id remoto--branches-cache)
+  (remhash repo-id remoto--tags-cache))
+
 (defvar remoto--issues-cache (make-hash-table :test 'equal)
   "Cache for issue listings.  key -> (TIMESTAMP . ISSUES-ALIST).")
 
@@ -2518,7 +2751,407 @@ Returns propertized login strings with type and description."
                 data))
     (user-error nil)))
 
+;;;; Listings above the repository level
 
+(defcustom remoto-listing-cap 1000
+  "Most repositories a Dired listing of /github:OWNER/ holds.
+The listing keeps the most recently pushed ones.  Its first page arrives
+before Dired shows it; the later ones load in the background."
+  :type 'integer
+  :group 'remoto)
+
+(defconst remoto--listing-page-size 100
+  "Repositories per listing request, the most the API sends in one page.")
+
+(defun remoto--listing-dir (filename)
+  "Return the listing directory that FILENAME names, or nil.
+That is /github:, the accounts of the token, or /github:OWNER/, OWNER's
+repositories: the two levels above a repository."
+  (if (string-match-p (rx bos "/github:" (? "/") eos) filename)
+      "/github:"
+    (when-let* ((partial (remoto--parse-partial-github-path
+                          (remoto--handle-file-name-as-directory filename)))
+                ((eq (plist-get partial :level) 'owner)))
+      (format "/github:%s/" (plist-get partial :owner)))))
+
+(defun remoto--bare-repo-parts (filename)
+  "Return (OWNER . NAME) when FILENAME is a bare /github:OWNER/NAME."
+  (when (string-match (rx bos "/github:" (group (+ (not (in "/:@#")))) "/"
+                          (group (+ (not (in "/:@#")))) eos)
+                      filename)
+    (cons (match-string 1 filename) (match-string 2 filename))))
+
+(defun remoto--entry-name-p (filename)
+  "Return non-nil when FILENAME names an account, a repository or a ref.
+Those are the lines of a listing or of a Dired of matches."
+  (string-match-p (rx bos "/github:" (+ (not (in "/:@#")))
+                      (? "/" (+ (not (in "/:@#")))
+                         (? "@" (+ (not (in "/:")))))
+                      eos)
+                  filename))
+
+(defun remoto--entry-for (name)
+  "Return the remembered Dired line attributes of the remoto NAME."
+  (gethash (downcase name) remoto--entry-cache))
+
+(defun remoto--remember (name entry)
+  "Remember ENTRY as the Dired line attributes of the remoto NAME.
+Return ENTRY."
+  (puthash (downcase name) entry remoto--entry-cache))
+
+(defun remoto--remember-repo (full-name item)
+  "Remember the Dired line and default branch of the repository ITEM.
+FULL-NAME is its OWNER/REPO; ITEM comes from a list or a search endpoint."
+  (when full-name
+    (remoto--remember (concat "/github:" full-name)
+                      (cdr (remoto--repo-entry item)))
+    (when-let* ((branch (alist-get 'default_branch item)))
+      (puthash full-name branch remoto--default-branch-cache))))
+
+(defun remoto--listed-p (filename)
+  "Return non-nil when FILENAME is an entry of a cached listing.
+The age of the listing does not matter: a Dired buffer that still shows
+the name has to open it.  A name that a search found counts too."
+  (or (when-let* ((listing (gethash (remoto--handle-file-name-directory filename)
+                                    remoto--listing-cache)))
+        (assoc (remoto--handle-file-name-nondirectory filename)
+               (remoto--listing-entries listing)))
+      (remoto--entry-for filename)))
+
+(defun remoto--listing-fresh-p (listing)
+  "Return non-nil when LISTING may be shown without fetching it again.
+Its time renews when the background pages end, failed or not: the revert
+that shows the end would otherwise fetch it all again, and again."
+  (or (zerop remoto-repo-cache-ttl)
+      (< (- (float-time) (remoto--listing-time listing))
+         remoto-repo-cache-ttl)))
+
+(defun remoto--listing (dir)
+  "Return the listing of DIR, fetching it unless a fresh one is cached.
+DIR is what `remoto--listing-dir' returns."
+  (let ((cached (gethash dir remoto--listing-cache)))
+    (cond
+     ((and cached (remoto--listing-fresh-p cached)) cached)
+     ((equal dir "/github:")
+      (puthash dir (remoto--listing-create :entries (remoto--account-entries))
+               remoto--listing-cache))
+     (t (remoto--fetch-owner-listing dir)))))
+
+(defun remoto--account-entries ()
+  "Return listing entries for the account of the token and its organizations.
+Signal a `user-error' without a token, since no other request names them."
+  (let ((user (or (remoto--get-authenticated-user)
+                  (user-error "Remoto: /github: lists your account and \
+organizations, which needs a GitHub token"))))
+    (mapcar (lambda (account)
+              (let ((type (or (get-text-property 0 'remoto-acct-type account)
+                              "User"))
+                    (desc (get-text-property 0 'remoto-acct-desc account)))
+                (cons (substring-no-properties account)
+                      `((type . "tree")
+                        (note . ,(if (and desc (not (string-empty-p desc)))
+                                     (concat type "  " desc)
+                                   type))))))
+            (cons user (remoto--fetch-user-orgs user)))))
+
+(defun remoto--owner-endpoint (owner)
+  "Return the endpoint that lists OWNER's repositories, newest push first.
+The account of the token and its organizations have endpoints that list
+private repositories too; any other account lists its public ones."
+  (let ((user (remoto--get-authenticated-user)))
+    (cond
+     ((null user) (format "users/%s/repos?sort=pushed" owner))
+     ((string-equal-ignore-case owner user)
+      "user/repos?affiliation=owner&sort=pushed")
+     ((seq-some (lambda (entry) (string-equal-ignore-case owner (car entry)))
+                (cdr (remoto--listing-entries (remoto--listing "/github:"))))
+      (format "orgs/%s/repos?sort=pushed" owner))
+     (t (format "users/%s/repos?sort=pushed" owner)))))
+
+(defun remoto--listing-page-endpoint (endpoint page)
+  "Return ENDPOINT for its PAGE of `remoto--listing-page-size' items."
+  (format "%s&per_page=%d&page=%d" endpoint remoto--listing-page-size page))
+
+(defun remoto--repo-entry (item)
+  "Return the listing entry for ITEM, a repository from a list endpoint.
+Its last push is the date and its size counts bytes.  A private one is
+drwx------, an archived one dr-xr-xr-x, and a fork says so in its note."
+  (let ((time (or (alist-get 'pushed_at item) (alist-get 'created_at item))))
+    (cons (alist-get 'name item)
+          `((type . "tree")
+            (size . ,(* 1024 (or (alist-get 'size item) 0)))
+            (perms . ,(concat (if (alist-get 'archived item) "dr-x" "drwx")
+                              (if (alist-get 'private item) "------" "r-xr-x")))
+            (time . ,(and time (encode-time (iso8601-parse time))))
+            (note . ,(string-trim
+                      (concat (and (alist-get 'fork item) "fork  ")
+                              (alist-get 'description item))))))))
+
+(defun remoto--add-listing-page (listing owner items)
+  "Add ITEMS, one page of OWNER's repositories, to LISTING and set its state.
+Each repository is remembered on the way, so opening a listed one asks
+for nothing but its tree."
+  (dolist (item items)
+    (remoto--remember-repo (format "%s/%s" owner (alist-get 'name item)) item))
+  (let ((entries (append (remoto--listing-entries listing)
+                         (mapcar #'remoto--repo-entry items))))
+    (setf (remoto--listing-entries listing) (seq-take entries remoto-listing-cap)
+          (remoto--listing-state listing)
+          (cond ((< remoto-listing-cap (length entries)) 'capped)
+                ((< (length items) remoto--listing-page-size) nil)
+                ((< (length entries) remoto-listing-cap) 'fetching)
+                (t 'capped)))))
+
+(defun remoto--fetch-owner-listing (dir)
+  "Fetch the first page of the owner listing DIR and cache the listing.
+When more pages follow, they load in the background."
+  (let* ((owner (substring dir (length "/github:") -1))
+         (endpoint (remoto--owner-endpoint owner))
+         (items (remoto--api (remoto--listing-page-endpoint endpoint 1)))
+         (listing (puthash dir (remoto--listing-create) remoto--listing-cache)))
+    (remoto--add-listing-page listing owner items)
+    (when (eq (remoto--listing-state listing) 'fetching)
+      (message "Remoto: listing the first %d repositories of %s, fetching the rest"
+               (length items) owner)
+      (remoto--fetch-listing-page dir listing owner endpoint 2))
+    listing))
+
+(defun remoto--fetch-listing-page (dir listing owner endpoint page)
+  "Fetch PAGE of ENDPOINT into LISTING, the listing of DIR, in the background.
+One page at a time, as GitHub asks of clients, until the last page, the
+cap or a failure.  A LISTING no longer cached, as after `remoto-refresh',
+ends it; OWNER names the account for the cache and the messages."
+  (remoto--api-async
+   (remoto--listing-page-endpoint endpoint page)
+   (lambda (items)
+     (when (eq listing (gethash dir remoto--listing-cache))
+       (remoto--add-listing-page listing owner items)
+       (if (eq (remoto--listing-state listing) 'fetching)
+           (remoto--fetch-listing-page dir listing owner endpoint (1+ page))
+         (remoto--listing-done dir listing owner))))
+   (lambda ()
+     (when (eq listing (gethash dir remoto--listing-cache))
+       (setf (remoto--listing-state listing) 'failed)
+       (remoto--listing-done dir listing owner)))))
+
+(defun remoto--listing-done (dir listing owner)
+  "Say how the background fetch of LISTING ended, and revert DIR's buffers.
+OWNER names the account in the message."
+  (let ((count (length (remoto--listing-entries listing))))
+    (pcase (remoto--listing-state listing)
+      ('capped (message "Remoto: listed the %d most recently pushed \
+repositories of %s, as `remoto-listing-cap' allows" count owner))
+      ('failed (message "Remoto: listing the repositories of %s stopped \
+after %d; M-x remoto-refresh retries" owner count))
+      (_ (message "Remoto: listed all %d repositories of %s" count owner))))
+  (setf (remoto--listing-time listing) (float-time))
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (and (derived-mode-p 'dired-mode)
+                 (equal dir (if (consp dired-directory)
+                                (car dired-directory)
+                              dired-directory)))
+        (revert-buffer)))))
+
+;;;; Matches of a name that names nothing
+
+(defun remoto--if-found (fn &rest args)
+  "Call FN with ARGS, or return nil when GitHub answers 404 to it.
+Any other failure signals."
+  (condition-case err
+      (apply fn args)
+    (user-error
+     (unless (string-prefix-p remoto--not-found (cadr err))
+       (signal (car err) (cdr err))))))
+
+(defun remoto--repository-p (owner name)
+  "Return non-nil when OWNER has a repository NAME, asking GitHub if need be.
+A NAME with a character that no repository name has is not asked about."
+  (and (string-match-p (rx bos (+ (in "A-Za-z0-9._-")) eos) name)
+       (remoto--if-found #'remoto--resolve-ref
+                         (remoto-path-create :owner owner :repo name
+                                             :path "/"))))
+
+(defun remoto--ref-p (owner repo ref)
+  "Return non-nil when OWNER/REPO has a tree at REF, a branch, tag or commit.
+A REF with a character that no ref has is not asked about."
+  (and (not (string-empty-p ref))
+       (not (string-match-p (rx (or (in " \t~^:?*[\\") "..")) ref))
+       (remoto--if-found #'remoto--ensure-tree
+                         (remoto-path-create :owner owner :repo repo
+                                             :ref ref :path "/"))))
+
+(defun remoto--words-match-p (query name)
+  "Return non-nil when each word of QUERY is in NAME, ignoring case."
+  (let ((name (downcase name)))
+    (seq-every-p (lambda (word) (string-search word name))
+                 (split-string (downcase query)))))
+
+(defun remoto--dired-line-p (name)
+  "Return non-nil when the remoto NAME is a line of the current Dired buffer.
+Dired opens its lines by name, and the name of an account line is the
+same as the account typed as a query."
+  (and (derived-mode-p 'dired-mode)
+       (save-excursion (dired-goto-file name))))
+
+(defun remoto--sorted-names (dir names query)
+  "Return NAMES, lines of a Dired of DIR, in the order of `dired-listing-switches'.
+A name that is QUERY, ignoring case, comes first: it is what was typed,
+and capitals sort first.  Their text properties go."
+  (let* ((sorted (mapcar #'car
+                         (remoto--sort-entries
+                          (mapcar (lambda (name)
+                                    (let ((name (substring-no-properties name)))
+                                      (cons name (remoto--entry-for (concat dir name)))))
+                                  names)
+                          dired-listing-switches)))
+         (exact (seq-find (lambda (name) (string-equal-ignore-case name query))
+                          sorted)))
+    (if exact (cons exact (delete exact sorted)) sorted)))
+
+(defun remoto--account-search (query)
+  "Return the logins of the accounts in a search for QUERY.
+Not from completion's cache: that may hold a shorter query's top 30
+narrowed down, which can lack QUERY itself.  The search is cached apart,
+and a failure signals instead of matching none."
+  (let ((key (concat "\0users-search:" (downcase query))))
+    (pcase-let ((`(,hit ,logins) (remoto--search-cache-get key)))
+      (if hit
+          logins
+        (remoto--search-cache-put
+         key (remoto--extract-search-users
+              (remoto--api (format "search/users?q=%s&per_page=100"
+                                   (url-hexify-string query)))))))))
+
+(defun remoto--account-matches (name)
+  "Return (/github: . LOGINS) when NAME is a bare /github:QUERY.
+LOGINS are the accounts of the search that hold each word of QUERY.  A
+line of the current Dired buffer is the account to open, no query.
+Signal a `user-error' when no account matches."
+  (when-let* (((string-match (rx bos "/github:" (group (+ (not (in "/:@#")))) eos)
+                             name))
+              (query (match-string 1 name))
+              ((not (remoto--dired-line-p name))))
+    (let ((logins (seq-filter (lambda (login) (remoto--words-match-p query login))
+                              (remoto--account-search query))))
+      (dolist (login logins)
+        (remoto--remember (concat "/github:" login)
+                          `((type . "tree")
+                            (note . ,(get-text-property 0 'remoto-acct-type login)))))
+      (cons "/github:"
+            (or (remoto--sorted-names "/github:" logins query)
+                (user-error "Remoto: no account matches %s" query))))))
+
+(defun remoto--owner-search (owner query)
+  "Return the names of OWNER's repositories that match QUERY in a search.
+The search that completion at /github:OWNER/ ran answers from its cache.
+Without one it runs here, where a failure signals instead of matching none."
+  (pcase-let ((`(,hit ,names) (remoto--search-cache-get
+                               (format "\0repos:%s/%s" (downcase owner)
+                                       (downcase query)))))
+    (if hit names (remoto--fetch-owner-search owner query))))
+
+(defun remoto--repo-matches (name)
+  "Return (DIR . NAMES) when NAME, a bare /github:OWNER/QUERY, is no repository.
+NAMES are the owner's repositories that the search of completion finds
+for QUERY; DIR is the owner's listing.  Signal a `user-error' when no
+repository matches, or when OWNER is no account."
+  (when-let* ((parts (remoto--bare-repo-parts name))
+              ((not (remoto--repository-p (car parts) (cdr parts)))))
+    (pcase-let* ((`(,owner . ,query) parts)
+                 (dir (format "/github:%s/" owner))
+                 (names (condition-case err
+                            (remoto--owner-search owner query)
+                          (user-error
+                           (if (string-prefix-p remoto--not-found (cadr err))
+                               (user-error "Remoto: no account %s" owner)
+                             (signal (car err) (cdr err)))))))
+      (cons dir
+            (or (remoto--sorted-names dir names query)
+                (user-error "Remoto: no repository of %s matches %s"
+                            owner query))))))
+
+(defun remoto--ref-matches (name)
+  "Return (DIR . REFS) when NAME, a /github:OWNER/REPO@QUERY, is no ref.
+REFS are the branches and tags that hold each word of QUERY, all of
+them for an empty QUERY; DIR is /github:OWNER/REPO@.  Signal a
+`user-error' when no ref matches."
+  (when-let* (((string-match (rx bos "/github:" (group (+ (not (in "/:@#")))) "/"
+                                 (group (+ (not (in "/:@#")))) "@"
+                                 (group (* (not (in "/:")))) (? "/") eos)
+                             name))
+              (owner (match-string 1 name))
+              (repo (match-string 2 name))
+              (query (match-string 3 name))
+              ((not (remoto--ref-p owner repo query))))
+    (let* ((dir (format "/github:%s/%s@" owner repo))
+           (branches (remoto--fetch-branches owner repo))
+           (refs (seq-filter (lambda (ref)
+                               ;; A ref with a slash does not parse in a path.
+                               (and (not (string-search "/" ref))
+                                    (remoto--words-match-p query ref)))
+                             (seq-uniq (append branches
+                                               (remoto--fetch-tags owner repo))))))
+      (dolist (ref refs)
+        (remoto--remember (concat dir ref)
+                          `((type . "tree")
+                            (note . ,(if (member ref branches) "branch" "tag")))))
+      (cons dir
+            (or (remoto--sorted-names dir refs query)
+                (user-error "Remoto: no branch or tag of %s/%s%s" owner repo
+                            (if (string-empty-p query)
+                                ""
+                              (concat " matches " query))))))))
+
+(defun remoto--file-matches (filename)
+  "Return (DIR . NAMES) when the canonical FILENAME is missing from its tree.
+NAMES are the entries of its directory DIR that hold each word of its
+name.  A name with a trailing slash or a wildcard is no query, and one
+that nothing matches visits a new file, as a local name does."
+  (when-let* ((parsed (remoto--parse-path filename))
+              (path (remoto-path-path parsed))
+              (name (file-name-nondirectory path))
+              ((not (string-empty-p name)))
+              ((not (string-match-p "[[*?]" name)))
+              ((not (remoto--tree-entry parsed)))
+              (dir (concat (remoto--file-name-prefix filename)
+                           (or (file-name-directory path) "/")))
+              (dir-parsed (remoto--parse-path dir))
+              ((equal "tree" (alist-get 'type (remoto--tree-entry dir-parsed))))
+              (names (seq-filter (lambda (child)
+                                   (remoto--words-match-p name child))
+                                 (mapcar #'car (remoto--tree-children dir-parsed)))))
+    (cons dir names)))
+
+(defun remoto--query-matches (filename)
+  "Return (DIR . NAMES) when FILENAME is a short remoto name that names nothing.
+The names are /github:QUERY, /github:OWNER/QUERY and
+/github:OWNER/REPO@QUERY; NAMES are the accounts, repositories or refs
+that match QUERY, for a Dired of DIR."
+  (when-let* ((name (remoto--normalize-shorthand filename))
+              ((string-prefix-p "/github:" name))
+              ;; /github:OWNER/.. names no repository called "..".
+              (name (if (remoto--dot-component-p name)
+                        (remoto--normalize-name name)
+                      name)))
+    (or (remoto--account-matches name)
+        (remoto--repo-matches name)
+        (remoto--ref-matches name))))
+
+(defun remoto--name-or-matches (filename)
+  "Return what visiting FILENAME opens: the (DIR . NAMES) of matches or a name.
+The matches are those of a name that names nothing.  Any other FILENAME
+comes back as `remoto--maybe-rewrite' makes it."
+  (or (remoto--query-matches filename)
+      (let ((name (remoto--maybe-rewrite filename)))
+        (or (remoto--file-matches name) name))))
+
+(defun remoto--extract-search-users (data)
+  "Return the logins in the user search DATA, each with its account type."
+  (mapcar (lambda (item)
+            (propertize (alist-get 'login item)
+                        'remoto-acct-type (or (alist-get 'type item) "")))
+          (alist-get 'items data)))
 
 (defun remoto--search-users (prefix)
   "Search GitHub users/orgs matching PREFIX, never blocking.
@@ -2560,13 +3193,7 @@ Requires at least `remoto-min-search-chars' characters."
                 (format "search/users?q=%s&per_page=30"
                         (url-hexify-string prefix))
                 (lambda (data)
-                  (let* ((items (alist-get 'items data))
-                         (results (mapcar (lambda (item)
-                                           (propertize
-                                            (alist-get 'login item)
-                                            'remoto-acct-type
-                                            (or (alist-get 'type item) "")))
-                                         items)))
+                  (let ((results (remoto--extract-search-users data)))
                     (puthash prefix-down (cons (float-time) results)
                              remoto--users-cache)
                     (puthash (concat "\0users:" prefix-down)
@@ -2624,8 +3251,11 @@ updates the cache and refreshes the completion UI."
 
 (defun remoto--extract-search-repos (data &optional name-key)
   "Extract propertized repo names from GitHub search DATA.
-NAME-KEY selects the JSON field for the repo name (default `name')."
+NAME-KEY selects the JSON field for the repo name (default `name').
+Each repository is remembered on the way, so that a search match gets a
+Dired line and opens like a line of a listing."
   (mapcar (lambda (item)
+            (remoto--remember-repo (alist-get 'full_name item) item)
             (propertize (alist-get (or name-key 'name) item)
                         'remoto-repo-desc
                         (or (alist-get 'description item) "")))
@@ -2723,22 +3353,22 @@ async path returned nil on a cold cache."
             repos)))
     (error nil)))
 
+(defun remoto--fetch-owner-search (owner query)
+  "Search OWNER's repos for QUERY in their names and cache the names."
+  (when-let* ((data (remoto--api
+                     (format "search/repositories?q=%s&per_page=100"
+                             (url-hexify-string
+                              (format "%s in:name user:%s" query owner))))))
+    (remoto--search-cache-put
+     (format "\0repos:%s/%s" (downcase owner) (downcase query))
+     (remoto--extract-search-repos data))))
+
 (defun remoto--search-owner-repos-sync (owner query)
   "Synchronously search OWNER's repos matching QUERY, caching the result.
 Intended for use inside `while-no-input' as a fallback when the
 async path returned nil on a cold cache."
   (condition-case nil
-      (let* ((owner-down (downcase owner))
-             (query-down (downcase query))
-             (cache-key (format "\0repos:%s/%s" owner-down query-down))
-             (q (url-hexify-string
-                 (format "%s in:name user:%s" query owner)))
-             (data (remoto--api
-                    (format "search/repositories?q=%s&per_page=100" q))))
-        (when data
-          (let ((repos (remoto--extract-search-repos data)))
-            (remoto--search-cache-put cache-key repos)
-            repos)))
+      (remoto--fetch-owner-search owner query)
     (error nil)))
 
 (defun remoto--get-authenticated-user ()
@@ -3162,8 +3792,12 @@ Returns a `remoto-path' struct or nil."
 (defun remoto--maybe-rewrite (input)
   "If INPUT is a GitHub URL/shorthand, return canonical remoto path.
 Also handles partial canonical paths like /github:OWNER/REPO and the
-/gh: shorthand prefix.  Otherwise return INPUT unchanged."
+/gh: shorthand prefix.  Otherwise return INPUT unchanged.  The . and ..
+components resolve first: a short form reads /github:OWNER/.. as a repo."
   (setq input (remoto--normalize-shorthand input))
+  (when (and (string-prefix-p "/github:" input)
+             (remoto--dot-component-p input))
+    (setq input (remoto--normalize-name input)))
   (cond
    ;; Already a full canonical path
    ((remoto--parse-path input) input)
@@ -3211,28 +3845,27 @@ Also handles partial canonical paths like /github:OWNER/REPO and the
    (t input)))
 
 (defun remoto--dired-around-a (orig-fn dir-or-list &rest args)
-  "Rewrite GitHub URLs and short remoto paths to canonical paths for Dired.
-Call ORIG-FN with DIR-OR-LIST and ARGS after any rewrite.
-Advises `dired-noselect' rather than `dired', because `dired',
-`dired-other-window' and `dired-other-frame' all go through it, and only
-a canonical name gives the buffer its canonical `default-directory'."
+  "Rewrite GitHub URLs and short remoto paths for Dired, then call ORIG-FN.
+DIR-OR-LIST and ARGS go to ORIG-FN; a name that names nothing becomes the
+list of the matching ones.  The advice sits on `dired-noselect', which
+every Dired command calls, so each buffer gets a canonical directory."
   (if-let* ((raw (if (consp dir-or-list) (car dir-or-list) dir-or-list))
             ((stringp raw))
             (dir (remoto--normalize-shorthand raw))
             ((or (remoto--github-input-p dir)
                  (string-prefix-p "/github:" dir))))
-      (let ((canonical (remoto--maybe-rewrite dir)))
-        (apply orig-fn
-               (if (consp dir-or-list)
-                   (cons canonical (cdr dir-or-list))
-                 canonical)
-               args))
+      (apply orig-fn
+             (if (consp dir-or-list)
+                 (cons (remoto--maybe-rewrite dir) (cdr dir-or-list))
+               (remoto--name-or-matches dir))
+             args)
     (apply orig-fn dir-or-list args)))
 
 (defun remoto--find-file-around-a (orig-fn filename &rest args)
   "Rewrite GitHub URLs to canonical remoto paths for `find-file'.
 Intercepts #NUM patterns to display issues instead of file operations.
-Call ORIG-FN with FILENAME and ARGS after any rewrite."
+Call ORIG-FN with FILENAME and ARGS after any rewrite.  A name that names
+nothing opens a Dired of the names that match it."
   (setq filename (remoto--normalize-shorthand filename))
   ;; A pull request or issue web URL is the topic, not the repository root
   ;; the URL parser would make of it.
@@ -3243,7 +3876,10 @@ Call ORIG-FN with FILENAME and ARGS after any rewrite."
       (progn
         (remoto--require-topic)
         (remoto-topic-display (cdr topic) (car topic)))
-    (apply orig-fn (remoto--maybe-rewrite filename) args)))
+    (let ((target (remoto--name-or-matches filename)))
+      (if (consp target)
+          (dired-noselect target)
+        (apply orig-fn target args)))))
 
 ;;;; Eager auth warm-up
 
@@ -3679,6 +4315,8 @@ remoto was loaded some other way and the mode never turned on."
   (clrhash remoto--issues-cache)
   (clrhash remoto--file-commits-cache)
   (clrhash remoto--dir-contents-cache)
+  (clrhash remoto--listing-cache)
+  (clrhash remoto--entry-cache)
   (clrhash remoto--pending-requests)
   nil)
 

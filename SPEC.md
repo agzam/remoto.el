@@ -171,10 +171,10 @@ This returns one directory level at a time. The tree cache stores what it has an
 
 | Operation | Implementation |
 |---|---|
-| `file-exists-p` | Lookup in tree cache; returns t for partial paths (`/github:`, `/github:OWNER/`) |
-| `file-directory-p` | Check `:type` = `"tree"` in cache; returns t for partial paths |
+| `file-exists-p` | Lookup in tree cache; returns t for partial paths (`/github:`, `/github:OWNER/`), and for a bare `/github:OWNER`, `/github:OWNER/REPO` or `/github:OWNER/REPO@REF` once a cached listing holds it or a search found it (`remoto--entry-cache`) |
+| `file-directory-p` | Check `:type` = `"tree"` in cache; returns t for partial paths and for a ref that a Dired of matches shows |
 | `file-regular-p` | Check `:type` = `"blob"` in cache |
-| `file-readable-p` | Delegates to `file-exists-p` |
+| `file-readable-p` | `file-exists-p`, else `file-directory-p`: Dired asks this of `/github:OWNER` and `/github:OWNER/REPO@`, which `file-exists-p` denies, before it lists matches there |
 | `file-writable-p` | Always nil |
 | `file-attributes` | Synthesize from cache entry (size, type, mode, epoch-0 timestamps) |
 | `directory-files` | List tree cache children for parent path, prepend `.` and `..` |
@@ -182,16 +182,16 @@ This returns one directory level at a time. The tree cache stores what it has an
 | `file-name-all-completions` | Filter tree cache entries by prefix, append `/` to dirs; at pre-repo levels, searches users or lists repos |
 | `file-name-completion` | Delegate to `try-completion` on completions list |
 | `insert-file-contents` | Fetch file content via API, insert into buffer |
-| `insert-directory` | Format dired-compatible listing from tree cache; `-F` indicators when the switches ask |
-| `expand-file-name` | Resolve `.` and `..` in absolute and relative remoto names, handle relative paths under remoto dirs; for partial paths (e.g. `/github:owner/`) concatenates directly |
+| `insert-directory` | Format dired-compatible listing from tree cache; `-F` indicators when the switches ask; at `/github:` and `/github:OWNER/` the accounts and repositories (see Listings above the repository). Without FULL-DIRECTORY-P a name gets its one line, a directory too, as with ls-lisp: Dired asks so for each name of a list of names |
+| `expand-file-name` | Resolve `.` and `..` in absolute and relative remoto names, handle relative paths under remoto dirs; for partial paths (e.g. `/github:owner/`) concatenates directly. `..` above a repository root names the owner, `/github:OWNER/`, and above that `/github:` |
 | `file-accessible-directory-p` | Delegates to `file-directory-p` - remote dirs are always readable |
 | `file-truename` | Return the path as-is (no symlink resolution) |
 | `file-remote-p` | Return the `/github:owner/repo@ref:` prefix (or method/host on request); handles partial paths. `localname` is the prefix as well, so no caller hands a local program a remoto path, except for the argument of a running Evil ex command, which gets the path after the prefix with each bare `#` and `%` escaped: Evil rebuilds that argument from the two answers and would replace those with file names |
 | `file-local-copy` | Download to temp file, return temp path |
 | `make-nearby-temp-file` | Create temp file in system temp dir |
 | `file-name-directory` | Return directory part of remoto path; handles partial paths for pre-repo completion |
-| `file-name-nondirectory` | Return non-directory part of remoto path; handles partial paths for pre-repo completion |
-| `file-name-as-directory` | Append `/` if not present |
+| `file-name-nondirectory` | Return non-directory part of remoto path; handles partial paths for pre-repo completion. Empty for a canonical directory name: Dired lists a name with a nondirectory part as a wildcard, and completion matches that part against the children |
+| `file-name-as-directory` | Append `/` if not present; `/github:` and `/github:OWNER/REPO@` stay as they are, so their Dired names `/github:OWNER` and `/github:OWNER/REPO@REF` |
 | `directory-file-name` | Strip trailing `/` (preserving `:/` after prefix) |
 | `file-name-case-insensitive-p` | Always nil (GitHub is case-sensitive) |
 | `vc-registered` | Always nil (not under local vc) |
@@ -202,7 +202,7 @@ This returns one directory level at a time. The tree cache stores what it has an
 
 `write-region`, `delete-file`, `delete-directory`, `rename-file`, `copy-file`, `set-file-modes`, `set-file-times` - all signal `(user-error "Remoto: repository is read-only")`.
 
-`make-directory` succeeds silently for directories that already exist (required by dired), signals read-only error for new directories.
+`make-directory` succeeds silently for directories that already exist (required by dired), signals read-only error for new directories. A name below an owner is a directory by its shape, so it must also exist, as a listed repository does; otherwise Dired's `+` would add a line for a repository it never made.
 
 ### Delegated to defaults
 
@@ -241,6 +241,36 @@ No leading spaces - dired and dired-subtree add their own. Timestamps are synthe
 
 Each name carries the `dired-filename` text property, as `ls --dired` output does, so dired reads it exactly whatever `dired-listing-switches` holds. Without it, dired guesses where a name ends: under `-F` it strips one character after every directory and executable name, and on a symlink line it looks for ` -> TARGET`, which the listing does not print. When the switches ask for `-F` or `--classify`, the listing appends `/` to directories, `*` to executables and `@` to symlinks, after the property.
 
+### Listings above the repository
+
+`/github:` lists the account of the token and its organizations (`remoto--fetch-user-orgs`); without a token it signals a `user-error`, and Dired kills the buffer it made. `/github:OWNER/` lists OWNER's repositories, newest push first from the API:
+
+| OWNER | Endpoint | Sees |
+|---|---|---|
+| the token's own account | `user/repos?affiliation=owner&sort=pushed` | private repositories too |
+| an organization of the token | `orgs/OWNER/repos?sort=pushed` | private repositories too |
+| any other account, or no token | `users/OWNER/repos?sort=pushed` | public repositories |
+
+```
+drwxr-xr-x  1 github github  2670592 Oct 20 13:23 .emacs.d     My Emacs config
+drwx------  1 github github    10240 Oct 19 17:24 notes        fork  Private notes
+dr-xr-xr-x  1 github github    20480 Mar  3  2021 old-thing
+```
+
+- The size is the API's `size` in bytes, the date the last push (`ls -l` format, local time, English month names), the mode `drwx------` for a private repository and `dr-x` in front for an archived one. An account line has the fixed size and date of tree entries.
+- A note follows each name: the description, `fork` in front for a fork; at `/github:` the account type and description. Notes start 4 columns past the longest name, so `dired-hide-details-mode` hides them with symlink targets (dired.el hides a line from 4 columns past its name under `dired-hide-details-link`).
+- Names sort with `string<`; `-t` in the switches sorts by the last push, newest first.
+- The first page of 100 is a blocking `remoto--api` call. When it is full, `remoto--fetch-listing-page` fetches the next page through `remoto--api-async`, one at a time, until a short page or `remoto-listing-cap` (1000); then every Dired buffer of the listing reverts once. The `.` line's note tells a partial listing: fetching, capped, or failed. Not the `total` line: Dired deletes that under the default `dired-free-space`. The end of the pages, failed or not, renews the listing's time, because the revert that shows the end would otherwise find a listing older than `remoto-repo-cache-ttl` stale and fetch it all again, and again; `remoto-refresh` retries a failed one.
+- Each repository's `default_branch` goes into `remoto--default-branch-cache`, so `RET` on a line costs one tree request.
+- A Dired line names `/github:OWNER/REPO` or `/github:OWNER`, bare names that `file-exists-p` denies to keep the `[Confirm]` of a half-typed name. `remoto--listed-p` lets them through once a cached listing holds them, whatever its age, so a buffer that still shows a name can open it.
+- A bare `/github:OWNER/NAME` that names no repository opens a Dired of OWNER's repositories that match NAME (`remoto--repo-matches`, called by the `find-file-noselect` and `dired-noselect` advice). The repository check stays first: `remoto--repository-p` asks for the default branch, and only a 404 (a `user-error` starting with `remoto--not-found`) means no; a NAME with a character no repository name has (a space from orderless, say) is not asked about. The matches come from the search completion ran at `/github:OWNER/` (`\0repos:OWNER/NAME` in `remoto--search-cache`), or from that search run then, whose failure signals. They open as Dired on a list of names, `(DIR . NAMES)`, so they take the place of an open `/github:OWNER/` listing until `C-x d /github:OWNER/` brings it back. Dired asks `insert-directory` for each name without FULL-DIRECTORY-P and checks `file-readable-p` of `/github:OWNER` first. Each line comes from `remoto--entry-cache`, which listing pages and every repository search fill (`remoto--remember-repo`, with the default branch); the names in `dired-directory` line the notes up, from widths counted once per reading (`remoto--entry-widths`), since a count per line made a long list quadratic.
+- The other levels work the same way (`remoto--query-matches`, `remoto--file-matches`, both behind `remoto--name-or-matches`), each word of the query matching case-insensitively (`remoto--words-match-p`):
+  - `/github:NAME`, typed without the slash, lists the accounts whose login holds NAME, from a search for NAME itself, cached apart (`remoto--account-search`): completion's `\0users:NAME` can be a shorter query's top 30 narrowed down, which may lack NAME. An exact account is no exception: GitHub has a user named qlik, and `/gh:qlik` must list the qlik organizations; it comes first, as does any name equal to the one typed. A line of the current Dired buffer (`remoto--dired-line-p`, by `dired-goto-file`) opens its account, since Dired opens a line by its bare name; `/github:NAME/` opens it too.
+  - `/github:OWNER/REPO@REF` lists the branches and tags that hold REF, with `branch` or `tag` as the note, unless the tree at REF loads (`remoto--ref-p`, so a commit opens as well); a bare `@` lists them all. A ref with a slash does not parse in a path and stays out. The Dired directory is `/github:OWNER/REPO@`, which `file-name-as-directory` keeps without a slash.
+  - A canonical file name that its directory lacks lists the entries of the directory that hold it; a directory among them shows as one line. A name with a trailing slash or a wildcard is no query, and one that nothing matches visits a new file, as a local name does.
+- A name that matches nothing signals a `user-error` at the account, repository and ref levels, where the name used to fail with a 404, and leaves no buffer.
+- `..` at a repository root expands to `/github:OWNER/` (`remoto--normalize-name`), and at an owner to `/github:`. `remoto--maybe-rewrite` resolves dots before it reads a short form, which would take `/github:OWNER/..` for a repository named `..`. `^` keeps its behavior: `file-name-directory` of a root is the root, since completion right after `@REF:` relies on it.
+
 ## TRAMP Coexistence
 
 TRAMP's `tramp-file-name-regexp` matches `/method:...` patterns, which would intercept `/github:...` paths. The remoto handler is pushed to the front of `file-name-handler-alist` so it's checked first. First match wins.
@@ -264,7 +294,7 @@ ghub signals typed conditions for HTTP errors. `remoto--api` catches these and r
 ## Interactive Commands
 
 - `remoto-browse` - prompt for a repo using standard `completing-read` with a programmed completion table (`remoto--repo-completion-table`), open dired at root or find-file for blob paths. Type 3+ characters to trigger GitHub search via the search API. Tab completes repo names. Append `@` to complete branch names - fetches branches via the GitHub Branches API and offers `owner/repo@branch` candidates, with prefix filtering. Works with any completion frontend (vertico, ivy, helm, vanilla Emacs). Search results are cached for `remoto-search-cache-ttl` seconds (default 300). Branch results are cached in `remoto--branches-cache` with the same TTL as search results. Owner-scoped repo search shares the `remoto--search-owner-repos` engine with `/github:` completion (results are reformatted from bare repo names to `owner/repo`), and the ⟳ indicator shows while searching and during the post-selection fetch (see Fetch indicator).
-- `remoto-refresh` - invalidate tree and branch caches for current repo, re-fetch. Reverts dired buffer if in one.
+- `remoto-refresh` - invalidate tree and branch caches for current repo, re-fetch. Reverts dired buffer if in one. In a listing of `/github:` or `/github:OWNER/` it drops that listing and fetches it again; in a Dired of branches and tags it forgets the repository's branches and tags.
 - URL commands - `remoto-copy-url`, `remoto-copy-blame-url`, `remoto-copy-permalink`, `remoto-copy-raw-url`, `remoto-copy-history-url`, `remoto-browse-url` - and the `remoto-mode` minor mode. See "Forge-agnostic URL Layer" below. `remoto-copy-github-url` remains as an obsolete alias of `remoto-copy-url`.
 
 ### find-file completion
@@ -328,7 +358,7 @@ Returns nil for incomplete paths (triggers `[Confirm]` prompt):
 
 | Returns t | Returns nil |
 |---|---|
-| `/github:`, `/github:owner/`, `/github:owner/repo/`, `/github:owner/repo#42`, canonical paths in tree | `/github:owner/repo` (bare), `/github:owner/repo#`, `/github:owner/repo@`, `/github:owner#` |
+| `/github:`, `/github:owner/`, `/github:owner/repo/`, `/github:owner/repo#42`, canonical paths in tree, a bare `/github:owner`, `/github:owner/repo` or `/github:owner/repo@ref` that a cached listing holds or a search found | `/github:owner/repo` (bare, not listed), `/github:owner/repo#`, `/github:owner/repo@`, `/github:owner#` |
 
 #### API functions
 
@@ -356,6 +386,8 @@ Returns nil for incomplete paths (triggers `[Confirm]` prompt):
 | `remoto--search-cache` | typed key | `(TIMESTAMP . RESULTS)` | `remoto-search-cache-ttl` |
 | `remoto--content-cache` | SHA | decoded string | Never (content-addressable) |
 | `remoto--file-commits-cache` | `"owner/repo@ref:dir"` | `(TIMESTAMP . ALIST)` | `remoto-search-cache-ttl` |
+| `remoto--listing-cache` | `"/github:"`, `"/github:OWNER/"` | `remoto--listing` (time, entries, state) | `remoto-repo-cache-ttl` |
+| `remoto--entry-cache` | `"/github:ACCOUNT"`, `"/github:OWNER/REPO"`, `"/github:OWNER/REPO@REF"`, downcased | attributes of its Dired line | Manual |
 
 #### Partial path handling
 
@@ -414,7 +446,7 @@ Optional, soft integration. Loaded only when Embark is present; remoto works ide
 
 `remoto-owner`, `remoto-repo`, `remoto-branch`, `remoto-issue`, `remoto-dir`, `remoto-file`, plus Embark's built-in `url` for forge web links at point. Two sources produce them:
 
-- Buffers / Dired: a target finder (`remoto--embark-target-finder`, via `remoto--embark-target-at-point`) parses the remoto path's shape (root -> repo, tree -> dir, blob -> file) and returns `(TYPE FULLPATH)`.
+- Buffers / Dired: a target finder (`remoto--embark-target-finder`, via `remoto--embark-target-at-point`) parses the remoto path's shape (root -> repo, tree -> dir, blob -> file) and returns `(TYPE FULLPATH)`. A line of a Dired of branches and tags is that ref (`remoto-branch`).
 - Minibuffer completion: the completion category. remoto detects the level (owner/repo/branch/issue/file) and reports a per-level category (`remoto-owner`, `remoto-repo`, `remoto-branch`, `remoto-issue`, `remoto-file`, plus the single `remoto-browse` category used by `remoto-browse`) that Embark maps to a keymap.
 
 Embark actions always receive a full canonical remoto path; a transformer expands minibuffer candidates (e.g. `remoto.el/`) to the full path before the action runs.
@@ -434,7 +466,7 @@ Descoped (read-only model mismatch): `gh pr checkout` and export-subdir-to-local
 
 ### Keymaps
 
-`remoto-embark-owner-map`, `remoto-embark-repo-map`, `remoto-embark-branch-map`, `remoto-embark-dir-map`, `remoto-embark-file-map`, `remoto-embark-issue-map` (defined with `defvar-keymap`), registered in `embark-keymap-alist` by target type, plus a generic `remoto` fallback entry mapped to the repo keymap. Action commands take the target path and reuse the forge-agnostic context layer, so they are forge-agnostic too. The generic copy/browse actions (`remoto-embark-copy-url`/`-browse-url`) resolve a web URL for any target kind via `remoto--embark-web-url` - issue/PR, repository, directory, file, or owner - so an owner or issue candidate that reaches the repo or generic `remoto` keymap still works instead of failing with a forge-lookup error; the repository- and file-specific actions go through `remoto--embark-context`, which raises a clear "not a repository, directory, or file target" message on a non-repo target. A per-category transformer expands a bare minibuffer/collect candidate to its full path and classifies it by shape (`remoto--embark-classify`): `remoto-owner`/`remoto-branch`/`remoto-issue` keep their type, while `remoto-repo`/`remoto-file` and the generic `remoto`/`remoto-browse` categories re-derive it from the resolved path - so an owner target routes to `remoto-embark-owner-map` rather than the repo keymap. The built-in `url` target also gains `R` (`remoto-embark-open-in-remoto`).
+`remoto-embark-owner-map`, `remoto-embark-repo-map`, `remoto-embark-branch-map`, `remoto-embark-dir-map`, `remoto-embark-file-map`, `remoto-embark-issue-map` (defined with `defvar-keymap`), registered in `embark-keymap-alist` by target type, plus a generic `remoto` fallback entry mapped to the repo keymap. The `remoto-branch` entry lists the branch keymap and then the repo keymap, which Embark composes, so a branch or tag keeps clone, the clone URLs and history, and its own `y` and `b` give the ref's tree URL. Action commands take the target path and reuse the forge-agnostic context layer, so they are forge-agnostic too. The generic copy/browse actions (`remoto-embark-copy-url`/`-browse-url`) resolve a web URL for any target kind via `remoto--embark-web-url` - issue/PR, repository, directory, file, or owner - so an owner or issue candidate that reaches the repo or generic `remoto` keymap still works instead of failing with a forge-lookup error; the repository- and file-specific actions go through `remoto--embark-context`, which raises a clear "not a repository, directory, or file target" message on a non-repo target. A per-category transformer expands a bare minibuffer/collect candidate to its full path and classifies it by shape (`remoto--embark-classify`): `remoto-owner`/`remoto-branch`/`remoto-issue` keep their type, while `remoto-repo`/`remoto-file` and the generic `remoto`/`remoto-browse` categories re-derive it from the resolved path - so an owner target routes to `remoto-embark-owner-map` rather than the repo keymap. The built-in `url` target also gains `R` (`remoto-embark-open-in-remoto`).
 
 ### Implementation status
 

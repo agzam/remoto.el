@@ -14,13 +14,20 @@ EMACS_SANDBOX = emacs -Q --init-directory $(SANDBOX) \
 	--eval "(require 'package)" \
 	--eval "(package-initialize)"
 
-.PHONY: help test test-embark test-integration test-all deps lint check-autoloads check-compile compile clean sandbox
+E2E_PROFILES = vanilla fido vertico orderless evil embark
+E2E = $(EMACS_BATCH) --directory . -l test/remoto-e2e.el
+
+.PHONY: help test test-embark test-integration test-all deps lint check-autoloads check-compile compile clean sandbox test-e2e test-e2e-update test-e2e-record
 
 help:
 	@echo "Available commands:"
 	@echo "  make deps              Install dependencies"
 	@echo "  make sandbox           Launch emacs -Q with remoto + embark loaded"
 	@echo "  make test              Run unit tests"
+	@echo "  make test-e2e          Type the E2E cases in every profile (-j6 runs them in parallel)"
+	@echo "  make test-e2e-PROFILE  The same in one profile: $(E2E_PROFILES)"
+	@echo "  make test-e2e-update   Rewrite test/e2e/expected from a run (-j6 too)"
+	@echo "  make test-e2e-record   Record the GitHub answers test/e2e/fixtures.jsonl lacks (needs REMOTO_E2E_TOKEN and network)"
 	@echo "  make test-integration  Run integration tests (needs network)"
 	@echo "  make test-all          Run all tests"
 	@echo "  make lint              package-lint and checkdoc the package files"
@@ -37,6 +44,9 @@ $(ELPA_DIR):
 	--eval "(package-install 'buttercup)" \
 	--eval "(package-install 'embark)" \
 	--eval "(package-install 'orderless)" \
+	--eval "(package-install 'vertico)" \
+	--eval "(package-install 'marginalia)" \
+	--eval "(package-install 'evil)" \
 	--eval "(package-install 'package-lint)"
 
 deps: $(ELPA_DIR)
@@ -70,6 +80,21 @@ test-integration: $(ELPA_DIR)
 	--funcall buttercup-run
 
 test-all: test test-embark test-integration
+
+test-e2e: $(addprefix test-e2e-,$(E2E_PROFILES))
+
+test-e2e-%: $(ELPA_DIR)
+	REMOTO_E2E_PROFILE=$* $(E2E)
+
+test-e2e-update:
+	$(MAKE) test-e2e REMOTO_E2E_UPDATE=1
+
+# One profile at a time: each run adds to the fixtures the next one reads.
+test-e2e-record: $(ELPA_DIR)
+	@test -n "$$REMOTO_E2E_TOKEN" || { echo "REMOTO_E2E_TOKEN must hold a GitHub token"; exit 1; }
+	for p in $(E2E_PROFILES); do \
+	  REMOTO_E2E_PROFILE=$$p REMOTO_E2E_UPDATE=1 $(E2E) || exit 1; \
+	done
 
 lint: $(ELPA_DIR)
 	$(EMACS_BATCH) --directory . \

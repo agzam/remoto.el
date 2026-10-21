@@ -103,7 +103,7 @@ Keybindings in the display buffer: ~b~ (open in browser), ~g~ (refresh).
 |----------------------+---------------------------------------------------------------|
 | ~global-remoto-mode~ | Turn the file handler, URL rewriting and completion on or off |
 | ~remoto-browse~      | Prompt for a repo, open dired at root                         |
-| ~remoto-refresh~     | Clear tree cache for current repo, re-fetch                   |
+| ~remoto-refresh~     | Clear the cache of the current repo or listing, re-fetch      |
 | ~remoto-copy-url~    | Copy ~github.com~ URL for current file/line to kill ring      |
 
 *** Language servers
@@ -141,7 +141,7 @@ Each target type has its own keymap of actions that reuse remoto's forge-agnosti
 | ~remoto-dir~    | ~/github:torvalds/linux@master:/fs~     | ~remoto-embark-dir-map~    |
 | ~remoto-file~   | ~/github:torvalds/linux@master:/README~ | ~remoto-embark-file-map~   |
 
-Run ~embark-act~ on a target to see its actions and keys. Cloning honors ~remoto-clone-url-type~ and opens the clone's Magit status buffer when it finishes (~dired~ without Magit), and Embark's built-in ~url~ target gains ~R~ to open a forge URL at point as a remoto path.
+A branch or tag offers the repository's actions as well. Run ~embark-act~ on a target to see its actions and keys. Cloning honors ~remoto-clone-url-type~ and opens the clone's Magit status buffer when it finishes (~dired~ without Magit), and Embark's built-in ~url~ target gains ~R~ to open a forge URL at point as a remoto path.
 
 ** How does it work
 
@@ -177,7 +177,7 @@ We can only imagine a world where git's transport layer gives you a browsable fi
 
 - Read-only. No commits, no pushes, no file modifications. You still can copy them out.
 - No git operations (log, blame, diff).
-- Timestamps in dired are synthetic (the tree API has no timestamps).
+- Timestamps in a repository's Dired are synthetic (the tree API has no timestamps); a listing of repositories shows their last push.
 - Very large repos (100k+ files) use slower per-directory fetching.
 - Rate limit: 5,000 requests/hour (normal browsing stays well within this).
 - Per-file commit annotations make up to 20 API calls on first directory listing (cached after).
