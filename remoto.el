@@ -1473,7 +1473,7 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
                           (direct (while-no-input
                                     (remoto-forge-topic forge owner repo query)))
                           (results (if (listp cached) cached nil)))
-                     (if direct
+                     (if (consp direct)
                          (cl-remove-duplicates
                           (cons direct results)
                           :key (lambda (i) (alist-get 'number i)))

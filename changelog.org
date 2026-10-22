@@ -16,6 +16,9 @@ Changes to the project, following Keep a Changelog conventions.
 - One parser. ~remoto--parse~ reads any name with a registered prefix, partial or canonical, into its level, the directory it is in, and the query after it; every file operation branches on the level. The nine shape regexps of ~file-exists-p~, the six of ~file-name-directory~ and the rest, 90 fragments, are gone.
 - The synchronous search that completion at ~/github:OWNER/~ falls back to answers from the cache its first call filled. A keystroke there cost up to four identical search requests; it costs one.
 
+** Fixed
+- Topic completion under Vertico failed with ~(wrong-type-argument listp t)~ when a key arrived while it fetched the topic whose number was typed, at ~/github:OWNER/REPO#~ and at ~remoto-browse~. It lists the topics it has instead.
+
 * [2.3.0] - 2026-10-20
 
 ** Added

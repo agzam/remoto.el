@@ -4257,6 +4257,21 @@ Returns the full path after completion, or INPUT if no completion."
                           "42" "/github:foobar/zapato#")))
         (expect (member "42" completions) :to-be-truthy))))
 
+  ;; `while-no-input' answers t when a key arrives during the direct
+  ;; fetch; that t must not reach the candidates.
+  (it "keeps the cached issues when a key interrupts the direct fetch"
+    ;; Buttercup records no call that exits by `throw', hence the flag.
+    (let ((interrupted nil))
+      (spy-on 'remoto--fetch-issue :and-call-fake
+              (lambda (&rest _) (setq interrupted t) (throw throw-on-input t)))
+      (spy-on 'remoto--fetch-issues :and-return-value
+              '(((number . 1) (title . "First issue"))))
+      (let ((remoto--search-cache (make-hash-table :test 'equal)))
+        (let ((completions (remoto--handle-file-name-all-completions
+                            "1" "/github:foobar/zapato#")))
+          (expect interrupted :to-be t)
+          (expect (member "1" completions) :to-be-truthy)))))
+
   (it "returns empty when repo returns 404"
     (spy-on 'remoto--fetch-issues :and-return-value nil)
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
@@ -6320,6 +6335,16 @@ three functions the indicator asks are answered by a temp buffer."
            (rt (get-text-property 0 'remoto-target cand)))
       (expect cand :to-equal "foo/bar#42")
       (expect rt :to-equal "/github:foo/bar#42")))
+
+  (it "keeps the cached issues when a key interrupts the direct fetch"
+    (let ((interrupted nil))
+      (spy-on 'remoto--fetch-issue :and-call-fake
+              (lambda (&rest _) (setq interrupted t) (throw throw-on-input t)))
+      (spy-on 'remoto--fetch-issues :and-return-value
+              '(((number . 42) (title . "Bug") (state . "open"))))
+      (let ((cands (remoto--browse-completions "foo/bar#4")))
+        (expect interrupted :to-be t)
+        (expect (car cands) :to-equal "foo/bar#42"))))
 
   (it "attaches remoto-target on branch-mode candidates"
     (spy-on 'remoto--fetch-branches :and-return-value '("main"))

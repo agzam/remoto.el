@@ -793,7 +793,7 @@ Handles search, branch, and issue modes."
                         (direct (while-no-input
                                   (remoto--fetch-issue owner repo query)))
                         (results (if (listp cached) cached nil)))
-                   (if direct
+                   (if (consp direct)
                        (cl-remove-duplicates
                         (cons direct results)
                         :key (lambda (i) (alist-get 'number i)))
