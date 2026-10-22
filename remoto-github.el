@@ -67,26 +67,71 @@ Return a unibyte string; the caller decides how to decode it."
          (raw (alist-get 'content data)))
     (base64-decode-string (string-replace "\n" "" raw))))
 
+(defun remoto--matching-refs (owner repo kind prefix)
+  "Return the names of the KIND refs of OWNER/REPO that start with PREFIX.
+KIND is \"heads\" or \"tags\".  A lookup that fails answers nil, so the
+URL keeps its first segment as the ref."
+  (condition-case nil
+      (mapcar (lambda (item)
+                (string-remove-prefix (format "refs/%s/" kind)
+                                      (alist-get 'ref item)))
+              (remoto--api (format "repos/%s/%s/git/matching-refs/%s/%s"
+                                   owner repo kind (url-hexify-string prefix))))
+    (error nil)))
+
+(defun remoto--url-ref (owner repo ref rest)
+  "Return (REF . PATH) for REF/REST, the tail of a URL into OWNER/REPO.
+The URL does not mark where a ref with a slash ends: the longest branch,
+or else tag, that starts REF/REST is the ref.  A full commit SHA, or a
+branch named REF, needs no lookup past it: git allows no branch below one."
+  (let ((full (if rest (concat ref "/" rest) ref))
+        (best ref))
+    (when (and rest (not (string-match-p (rx bos (= 40 hex) eos) ref)))
+      (catch 'done
+        (dolist (kind '("heads" "tags"))
+          (dolist (name (remoto--matching-refs owner repo kind ref))
+            (when (equal name ref) (throw 'done nil))
+            (when (and (< (length best) (length name))
+                       (or (equal name full)
+                           (string-prefix-p (concat name "/") full)))
+              (setq best name)))
+          (unless (equal best ref) (throw 'done nil)))))
+    (cons best (concat "/" (substring full (min (length full)
+                                                (1+ (length best))))))))
+
+(defun remoto--url-unescape (string)
+  "Decode the percent escapes of STRING, a part of a URL, as UTF-8."
+  (and string (decode-coding-string (url-unhex-string string) 'utf-8)))
+
 (defun remoto--parse-github-url (input)
-  "Parse GitHub web INPUT into a `remoto-path' struct."
+  "Parse GitHub web INPUT into a `remoto-path' struct.
+A query string, such as ?plain=1 or ?tab=readme-ov-file, and a fragment
+name no part of the path."
   (cond
    ((string-match
      (rx bos "https://github.com/"
          (group (+ (not "/")))
          "/"
-         (group (+ (not (in "/#"))))
+         (group (+ (not (in "/#?"))))
          (? "/" (or "tree" "blob") "/"
-            (group (+ (not "/")))
-            (? "/" (group (+ (not "#")))))
+            (group (+ (not (in "/?#"))))
+            (? "/" (group (+ (not (in "?#"))))))
          (* nonl)
          eos)
      input)
-    (remoto-path-create
-     :owner (match-string 1 input)
-     :repo (let ((repo (match-string 2 input)))
-             (if (string-suffix-p ".git" repo) (substring repo 0 -4) repo))
-     :ref (match-string 3 input)
-     :path (concat "/" (or (match-string 4 input) ""))))
+    (let* ((owner (match-string 1 input))
+           (repo (let ((repo (match-string 2 input)))
+                   (if (string-suffix-p ".git" repo) (substring repo 0 -4) repo)))
+           ;; Read both groups first: decoding runs `string-match'.
+           (raw-ref (match-string 3 input))
+           (raw-rest (match-string 4 input))
+           (ref (remoto--url-unescape raw-ref))
+           (rest (remoto--url-unescape raw-rest))
+           (split (and ref (remoto--url-ref owner repo ref rest))))
+      (remoto-path-create
+       :owner owner :repo repo
+       :ref (car split)
+       :path (if split (cdr split) "/"))))
    ((string-match
      (rx bos "https://github.com/"
          (group (+ (not "/")))

@@ -137,14 +137,100 @@
       (expect (remoto-path-path p) :to-equal "/")))
 
   (it "parses tree URL with ref and path"
+    (spy-on 'remoto--matching-refs :and-return-value '("master"))
     (let ((p (remoto--parse-input "https://github.com/torvalds/linux/tree/master/kernel")))
       (expect (remoto-path-ref p) :to-equal "master")
       (expect (remoto-path-path p) :to-equal "/kernel")))
 
   (it "parses blob URL and strips fragment"
+    (spy-on 'remoto--matching-refs :and-return-value '("master"))
     (let ((p (remoto--parse-input "https://github.com/torvalds/linux/blob/master/README#L10-L20")))
       (expect (remoto-path-ref p) :to-equal "master")
       (expect (remoto-path-path p) :to-equal "/README")))
+
+  ;; A GitHub URL does not mark where a ref with a slash ends, so the
+  ;; parser asks for the refs that start with the first segment.
+  (it "asks the branches once when the first segment is a branch"
+    (spy-on 'remoto--matching-refs :and-return-value '("main"))
+    (let ((p (remoto--parse-input "https://github.com/o/r/blob/main/src/x.el")))
+      (expect (remoto-path-ref p) :to-equal "main")
+      (expect (remoto-path-path p) :to-equal "/src/x.el")
+      (expect 'remoto--matching-refs :to-have-been-called-times 1)
+      (expect 'remoto--matching-refs :to-have-been-called-with "o" "r" "heads" "main")))
+
+  (it "asks nothing for a tree URL that ends at the ref"
+    (spy-on 'remoto--matching-refs)
+    (let ((p (remoto--parse-input "https://github.com/o/r/tree/main")))
+      (expect (remoto-path-ref p) :to-equal "main")
+      (expect (remoto-path-path p) :to-equal "/")
+      (expect 'remoto--matching-refs :not :to-have-been-called)))
+
+  (it "takes the longest branch that starts the URL as the ref"
+    (spy-on 'remoto--matching-refs :and-return-value
+            '("release/2024.11.1" "release/2026.5.0" "release_obsolete/2024.11.1"))
+    (let ((p (remoto--parse-input "https://github.com/o/r/blob/release/2026.5.0/src/x.el")))
+      (expect (remoto-path-ref p) :to-equal "release/2026.5.0")
+      (expect (remoto-path-path p) :to-equal "/src/x.el"))
+    (let ((p (remoto--parse-input "https://github.com/o/r/tree/release/2026.5.0")))
+      (expect (remoto-path-ref p) :to-equal "release/2026.5.0")
+      (expect (remoto-path-path p) :to-equal "/")))
+
+  (it "falls back to the tags when no branch starts the URL"
+    (spy-on 'remoto--matching-refs :and-call-fake
+            (lambda (_owner _repo kind _prefix)
+              (and (equal kind "tags") '("v1/beta"))))
+    (let ((p (remoto--parse-input "https://github.com/o/r/blob/v1/beta/x.el")))
+      (expect (remoto-path-ref p) :to-equal "v1/beta")
+      (expect (remoto-path-path p) :to-equal "/x.el")))
+
+  (it "asks nothing for a full commit SHA, the form a permalink has"
+    (spy-on 'remoto--matching-refs)
+    (let ((p (remoto--parse-input
+              "https://github.com/o/r/blob/ced1c937d35201e2750b95910defa8e83c0891e2/README.org#L1")))
+      (expect (remoto-path-ref p) :to-equal "ced1c937d35201e2750b95910defa8e83c0891e2")
+      (expect (remoto-path-path p) :to-equal "/README.org")
+      (expect 'remoto--matching-refs :not :to-have-been-called)))
+
+  (it "drops the query string and the fragment the browser adds"
+    (spy-on 'remoto--matching-refs :and-return-value '("main"))
+    (let ((p (remoto--parse-input "https://github.com/agzam/remoto.el?tab=readme-ov-file")))
+      (expect (list (remoto-path-repo p) (remoto-path-ref p) (remoto-path-path p))
+              :to-equal '("remoto.el" nil "/")))
+    (let ((p (remoto--parse-input "https://github.com/o/r/blob/main/README.org?plain=1#L5")))
+      (expect (list (remoto-path-ref p) (remoto-path-path p))
+              :to-equal '("main" "/README.org")))
+    (let ((p (remoto--parse-input "https://github.com/o/r/tree/main?x=1")))
+      (expect (list (remoto-path-ref p) (remoto-path-path p)) :to-equal '("main" "/")))
+    (let ((p (remoto--parse-input "https://github.com/o/r/tree/main/test?x=1")))
+      (expect (list (remoto-path-ref p) (remoto-path-path p)) :to-equal '("main" "/test"))))
+
+  (it "decodes the percent escapes of the ref and the path"
+    (spy-on 'remoto--matching-refs :and-return-value '("feat+x"))
+    (let ((p (remoto--parse-input "https://github.com/o/r/blob/feat%2Bx/docs/caf%C3%A9%20au%20lait.md")))
+      (expect (list (remoto-path-ref p) (remoto-path-path p))
+              :to-equal '("feat+x" "/docs/café au lait.md"))
+      (expect 'remoto--matching-refs :to-have-been-called-with "o" "r" "heads" "feat+x")))
+
+  (it "reads back every blob and tree URL remoto builds"
+    (let ((refs nil))
+      (spy-on 'remoto--matching-refs :and-call-fake (lambda (&rest _) refs))
+      (pcase-dolist (`(,ref ,path) '(("main" "src/main.el")
+                                     ("release/2026.5.0" "docs/a b+c.md")
+                                     ("v1.0" "café/✓.md")
+                                     ("main" "test")))
+        (setq refs (list ref))
+        (dolist (kind '(blob tree))
+          (let ((p (remoto--parse-input
+                    (remoto--forge-url 'github kind "o" "r" ref path nil nil))))
+            (expect (list (remoto-path-ref p) (remoto-path-path p))
+                    :to-equal (list ref (concat "/" path))))))))
+
+  (it "keeps the first segment, a commit or an unknown name, when no ref starts the URL"
+    (spy-on 'remoto--matching-refs :and-return-value nil)
+    (let ((p (remoto--parse-input "https://github.com/o/r/blob/ceaf310/test/x.el")))
+      (expect (remoto-path-ref p) :to-equal "ceaf310")
+      (expect (remoto-path-path p) :to-equal "/test/x.el")
+      (expect 'remoto--matching-refs :to-have-been-called-with "o" "r" "tags" "ceaf310")))
 
   (it "parses git@github.com:owner/repo.git"
     (let ((p (remoto--parse-input "git@github.com:torvalds/linux.git")))
