@@ -477,7 +477,8 @@ with that property intact and no live minibuffer."
                     ("/github:agzam/mxp/"      . "/github:agzam/mxp:/")
                     ("/github:agzam/mxp:/"     . "/github:agzam/mxp:/")
                     ("/gh:agzam/mxp/src/a.el"  . "/github:agzam/mxp:/src/a.el")
-                    ("/github:o/r@dev/sub"     . "/github:o/r@dev:/sub")
+                    ;; A slash before the colon belongs to the ref.
+                    ("/github:o/r@dev/sub"     . "/github:o/r@dev/sub:/")
                     ("/github:o/r@dev:/sub"    . "/github:o/r@dev:/sub")))
       (expect (remoto--embark-canonicalize (car pair)) :to-equal (cdr pair))))
 

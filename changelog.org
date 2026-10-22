@@ -3,6 +3,23 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [Unreleased]
+
+** Added
+- A forge contract. The core asks a forge for data through 28 generic functions, the default ref, a tree, a file's bytes, branches and tags, topics, the listings above a repository, account and repository search, URL parsing, and turns the data into file operations, Dired lines and completion candidates itself. GitHub answers them in the new ~remoto-github.el~, which holds every REST endpoint, the URL parsers and ~remoto-browse~; ~remoto.el~ has no GitHub request left in it. A forge is a ~remoto-forge~ registered with ~remoto-register-forge~: its path prefixes, the first one canonical, its host and the delimiters it supports. The default of a data method signals ~remoto-unsupported~, the URL methods answer nil, so a forge that lacks a method fails cleanly and every forge can be asked about a URL in turn.
+- A delimiter registry. ~@~ and ~#~ come from ~remoto-register-delimiter~, each with a kind the core keys its behavior on: after a ~ref~ delimiter a colon starts the tree, a ~topic~ delimiter picks something that opens in a buffer. A forge lists the delimiters it supports; the others are plain characters in its paths.
+- Refs with a slash. ~/github:OWNER/REPO@release/2026.5.0:/~ parses: the ref ends at the colon. The Dired of branches and tags lists such refs, which it used to drop, and ~RET~ on one opens its tree. Before a colon, everything after ~@~ is the ref: ~/github:o/r@dev/sub~ names the ref ~dev/sub~, not a path under ~dev~.
+- Specs that walk the grammar: every shape a remoto name can take, built from the delimiter registry, checked for what holds whatever the data. The directory part is a prefix and joins with the rest into the name, parse and unparse invert, ~expand-file-name~ is a fixed point and ~..~ names the level above, a directory exists unless ~RET~ must ask first, and every completion candidate joins into a name one level down whose ~remoto-target~ is canonical.
+- Specs of the forge contract: the defaults, the dispatch to GitHub, the routing of a URL to the forge that reads it; and a conformance suite that asserts the level table, what each level is and does, against GitHub's recorded answers, the ones ~make test-e2e~ replays. A new forge runs the same suite with its own fixture kit.
+
+** Changed
+- One parser. ~remoto--parse~ reads any name with a registered prefix, partial or canonical, into its level, the directory it is in, and the query after it; every file operation branches on the level. The nine shape regexps of ~file-exists-p~, the six of ~file-name-directory~ and the rest, 90 fragments, are gone.
+- The synchronous search that completion at ~/github:OWNER/~ falls back to answers from the cache its first call filled. A keystroke there cost up to four identical search requests; it costs one.
+
+** Fixed
+- Topic completion under Vertico failed with ~(wrong-type-argument listp t)~ when a key arrived while it fetched the topic whose number was typed, at ~/github:OWNER/REPO#~ and at ~remoto-browse~. It lists the topics it has instead.
+- A GitHub URL whose branch or tag holds a slash, such as ~https://github.com/OWNER/REPO/tree/release/2026.5.0~, opened the ref ~release~ at the path ~2026.5.0~, since a URL does not mark where the ref ends. remoto asks GitHub for the branches, then the tags, that start with the first segment and takes the longest one the URL starts with: one request, two for a tag, none for a full commit SHA or a URL that ends at the ref. A query string or a fragment, such as the ~?tab=readme-ov-file~ a browser adds to a repository URL, ended up in the repository name or the path, and percent escapes stayed encoded.
+
 * [2.3.0] - 2026-10-20
 
 ** Added

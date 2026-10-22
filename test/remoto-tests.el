@@ -137,14 +137,100 @@
       (expect (remoto-path-path p) :to-equal "/")))
 
   (it "parses tree URL with ref and path"
+    (spy-on 'remoto--matching-refs :and-return-value '("master"))
     (let ((p (remoto--parse-input "https://github.com/torvalds/linux/tree/master/kernel")))
       (expect (remoto-path-ref p) :to-equal "master")
       (expect (remoto-path-path p) :to-equal "/kernel")))
 
   (it "parses blob URL and strips fragment"
+    (spy-on 'remoto--matching-refs :and-return-value '("master"))
     (let ((p (remoto--parse-input "https://github.com/torvalds/linux/blob/master/README#L10-L20")))
       (expect (remoto-path-ref p) :to-equal "master")
       (expect (remoto-path-path p) :to-equal "/README")))
+
+  ;; A GitHub URL does not mark where a ref with a slash ends, so the
+  ;; parser asks for the refs that start with the first segment.
+  (it "asks the branches once when the first segment is a branch"
+    (spy-on 'remoto--matching-refs :and-return-value '("main"))
+    (let ((p (remoto--parse-input "https://github.com/o/r/blob/main/src/x.el")))
+      (expect (remoto-path-ref p) :to-equal "main")
+      (expect (remoto-path-path p) :to-equal "/src/x.el")
+      (expect 'remoto--matching-refs :to-have-been-called-times 1)
+      (expect 'remoto--matching-refs :to-have-been-called-with "o" "r" "heads" "main")))
+
+  (it "asks nothing for a tree URL that ends at the ref"
+    (spy-on 'remoto--matching-refs)
+    (let ((p (remoto--parse-input "https://github.com/o/r/tree/main")))
+      (expect (remoto-path-ref p) :to-equal "main")
+      (expect (remoto-path-path p) :to-equal "/")
+      (expect 'remoto--matching-refs :not :to-have-been-called)))
+
+  (it "takes the longest branch that starts the URL as the ref"
+    (spy-on 'remoto--matching-refs :and-return-value
+            '("release/2024.11.1" "release/2026.5.0" "release_obsolete/2024.11.1"))
+    (let ((p (remoto--parse-input "https://github.com/o/r/blob/release/2026.5.0/src/x.el")))
+      (expect (remoto-path-ref p) :to-equal "release/2026.5.0")
+      (expect (remoto-path-path p) :to-equal "/src/x.el"))
+    (let ((p (remoto--parse-input "https://github.com/o/r/tree/release/2026.5.0")))
+      (expect (remoto-path-ref p) :to-equal "release/2026.5.0")
+      (expect (remoto-path-path p) :to-equal "/")))
+
+  (it "falls back to the tags when no branch starts the URL"
+    (spy-on 'remoto--matching-refs :and-call-fake
+            (lambda (_owner _repo kind _prefix)
+              (and (equal kind "tags") '("v1/beta"))))
+    (let ((p (remoto--parse-input "https://github.com/o/r/blob/v1/beta/x.el")))
+      (expect (remoto-path-ref p) :to-equal "v1/beta")
+      (expect (remoto-path-path p) :to-equal "/x.el")))
+
+  (it "asks nothing for a full commit SHA, the form a permalink has"
+    (spy-on 'remoto--matching-refs)
+    (let ((p (remoto--parse-input
+              "https://github.com/o/r/blob/ced1c937d35201e2750b95910defa8e83c0891e2/README.org#L1")))
+      (expect (remoto-path-ref p) :to-equal "ced1c937d35201e2750b95910defa8e83c0891e2")
+      (expect (remoto-path-path p) :to-equal "/README.org")
+      (expect 'remoto--matching-refs :not :to-have-been-called)))
+
+  (it "drops the query string and the fragment the browser adds"
+    (spy-on 'remoto--matching-refs :and-return-value '("main"))
+    (let ((p (remoto--parse-input "https://github.com/agzam/remoto.el?tab=readme-ov-file")))
+      (expect (list (remoto-path-repo p) (remoto-path-ref p) (remoto-path-path p))
+              :to-equal '("remoto.el" nil "/")))
+    (let ((p (remoto--parse-input "https://github.com/o/r/blob/main/README.org?plain=1#L5")))
+      (expect (list (remoto-path-ref p) (remoto-path-path p))
+              :to-equal '("main" "/README.org")))
+    (let ((p (remoto--parse-input "https://github.com/o/r/tree/main?x=1")))
+      (expect (list (remoto-path-ref p) (remoto-path-path p)) :to-equal '("main" "/")))
+    (let ((p (remoto--parse-input "https://github.com/o/r/tree/main/test?x=1")))
+      (expect (list (remoto-path-ref p) (remoto-path-path p)) :to-equal '("main" "/test"))))
+
+  (it "decodes the percent escapes of the ref and the path"
+    (spy-on 'remoto--matching-refs :and-return-value '("feat+x"))
+    (let ((p (remoto--parse-input "https://github.com/o/r/blob/feat%2Bx/docs/caf%C3%A9%20au%20lait.md")))
+      (expect (list (remoto-path-ref p) (remoto-path-path p))
+              :to-equal '("feat+x" "/docs/café au lait.md"))
+      (expect 'remoto--matching-refs :to-have-been-called-with "o" "r" "heads" "feat+x")))
+
+  (it "reads back every blob and tree URL remoto builds"
+    (let ((refs nil))
+      (spy-on 'remoto--matching-refs :and-call-fake (lambda (&rest _) refs))
+      (pcase-dolist (`(,ref ,path) '(("main" "src/main.el")
+                                     ("release/2026.5.0" "docs/a b+c.md")
+                                     ("v1.0" "café/✓.md")
+                                     ("main" "test")))
+        (setq refs (list ref))
+        (dolist (kind '(blob tree))
+          (let ((p (remoto--parse-input
+                    (remoto--forge-url 'github kind "o" "r" ref path nil nil))))
+            (expect (list (remoto-path-ref p) (remoto-path-path p))
+                    :to-equal (list ref (concat "/" path))))))))
+
+  (it "keeps the first segment, a commit or an unknown name, when no ref starts the URL"
+    (spy-on 'remoto--matching-refs :and-return-value nil)
+    (let ((p (remoto--parse-input "https://github.com/o/r/blob/ceaf310/test/x.el")))
+      (expect (remoto-path-ref p) :to-equal "ceaf310")
+      (expect (remoto-path-path p) :to-equal "/test/x.el")
+      (expect 'remoto--matching-refs :to-have-been-called-with "o" "r" "tags" "ceaf310")))
 
   (it "parses git@github.com:owner/repo.git"
     (let ((p (remoto--parse-input "git@github.com:torvalds/linux.git")))
@@ -2166,56 +2252,226 @@ using unauthenticated access until M-x remoto-reset-auth")
 
 ;;; Partial path parsing
 
-(describe "remoto--parse-partial-github-path"
-  (it "parses /github: as root level"
-    (let ((result (remoto--parse-partial-github-path "/github:")))
-      (expect (plist-get result :level) :to-equal 'root)
-      (expect (plist-get result :owner) :to-be nil)))
+(describe "remoto--parse"
+  (it "parses /github: as the root with an empty query"
+    (let ((p (remoto--parse "/github:")))
+      (expect (remoto-path-level p) :to-be 'root)
+      (expect (remoto-path-query p) :to-equal "")
+      (expect (remoto-path-directory p) :to-equal "/github:")))
 
-  (it "parses /github:owner/ as owner level"
-    (let ((result (remoto--parse-partial-github-path "/github:foobar/")))
-      (expect (plist-get result :level) :to-equal 'owner)
-      (expect (plist-get result :owner) :to-equal "foobar")))
+  (it "parses a bare account name as a query at the root"
+    (let ((p (remoto--parse "/github:foobar")))
+      (expect (remoto-path-level p) :to-be 'root)
+      (expect (remoto-path-query p) :to-equal "foobar")
+      (expect (remoto-path-directory p) :to-equal "/github:")))
 
-  (it "returns nil for bare /github:owner (no trailing slash)"
-    (expect (remoto--parse-partial-github-path "/github:foobar") :to-be nil))
+  (it "parses /github:owner/ as the owner level"
+    (let ((p (remoto--parse "/github:foobar/")))
+      (expect (remoto-path-level p) :to-be 'owner)
+      (expect (remoto-path-owner p) :to-equal "foobar")
+      (expect (remoto-path-query p) :to-equal "")))
 
-  (it "returns nil for full canonical paths"
-    (expect (remoto--parse-partial-github-path "/github:a/b@main:/src") :to-be nil))
+  (it "parses a bare repository name as a query at the owner level"
+    (let ((p (remoto--parse "/github:a/b")))
+      (expect (remoto-path-level p) :to-be 'owner)
+      (expect (remoto-path-query p) :to-equal "b")
+      (expect (remoto-path-directory p) :to-equal "/github:a/")))
 
-  (it "parses /github:owner/repo@ as repo level"
-    (let ((result (remoto--parse-partial-github-path "/github:torvalds/linux@")))
-      (expect (plist-get result :level) :to-equal 'repo)
-      (expect (plist-get result :owner) :to-equal "torvalds")
-      (expect (plist-get result :repo) :to-equal "linux")))
+  (it "parses /github:owner/repo@ as the refs level"
+    (let ((p (remoto--parse "/github:torvalds/linux@")))
+      (expect (remoto-path-level p) :to-be 'refs)
+      (expect (remoto-path-owner p) :to-equal "torvalds")
+      (expect (remoto-path-repo p) :to-equal "linux")
+      (expect (remoto-path-query p) :to-equal "")))
 
-  (it "returns nil for /github:owner/repo (no @)"
-    (expect (remoto--parse-partial-github-path "/github:a/b") :to-be nil)))
+  (it "keeps a ref with a slash as one query at the refs level"
+    (let ((p (remoto--parse "/github:o/r@release/2026.5")))
+      (expect (remoto-path-level p) :to-be 'refs)
+      (expect (remoto-path-query p) :to-equal "release/2026.5")
+      (expect (remoto-path-directory p) :to-equal "/github:o/r@")))
 
-(describe "remoto--parse-partial-canonical"
-  (it "parses /github:owner/repo without ref"
-    (let ((p (remoto--parse-partial-canonical "/github:torvalds/linux")))
+  (it "parses /github:owner/repo# as the topics level"
+    (let ((p (remoto--parse "/github:foobar/zapato#42")))
+      (expect (remoto-path-level p) :to-be 'topics)
+      (expect (remoto-path-query p) :to-equal "42")
+      (expect (remoto-path-directory p) :to-equal "/github:foobar/zapato#")))
+
+  (it "parses the short form as a tree on the default branch"
+    (let ((p (remoto--parse "/github:foobar/zapato/src/ma")))
+      (expect (remoto-path-level p) :to-be 'tree)
+      (expect (remoto-path-short p) :to-be t)
+      (expect (remoto-path-ref p) :to-be nil)
+      (expect (remoto-path-path p) :to-equal "/src/ma")
+      (expect (remoto-path-query p) :to-equal "ma")
+      (expect (remoto-path-directory p) :to-equal "/github:foobar/zapato/src/")))
+
+  (it "parses a canonical path, the ref ending at the colon"
+    (let ((p (remoto--parse "/github:o/r@feature/x:/a.el")))
+      (expect (remoto-path-level p) :to-be 'tree)
+      (expect (remoto-path-short p) :to-be nil)
+      (expect (remoto-path-ref p) :to-equal "feature/x")
+      (expect (remoto-path-path p) :to-equal "/a.el")
+      (expect (remoto-path-query p) :to-equal "a.el")
+      (expect (remoto-path-directory p) :to-equal "/github:o/r@feature/x:/")))
+
+  (it "keeps a canonical root without a slash after its colon as its own directory"
+    (let ((p (remoto--parse "/github:a/b@main:")))
+      (expect (remoto-path-path p) :to-equal "/")
+      (expect (remoto-path-query p) :to-equal "")
+      (expect (remoto-path-directory p) :to-equal "/github:a/b@main:")))
+
+  (it "treats a delimiter after no repository as a query at the owner level"
+    (let ((p (remoto--parse "/github:foo/#")))
+      (expect (remoto-path-level p) :to-be 'owner)
+      (expect (remoto-path-query p) :to-equal "#")))
+
+  (it "treats a delimiter after no repository name as a query at the root"
+    (let ((p (remoto--parse "/github:foobar#")))
+      (expect (remoto-path-level p) :to-be 'root)
+      (expect (remoto-path-query p) :to-equal "foobar#")))
+
+  (it "parses /github:/ as the root"
+    (let ((p (remoto--parse "/github:/")))
+      (expect (remoto-path-level p) :to-be 'root)
+      (expect (remoto-path-query p) :to-equal "/")))
+
+  (it "returns nil for other names"
+    (expect (remoto--parse "/home/user/file.el") :to-be nil)
+    (expect (remoto--parse "https://github.com/a/b") :to-be nil)
+    (expect (remoto--parse nil) :to-be nil))
+
+  (it "is inverted by remoto--unparse at every level"
+    (dolist (name '("/github:" "/github:foo" "/github:foo/" "/github:foo/bar"
+                    "/github:foo/bar@" "/github:foo/bar@v1" "/github:foo/bar@rel/1"
+                    "/github:foo/bar#" "/github:foo/bar#42"
+                    "/github:foo/bar/" "/github:foo/bar/src/" "/github:foo/bar/src/x"
+                    "/github:foo/bar:/" "/github:foo/bar@v1:/"
+                    "/github:foo/bar@rel/1:/a/b"))
+      (expect (remoto--unparse (remoto--parse name)) :to-equal name))))
+
+(describe "remoto-register-forge"
+  (it "adds a forge under its prefixes, shorthand included"
+    (let ((remoto--forges (copy-alist remoto--forges))
+          (remoto--handler-regexp remoto--handler-regexp)
+          (file-name-handler-alist (copy-alist file-name-handler-alist))
+          (fake (remoto-forge-create :name 'fake :prefixes '("fake" "fk")
+                                     :host "fake.example" :delimiters '(?@))))
+      (remoto-register-forge fake)
+      (expect (remoto--canonical-forge "/fake:o/r") :to-be fake)
+      (expect (remoto--canonical-forge "/fk:o/r") :to-be nil)
+      (expect (remoto--normalize-shorthand "/fk:o/r") :to-equal "/fake:o/r")
+      (expect (remoto--normalize-shorthand "/gh:o/r") :to-equal "/github:o/r")
+      (expect (string-match-p remoto--handler-regexp "/fk:o") :to-be 0)
+      (expect (string-match-p remoto--handler-regexp "/github:o") :to-be 0)
+      (expect (cdr (assoc remoto--handler-regexp file-name-handler-alist))
+              :to-be #'remoto-file-name-handler)
+      (expect (remoto--forge-type "/fk:o/r") :to-be 'fake)))
+
+  (it "parses with the delimiters of the forge only"
+    (let ((remoto--forges (copy-alist remoto--forges))
+          (remoto--handler-regexp remoto--handler-regexp)
+          (file-name-handler-alist (copy-alist file-name-handler-alist)))
+      (remoto-register-forge
+       (remoto-forge-create :name 'fake :prefixes '("fake") :delimiters '(?@)))
+      (let ((topic (remoto--parse "/fake:o/r#1"))
+            (ref (remoto--parse "/fake:o/r@v1:/a")))
+        (expect (remoto-path-level topic) :to-be 'owner)
+        (expect (remoto-path-query topic) :to-equal "r#1")
+        (expect (remoto-path-level ref) :to-be 'tree)
+        (expect (remoto-path-ref ref) :to-equal "v1")
+        (expect (remoto--unparse ref) :to-equal "/fake:o/r@v1:/a")
+        (expect (file-remote-p "/fake:o/r@v1:/a" 'method) :to-equal "fake")
+        (expect (file-remote-p "/fake:o" 'host) :to-equal nil))))
+
+  (it "keeps the GitHub prefixes in the spelling of the autoload cookie"
+    (expect remoto--handler-regexp :to-equal "\\`/\\(?:github\\|gh\\):")))
+
+(describe "the forge contract"
+  :var ((fake (remoto-forge-create :name 'fake :prefixes '("fake") :delimiters '(?@))))
+
+  (it "signals remoto-unsupported for data a forge does not provide"
+    (dolist (call (list (lambda () (remoto-forge-default-ref fake "o" "r"))
+                        (lambda () (remoto-forge-tree fake "o" "r" "main"))
+                        (lambda () (remoto-forge-content fake "o" "r" "main" "a"))
+                        (lambda () (remoto-forge-branches fake "o" "r"))
+                        (lambda () (remoto-forge-topics fake "o" "r"))
+                        (lambda () (remoto-forge-search-accounts fake "q" t))
+                        (lambda () (remoto-forge-owner-listing fake "/fake:o/"))))
+      (expect (condition-case err (funcall call) (remoto-unsupported (cadr err)))
+              :to-be 'fake)))
+
+  (it "answers nil, not an error, where nothing is a fine answer"
+    (expect (remoto-forge-user fake) :to-be nil)
+    (expect (remoto-forge-file-commits fake "o" "r" "main" "" '("a")) :to-be nil)
+    (expect (remoto-forge-url-input-p fake "https://x/o/r") :to-be nil)
+    (expect (remoto-forge-parse-url fake "https://x/o/r") :to-be nil)
+    (expect (remoto-forge-parse-topic-url fake "https://x/o/r/pull/1") :to-be nil)
+    (expect (remoto-forge-forget-refs fake "o" "r") :to-be nil))
+
+  (it "lists children from the tree where a forge has no cheaper answer"
+    (remoto-test-with-cache
+      (expect (mapcar #'car (remoto-forge-children fake "testowner" "testrepo"
+                                                   "main" "src"))
+              :to-equal '("main.el" "utils.el"))))
+
+  (it "dispatches the GitHub methods to the GitHub functions"
+    (spy-on 'remoto--fetch-branches :and-return-value '("main"))
+    (spy-on 'remoto--fetch-issue :and-return-value '((number . 1)))
+    (spy-on 'remoto--resolve-commit-sha :and-return-value "abc")
+    (expect (remoto-forge-branches remoto--github "o" "r") :to-equal '("main"))
+    (expect (remoto-forge-topic remoto--github "o" "r" "1") :to-equal '((number . 1)))
+    (expect (remoto-forge-commit-sha remoto--github "o" "r" "main") :to-equal "abc")
+    (expect 'remoto--fetch-branches :to-have-been-called-with "o" "r"))
+
+  (it "routes a URL to the forge that recognizes it"
+    (expect (remoto--url-forge "https://github.com/o/r") :to-be remoto--github)
+    (expect (remoto--url-forge "/home/me/x") :to-be nil)
+    (expect (remoto--canonical-path (remoto--url-path "https://github.com/o/r"))
+            :to-equal "/github:o/r:/")
+    (expect (remoto--canonical-path (remoto--url-path "o/r@v1"))
+            :to-equal "/github:o/r@v1:/")
+    (expect (remoto--url-path "not a repo") :to-throw 'user-error))
+
+  (it "finds a registered forge by name"
+    (expect (remoto--forge-named 'github) :to-be remoto--github)
+    (expect (remoto--forge-named 'nope) :to-be nil)))
+
+(describe "remoto--directory-level"
+  (it "names the level of a directory"
+    (expect (remoto--directory-level "/github:") :to-be 'root)
+    (expect (remoto--directory-level "/github:foobar/") :to-be 'owner)
+    (expect (remoto--directory-level "/github:foobar/zapato@") :to-be 'refs)
+    (expect (remoto--directory-level "/github:foobar/zapato#") :to-be 'topics)
+    (expect (remoto--directory-level "/github:foobar/zapato/") :to-be 'tree)
+    (expect (remoto--directory-level "/github:a/b@main:/src/") :to-be 'tree))
+
+  (it "is nil for a name with a query above the tree"
+    (expect (remoto--directory-level "/github:foobar") :to-be nil)
+    (expect (remoto--directory-level "/github:a/b") :to-be nil)
+    (expect (remoto--directory-level "/github:a/b@main") :to-be nil)
+    (expect (remoto--directory-level "/github:/") :to-be nil)))
+
+(describe "remoto--repo-root"
+  (it "names the repository of /github:owner/repo on its default branch"
+    (let ((p (remoto--repo-root (remoto--parse "/github:torvalds/linux"))))
       (expect (remoto-path-owner p) :to-equal "torvalds")
       (expect (remoto-path-repo p) :to-equal "linux")
       (expect (remoto-path-ref p) :to-be nil)
       (expect (remoto-path-path p) :to-equal "/")))
 
-  (it "parses /github:owner/repo@ref"
-    (let ((p (remoto--parse-partial-canonical "/github:torvalds/linux@v6.5")))
-      (expect (remoto-path-owner p) :to-equal "torvalds")
-      (expect (remoto-path-repo p) :to-equal "linux")
-      (expect (remoto-path-ref p) :to-equal "v6.5")))
+  (it "names the repository of /github:owner/repo@ref at that ref"
+    (expect (remoto-path-ref (remoto--repo-root (remoto--parse "/github:torvalds/linux@v6.5")))
+            :to-equal "v6.5")
+    (expect (remoto-path-ref (remoto--repo-root (remoto--parse "/github:o/r@v6.5/")))
+            :to-equal "v6.5")
+    (expect (remoto-path-ref (remoto--repo-root (remoto--parse "/github:o/r@rel/1")))
+            :to-equal "rel/1"))
 
-  (it "parses with trailing slash"
-    (let ((p (remoto--parse-partial-canonical "/github:torvalds/linux/")))
-      (expect (remoto-path-owner p) :to-equal "torvalds")
-      (expect (remoto-path-repo p) :to-equal "linux")))
-
-  (it "returns nil for full canonical path"
-    (expect (remoto--parse-partial-canonical "/github:a/b@main:/src") :to-be nil))
-
-  (it "returns nil for /github: alone"
-    (expect (remoto--parse-partial-canonical "/github:") :to-be nil)))
+  (it "is nil for a canonical path, a topic, the root and a delimiter alone"
+    (expect (remoto--repo-root (remoto--parse "/github:a/b@main:/src")) :to-be nil)
+    (expect (remoto--repo-root (remoto--parse "/github:agzam/spacehammer#193")) :to-be nil)
+    (expect (remoto--repo-root (remoto--parse "/github:")) :to-be nil)
+    (expect (remoto--repo-root (remoto--parse "/github:a/b@")) :to-be nil)))
 
 ;;; Partial path file operations
 
@@ -2512,13 +2768,13 @@ using unauthenticated access until M-x remoto-reset-auth")
            (repos (remoto--extract-search-repos data 'full_name)))
       (expect (car repos) :to-equal "torvalds/linux"))))
 
-(describe "remoto--search-owner-repos-sync"
+(describe "remoto--owner-search"
   (it "returns repos and populates cache on success"
     (spy-on 'remoto--api :and-return-value
             '((items . (((name . "linux") (description . "kernel"))
                          ((name . "libfdt") (description . ""))))))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
-      (let ((result (remoto--search-owner-repos-sync "torvalds" "lin")))
+      (let ((result (remoto--owner-search "torvalds" "lin")))
         (expect (length result) :to-equal 2)
         (expect (car result) :to-equal "linux")
         ;; Cache should be warm now
@@ -2527,11 +2783,13 @@ using unauthenticated access until M-x remoto-reset-auth")
           (expect hit :to-be-truthy)
           (expect (length cached) :to-equal 2)))))
 
-  (it "returns nil on API error without signaling"
+  (it "signals on an API error, which completion turns into no candidates"
     (spy-on 'remoto--api :and-call-fake
             (lambda (_) (error "network error")))
+    (spy-on 'remoto--search-owner-repos :and-return-value nil)
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
-      (expect (remoto--search-owner-repos-sync "torvalds" "lin")
+      (expect (remoto--owner-search "torvalds" "lin") :to-throw)
+      (expect (remoto--handle-file-name-all-completions "lin" "/github:torvalds/")
               :to-be nil))))
 
 (describe "remoto--recent-owner-repos-sync"
@@ -2558,11 +2816,11 @@ using unauthenticated access until M-x remoto-reset-auth")
 (describe "owner-level sync fallback in file-name-all-completions"
   (it "falls back to sync search when async returns nil"
     (spy-on 'remoto--search-owner-repos :and-return-value nil)
-    (spy-on 'remoto--search-owner-repos-sync :and-return-value '("linux"))
+    (spy-on 'remoto--owner-search :and-return-value '("linux"))
     (let ((completions (remoto--handle-file-name-all-completions
                         "lin" "/github:torvalds/")))
       (expect completions :to-equal '("linux/"))
-      (expect 'remoto--search-owner-repos-sync
+      (expect 'remoto--owner-search
               :to-have-been-called-with "torvalds" "lin")))
 
   (it "falls back to sync recent repos when async returns nil"
@@ -2576,18 +2834,18 @@ using unauthenticated access until M-x remoto-reset-auth")
 
   (it "skips sync fallback when async has results"
     (spy-on 'remoto--search-owner-repos :and-return-value '("linux"))
-    (spy-on 'remoto--search-owner-repos-sync)
+    (spy-on 'remoto--owner-search)
     (let ((completions (remoto--handle-file-name-all-completions
                         "lin" "/github:torvalds/")))
       (expect completions :to-equal '("linux/"))
-      (expect 'remoto--search-owner-repos-sync :not :to-have-been-called)))
+      (expect 'remoto--owner-search :not :to-have-been-called)))
 
   (it "skips sync search below min-search-chars"
     (let ((remoto-min-search-chars 3))
       (spy-on 'remoto--search-owner-repos :and-return-value nil)
-      (spy-on 'remoto--search-owner-repos-sync)
+      (spy-on 'remoto--owner-search)
       (remoto--handle-file-name-all-completions "li" "/github:torvalds/")
-      (expect 'remoto--search-owner-repos-sync :not :to-have-been-called))))
+      (expect 'remoto--owner-search :not :to-have-been-called))))
 
 (describe "completion style registration"
   (it "leaves the user's completion-category-overrides alone"
@@ -3307,7 +3565,7 @@ repository than tool, and a search for anything else finds none."
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
       ;; Completion at /github:acme/ searched for the typed text already.
-      (remoto--search-owner-repos-sync "acme" "stitch")
+      (remoto--owner-search "acme" "stitch")
       (spy-calls-reset 'remoto--api)
       (with-current-buffer (find-file-noselect "/gh:acme/stitch")
         (expect dired-directory :to-equal '("/github:acme/" "stitch-api" "stitch-env"))
@@ -3417,7 +3675,7 @@ repository than tool, and a search for anything else finds none."
   (it "gets one line from insert-directory without FULL-DIRECTORY-P"
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
-      (remoto--search-owner-repos-sync "acme" "stitch")
+      (remoto--owner-search "acme" "stitch")
       (with-temp-buffer
         (let ((default-directory "/github:acme/"))
           (remoto--handle-insert-directory "stitch-api" "-al" nil nil))
@@ -3434,7 +3692,7 @@ repository than tool, and a search for anything else finds none."
   (it "remembers a repository a search found, so that it exists and opens"
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
-      (remoto--search-owner-repos-sync "acme" "stitch")
+      (remoto--owner-search "acme" "stitch")
       (expect (file-exists-p "/github:acme/stitch-env") :to-be t)
       (expect (file-exists-p "/github:acme/stitch") :to-be nil)
       (expect (gethash "acme/stitch-env" remoto--default-branch-cache)
@@ -3565,13 +3823,22 @@ release-2, and only main and release-1 have a tree."
         (expect (buffer-string) :to-match
                 (rx bol "  drwxr-xr-x " (+ nonl) " release-2" (>= 4 " ") "tag" eol)))))
 
-  (it "lists every branch and tag after a bare @, but none with a slash"
+  (it "lists every branch and tag after a bare @, a slash in a ref included"
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake #'remoto-test--ref-api)
       (expect (cdr (buffer-local-value 'dired-directory
                                        (find-file-noselect "/gh:acme/tool@")))
-              :to-equal '("main" "release-1" "release-2" "v1.0"))
+              :to-equal '("feature/x" "main" "release-1" "release-2" "v1.0"))
       (expect (remoto-test--asked-p "/git/trees/") :to-be nil)))
+
+  (it "opens the tree of a ref with a slash from its Dired line"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--ref-api)
+      (find-file-noselect "/gh:acme/tool@")
+      (expect (file-exists-p "/github:acme/tool@feature/x") :to-be t)
+      (expect (file-directory-p "/github:acme/tool@feature/x") :to-be t)
+      (expect (remoto--maybe-rewrite "/github:acme/tool@feature/x")
+              :to-equal "/github:acme/tool@feature/x:/")))
 
   (it "lines the notes up from one count of the widths per reading"
     ;; Dired asks for each line on its own; counting the widths over all
@@ -3764,75 +4031,24 @@ Returns the full path after completion, or INPUT if no completion."
 
 ;;; ---- Partial path parsing: new levels ----
 
-(describe "remoto--parse-partial-github-path new levels"
-  ;; files-default: /github:owner/repo/
-  (it "parses /github:owner/repo/ as files-default level"
-    (let ((result (remoto--parse-partial-github-path "/github:foobar/zapato/")))
-      (expect (plist-get result :level) :to-equal 'files-default)
-      (expect (plist-get result :owner) :to-equal "foobar")
-      (expect (plist-get result :repo) :to-equal "zapato")))
+(describe "remoto--parse on degenerate names"
+  (it "reads a repository with dots, hyphens and underscores"
+    (expect (remoto-path-repo (remoto--parse "/github:agzam/remoto.el#"))
+            :to-equal "remoto.el")
+    (expect (remoto-path-repo (remoto--parse "/github:foo/my-repo@"))
+            :to-equal "my-repo")
+    (expect (remoto-path-repo (remoto--parse "/github:foo/my_repo/"))
+            :to-equal "my_repo"))
 
-  (it "parses /github:owner/repo/subdir/ as files-default level"
-    (let ((result (remoto--parse-partial-github-path "/github:foobar/zapato/src/")))
-      (expect (plist-get result :level) :to-equal 'files-default)
-      (expect (plist-get result :owner) :to-equal "foobar")
-      (expect (plist-get result :repo) :to-equal "zapato")))
+  (it "reads a double slash as a query at the root"
+    (let ((p (remoto--parse "/github://")))
+      (expect (remoto-path-level p) :to-be 'root)
+      (expect (remoto-path-query p) :to-equal "//")))
 
-  ;; issues: /github:owner/repo#
-  (it "parses /github:owner/repo# as issues level"
-    (let ((result (remoto--parse-partial-github-path "/github:foobar/zapato#")))
-      (expect (plist-get result :level) :to-equal 'issues)
-      (expect (plist-get result :owner) :to-equal "foobar")
-      (expect (plist-get result :repo) :to-equal "zapato")))
-
-  ;; delimiter without repo - invalid
-  (it "returns nil for /github:owner# (no repo)"
-    (expect (remoto--parse-partial-github-path "/github:foobar#") :to-be nil))
-
-  (it "returns nil for /github:owner@ (no repo)"
-    (expect (remoto--parse-partial-github-path "/github:foobar@") :to-be nil))
-
-  ;; repo with special characters
-  (it "parses repo with dots"
-    (let ((result (remoto--parse-partial-github-path "/github:agzam/remoto.el#")))
-      (expect (plist-get result :level) :to-equal 'issues)
-      (expect (plist-get result :repo) :to-equal "remoto.el")))
-
-  (it "parses repo with hyphens"
-    (let ((result (remoto--parse-partial-github-path "/github:foo/my-repo@")))
-      (expect (plist-get result :level) :to-equal 'repo)
-      (expect (plist-get result :repo) :to-equal "my-repo")))
-
-  (it "parses repo with underscores"
-    (let ((result (remoto--parse-partial-github-path "/github:foo/my_repo/")))
-      (expect (plist-get result :level) :to-equal 'files-default)
-      (expect (plist-get result :repo) :to-equal "my_repo")))
-
-  ;; empty/degenerate segments
-  (it "returns nil for /github:/"
-    (expect (remoto--parse-partial-github-path "/github:/") :to-be nil))
-
-  (it "returns nil for /github://"
-    (expect (remoto--parse-partial-github-path "/github://") :to-be nil))
-
-  (it "returns nil for /github:foo/#"
-    (expect (remoto--parse-partial-github-path "/github:foo/#") :to-be nil))
-
-  (it "returns nil for /github:foo/# (empty repo before #)"
-    (expect (remoto--parse-partial-github-path "/github:foo/#") :to-be nil))
-
-  ;; existing levels still work
-  (it "still parses /github: as root"
-    (let ((result (remoto--parse-partial-github-path "/github:")))
-      (expect (plist-get result :level) :to-equal 'root)))
-
-  (it "still parses /github:owner/ as owner"
-    (let ((result (remoto--parse-partial-github-path "/github:foobar/")))
-      (expect (plist-get result :level) :to-equal 'owner)))
-
-  (it "still parses /github:owner/repo@ as repo (branches)"
-    (let ((result (remoto--parse-partial-github-path "/github:foobar/zapato@")))
-      (expect (plist-get result :level) :to-equal 'repo))))
+  (it "reads a delimiter with no repository as a query, not a level"
+    (expect (remoto-path-level (remoto--parse "/github:foobar@")) :to-be 'root)
+    (expect (remoto--directory-level "/github:foobar@") :to-be nil)
+    (expect (remoto--directory-level "/github:foo/#") :to-be nil)))
 
 ;;; ---- file-name-directory with # delimiter ----
 
@@ -4126,6 +4342,21 @@ Returns the full path after completion, or INPUT if no completion."
       (let ((completions (remoto--handle-file-name-all-completions
                           "42" "/github:foobar/zapato#")))
         (expect (member "42" completions) :to-be-truthy))))
+
+  ;; `while-no-input' answers t when a key arrives during the direct
+  ;; fetch; that t must not reach the candidates.
+  (it "keeps the cached issues when a key interrupts the direct fetch"
+    ;; Buttercup records no call that exits by `throw', hence the flag.
+    (let ((interrupted nil))
+      (spy-on 'remoto--fetch-issue :and-call-fake
+              (lambda (&rest _) (setq interrupted t) (throw throw-on-input t)))
+      (spy-on 'remoto--fetch-issues :and-return-value
+              '(((number . 1) (title . "First issue"))))
+      (let ((remoto--search-cache (make-hash-table :test 'equal)))
+        (let ((completions (remoto--handle-file-name-all-completions
+                            "1" "/github:foobar/zapato#")))
+          (expect interrupted :to-be t)
+          (expect (member "1" completions) :to-be-truthy)))))
 
   (it "returns empty when repo returns 404"
     (spy-on 'remoto--fetch-issues :and-return-value nil)
@@ -4533,12 +4764,6 @@ Returns the full path after completion, or INPUT if no completion."
       (expect (buffer-live-p buf) :to-be nil))))
 
 ;;; ---- parse-partial-canonical rejects #NUM paths ----
-
-(describe "parse-partial-canonical rejects # delimiter"
-  (it "returns nil for /github:owner/repo#123"
-    (expect (remoto--parse-partial-canonical "/github:agzam/spacehammer#193") :to-be nil))
-  (it "still parses /github:owner/repo without #"
-    (expect (remoto--parse-partial-canonical "/github:agzam/spacehammer") :not :to-be nil)))
 
 ;;; ---- maybe-rewrite preserves #NUM paths ----
 
@@ -5877,7 +6102,7 @@ three functions the indicator asks are answered by a temp buffer."
 
   (it "makes a root candidate carrying the canonical owner path"
     (let ((cand (remoto--owner-candidate
-                 (propertize "agzam" 'remoto-acct-type "User"))))
+                 (propertize "agzam" 'remoto-acct-type "User") "/github:")))
       (expect (get-text-property 0 'remoto-target cand)
               :to-equal "/github:agzam")
       (expect (get-text-property 0 'remoto-acct-type cand)
@@ -6196,6 +6421,16 @@ three functions the indicator asks are answered by a temp buffer."
            (rt (get-text-property 0 'remoto-target cand)))
       (expect cand :to-equal "foo/bar#42")
       (expect rt :to-equal "/github:foo/bar#42")))
+
+  (it "keeps the cached issues when a key interrupts the direct fetch"
+    (let ((interrupted nil))
+      (spy-on 'remoto--fetch-issue :and-call-fake
+              (lambda (&rest _) (setq interrupted t) (throw throw-on-input t)))
+      (spy-on 'remoto--fetch-issues :and-return-value
+              '(((number . 42) (title . "Bug") (state . "open"))))
+      (let ((cands (remoto--browse-completions "foo/bar#4")))
+        (expect interrupted :to-be t)
+        (expect (car cands) :to-equal "foo/bar#42"))))
 
   (it "attaches remoto-target on branch-mode candidates"
     (spy-on 'remoto--fetch-branches :and-return-value '("main"))
@@ -7169,6 +7404,337 @@ with what the same call does once the mode is on."
           (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be nil)
           (expect (hash-table-count remoto--default-branch-cache) :to-equal 0))
       (global-remoto-mode 1))))
+
+;;; Grammar invariants
+
+;; The rows come from the delimiter registry, so a delimiter registered
+;; later gets its rows without anyone listing them by hand.
+
+(defun remoto-test--grammar-rows ()
+  "Return every shape of a remoto name as (NAME . PARENT).
+PARENT is what .. names from NAME, nil where .. has no meaning: a
+query, a ref or a topic.  Above a short-form directory it is the bare
+repository name, as `remoto--normalize-name' resolves it."
+  (let* ((root "/github:")
+         (owner (concat root "testowner/"))
+         (repo (concat owner "testrepo"))
+         (rows (list (cons root root)
+                     (cons (concat root "testowner") nil)
+                     (cons owner root)
+                     (cons repo nil)
+                     (cons (concat repo "/") owner)
+                     (cons (concat repo "/src/") repo)
+                     (cons (concat repo "/src/main.el") nil)
+                     (cons (concat repo ":/") owner)
+                     (cons (concat repo ":/src/") (concat repo ":/"))
+                     (cons (concat repo ":/src/main.el") nil))))
+    (dolist (delimiter (mapcar #'cdr remoto--delimiters))
+      (let* ((c (char-to-string (remoto-delimiter-char delimiter)))
+             (ref-p (eq (remoto-delimiter-kind delimiter) 'ref))
+             (pick (if ref-p "main" "42")))
+        (push (cons (concat repo c) nil) rows)
+        (push (cons (concat repo c pick) nil) rows)
+        (when ref-p
+          (push (cons (concat repo c "rel/1") nil) rows)
+          (push (cons (concat repo c "main:/") owner) rows)
+          (push (cons (concat repo c "main:/src/") (concat repo c "main:/")) rows)
+          (push (cons (concat repo c "main:/src/main.el") nil) rows)
+          (push (cons (concat repo c "rel/1:/src/") (concat repo c "rel/1:/")) rows))))
+    (nreverse rows)))
+
+(defun remoto-test--grammar-failures (predicate)
+  "Return the names of the grammar rows for which PREDICATE is nil."
+  (seq-remove predicate (mapcar #'car (remoto-test--grammar-rows))))
+
+(defmacro remoto-test-with-grammar-data (&rest body)
+  "Run BODY with every fetcher answering for testowner/testrepo from stubs."
+  (declare (indent 0))
+  `(remoto-test-with-cache
+     (let ((remoto--authenticated-user "me"))
+       (spy-on 'remoto--fetch-user-orgs :and-return-value
+               (list (propertize "testowner" 'remoto-acct-type "Organization")))
+       (spy-on 'remoto--recent-owner-repos :and-return-value '("testrepo" "other"))
+       (spy-on 'remoto--fetch-branches :and-return-value '("main" "rel/1"))
+       (spy-on 'remoto--fetch-tags :and-return-value '("v1.0"))
+       (spy-on 'remoto--fetch-issues :and-return-value
+               '(((number . 42) (title . "An issue") (state . "open"))
+                 ((number . 7) (title . "A pull") (state . "open")
+                  (pull_request . ((url . "x"))))))
+       (spy-on 'remoto--default-branch :and-return-value "main")
+       (spy-on 'remoto--fetch-dir-children-light :and-call-fake
+               (lambda (_owner _repo _ref dir-path)
+                 (remoto--tree-children
+                  (remoto--parse-path
+                   (concat "/github:testowner/testrepo@main:/" dir-path)))))
+       (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+       (dolist (ref '("main" "rel/1"))
+         (puthash (concat "testowner/testrepo@" ref)
+                  (gethash "testowner/testrepo@main" remoto--tree-cache)
+                  remoto--tree-cache))
+       ,@body)))
+
+(describe "grammar invariants on every row"
+  (it "split a name into a directory that is its prefix and the rest"
+    (expect (remoto-test--grammar-failures
+             (lambda (name)
+               (let ((dir (file-name-directory name)))
+                 (and (string-prefix-p dir name)
+                      (equal (concat dir (file-name-nondirectory name)) name)))))
+            :to-equal nil))
+
+  (it "parse into a path that unparses to the same name"
+    (expect (remoto-test--grammar-failures
+             (lambda (name) (equal (remoto--unparse (remoto--parse name)) name)))
+            :to-equal nil))
+
+  (it "answer file-remote-p with a prefix of the name"
+    (expect (remoto-test--grammar-failures
+             (lambda (name) (string-prefix-p (file-remote-p name) name)))
+            :to-equal nil))
+
+  (it "expand to themselves"
+    (expect (remoto-test--grammar-failures
+             (lambda (name) (equal (expand-file-name name) name)))
+            :to-equal nil))
+
+  (it "resolve .. to the directory above, where .. has a meaning"
+    (expect (seq-remove (lambda (row)
+                          (or (null (cdr row))
+                              (equal (expand-file-name ".." (car row)) (cdr row))))
+                        (remoto-test--grammar-rows))
+            :to-equal nil))
+
+  (it "exist when they are directories, except where RET must ask first"
+    ;; A bare name that no listing holds and a delimiter with nothing
+    ;; after it are still being typed: `file-exists-p' is nil so that
+    ;; `find-file' asks to confirm, directory or not.
+    (remoto-test-with-grammar-data
+      (expect (remoto-test--grammar-failures
+               (lambda (name)
+                 (let* ((parsed (remoto--parse name))
+                        (level (remoto-path-level parsed))
+                        (query (remoto-path-query parsed))
+                        (guarded (if (memq level '(root owner tree))
+                                     (and (not (eq level 'tree))
+                                          (not (string-empty-p query)))
+                                   (string-empty-p query))))
+                   (if guarded
+                       (not (file-exists-p name))
+                     (or (not (file-directory-p name)) (file-exists-p name))))))
+              :to-equal nil)))
+
+  (it "keep a directory name through file-name-as-directory and back"
+    (remoto-test-with-grammar-data
+      (expect (remoto-test--grammar-failures
+               (lambda (name)
+                 (or (not (file-directory-p name))
+                     (let ((dir (file-name-as-directory name)))
+                       (and (file-directory-p dir)
+                            (equal (file-name-as-directory (directory-file-name dir))
+                                   dir))))))
+              :to-equal nil)))
+
+  (it "complete, at every directory, to names that parse one level down"
+    (remoto-test-with-grammar-data
+      (let (failures)
+        (dolist (name (mapcar #'car (remoto-test--grammar-rows)))
+          (when (and (file-directory-p name) (equal (file-name-directory name) name))
+            (let* ((level (remoto-path-level (remoto--parse name)))
+                   (candidates (file-name-all-completions "" name)))
+              (unless candidates (push (cons name 'no-candidates) failures))
+              (dolist (candidate candidates)
+                (let* ((joined (concat name candidate))
+                       (parsed (remoto--parse joined))
+                       (target (get-text-property 0 'remoto-target candidate)))
+                  (unless (and parsed
+                               (file-exists-p joined)
+                               (memq (remoto-path-level parsed)
+                                     (pcase level
+                                       ('root '(owner))
+                                       ('owner '(tree))
+                                       ('tree '(tree))
+                                       ((guard (eq (remoto--level-kind level) 'ref))
+                                        '(tree))
+                                       (_ (list level))))
+                               (or (null target)
+                                   (equal (remoto--unparse (remoto--parse target))
+                                          target)))
+                    (push (cons name candidate) failures)))))))
+        (expect failures :to-equal nil)))))
+
+;;; Conformance of a forge, from replayed answers
+
+;; One suite for every forge: a fixture kit names a path at each level
+;; and answers the forge's requests from recorded data, and the suite
+;; asserts the level table at every row.  GitHub's kit replays the
+;; answers of test/e2e/fixtures.jsonl at `remoto--api'.
+
+(defvar remoto-test--fixtures nil
+  "GitHub's recorded answers by resource, each (STATUS BODY), arrays as lists.")
+
+(defconst remoto-test--fixtures-file
+  (expand-file-name "e2e/fixtures.jsonl"
+                    (file-name-directory (or load-file-name buffer-file-name)))
+  "GitHub's recorded answers, the ones `make test-e2e' replays.")
+
+(defun remoto-test--load-fixtures ()
+  "Read the recorded answers plus the ones about the fake account."
+  (let ((table (make-hash-table :test 'equal))
+        (file remoto-test--fixtures-file))
+    (with-temp-buffer
+      (let ((coding-system-for-read 'utf-8))
+        (insert-file-contents file))
+      (dolist (line (split-string (buffer-string) "\n" t))
+        (let ((entry (json-parse-string line :object-type 'alist
+                                        :array-type 'list
+                                        :null-object nil :false-object nil)))
+          (puthash (alist-get 'resource entry)
+                   (list (alist-get 'status entry) (alist-get 'body entry))
+                   table))))
+    (puthash "/user" '(200 ((login . "remoto-e2e") (type . "User"))) table)
+    (puthash "/user/orgs?per_page=100&page=1"
+             '(200 (((login . "emacs-mirror")
+                     (description . "Mirrors of the GNU Emacs repositories"))))
+             table)
+    table))
+
+(defun remoto-test--fixture-api (endpoint)
+  "Answer ENDPOINT from the fixtures, as `remoto--api' would from GitHub."
+  (pcase-let ((`(,status ,body)
+               (gethash (concat "/" endpoint) remoto-test--fixtures
+                        '(404 ((message . "Not Found"))))))
+    (if (eql status 200)
+        body
+      (user-error "%s%s" remoto--not-found endpoint))))
+
+(defconst remoto-test--github-kit
+  (list :forge 'github
+        :root "/github:" :account "remoto-e2e" :org "emacs-mirror"
+        :owner "agzam" :repo "remoto.el" :ref "main" :tag "2.2.0"
+        :dir "test" :file "README.org" :topic "47"
+        :api #'remoto-test--fixture-api
+        :url "https://github.com/agzam/remoto.el"
+        :topic-url "https://github.com/agzam/remoto.el/pull/47")
+  "What the conformance suite needs to know about GitHub.")
+
+(defmacro remoto-test-with-kit (kit &rest body)
+  "Run BODY with the forge of KIT answering from its fixtures."
+  (declare (indent 1))
+  `(remoto-test-with-cache
+     (let ((remoto--authenticated-user (plist-get ,kit :account)))
+       (unless remoto-test--fixtures
+         (setq remoto-test--fixtures (remoto-test--load-fixtures)))
+       (spy-on 'remoto--api :and-call-fake (plist-get ,kit :api))
+       (spy-on 'remoto--api-async :and-call-fake
+               (lambda (endpoint callback &optional errback)
+                 (condition-case nil
+                     (funcall callback (funcall (plist-get ,kit :api) endpoint))
+                   (user-error (when errback (funcall errback))))))
+       ;; Loading remoto-topic would define the function over the spy.
+       (spy-on 'remoto--require-topic)
+       (spy-on 'remoto-topic-display :and-return-value (generate-new-buffer "*topic*"))
+       (let ((before (buffer-list)))
+         (unwind-protect (progn ,@body)
+           (dolist (buf (buffer-list))
+             (unless (memq buf before) (kill-buffer buf))))))))
+
+(defun remoto-test--kit-names (kit)
+  "Return the rows of the level table for KIT as (LEVEL . NAME)."
+  (let* ((root (plist-get kit :root))
+         (owner (concat root (plist-get kit :owner) "/"))
+         (repo (concat owner (plist-get kit :repo)))
+         (at (concat repo "@" (plist-get kit :ref) ":/")))
+    `((root . ,root)
+      (owner . ,owner)
+      (repo . ,(concat repo "/"))
+      (repo-at-ref . ,at)
+      (refs . ,(concat repo "@"))
+      (topics . ,(concat repo "#"))
+      (topic . ,(concat repo "#" (plist-get kit :topic)))
+      (dir . ,(concat at (plist-get kit :dir) "/"))
+      (file . ,(concat at (plist-get kit :file))))))
+
+(defun remoto-test--conformance (kit)
+  "Define the specs of the level table for the forge of KIT."
+  (let-alist (remoto-test--kit-names kit)
+    (it "treats the levels above a file as directories, a file and a topic as not"
+      (remoto-test-with-kit kit
+        (dolist (name (list .root .owner .repo .repo-at-ref .refs .dir))
+          (expect (file-directory-p name) :to-be t))
+        (dolist (name (list .topics .topic .file))
+          (expect (file-directory-p name) :to-be nil))))
+
+    (it "opens every level on RET except a bare delimiter"
+      (remoto-test-with-kit kit
+        (dolist (name (list .root .owner .repo .repo-at-ref .topic .dir .file))
+          (expect (file-exists-p name) :to-be t))
+        (dolist (name (list .refs .topics))
+          (expect (file-exists-p name) :to-be nil))))
+
+    (it "lists the account and its organizations at the root"
+      (remoto-test-with-kit kit
+        (let ((names (remoto-test--dired-names-of .root)))
+          (expect (member (plist-get kit :account) names) :to-be-truthy)
+          (expect (member (plist-get kit :org) names) :to-be-truthy))))
+
+    (it "lists the repositories of an owner"
+      (remoto-test-with-kit kit
+        (expect (member (plist-get kit :repo) (remoto-test--dired-names-of .owner))
+                :to-be-truthy)))
+
+    (it "lists the tree at the repository root and below"
+      (remoto-test-with-kit kit
+        (expect (member (plist-get kit :file) (remoto-test--dired-names-of .repo-at-ref))
+                :to-be-truthy)
+        (expect (member (plist-get kit :file) (remoto-test--dired-names-of .repo))
+                :to-be-truthy)
+        (expect (remoto-test--dired-names-of .dir) :not :to-be nil)))
+
+    (it "completes each level to the names one level down"
+      (remoto-test-with-kit kit
+        (expect (member (concat (plist-get kit :org) "/")
+                        (file-name-all-completions "" .root))
+                :to-be-truthy)
+        (expect (member (concat (plist-get kit :ref) ":")
+                        (file-name-all-completions "" .refs))
+                :to-be-truthy)
+        (expect (member (concat (plist-get kit :tag) ":")
+                        (file-name-all-completions "" .refs))
+                :to-be-truthy)
+        (expect (member (plist-get kit :topic) (file-name-all-completions "" .topics))
+                :to-be-truthy)
+        (expect (member (plist-get kit :file) (file-name-all-completions "" .repo-at-ref))
+                :to-be-truthy)
+        (expect (member (plist-get kit :file) (file-name-all-completions "" .repo))
+                :to-be-truthy)))
+
+    (it "reads a file"
+      (remoto-test-with-kit kit
+        (with-temp-buffer
+          (insert-file-contents .file)
+          (expect (buffer-size) :to-be-greater-than 0))))
+
+    (it "opens a topic in its own buffer"
+      (remoto-test-with-kit kit
+        (find-file-noselect .topic)
+        (expect 'remoto-topic-display :to-have-been-called-with
+                (plist-get kit :topic)
+                (concat (plist-get kit :root) (plist-get kit :owner) "/"
+                        (plist-get kit :repo)))))
+
+    (it "opens the URLs of the forge"
+      (remoto-test-with-kit kit
+        (expect (remoto--maybe-rewrite (plist-get kit :url)) :to-equal .repo-at-ref)
+        (find-file-noselect (plist-get kit :topic-url))
+        (expect 'remoto-topic-display :to-have-been-called)))))
+
+(defun remoto-test--dired-names-of (dir)
+  "Return the names of the lines of a Dired of DIR."
+  (with-current-buffer (dired-noselect dir)
+    (remoto-test--dired-names)))
+
+(describe "the GitHub forge, against the level table"
+  (remoto-test--conformance remoto-test--github-kit))
 
 (provide 'remoto-tests)
 

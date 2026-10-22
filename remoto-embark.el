@@ -139,22 +139,16 @@ already-canonical targets pass through unchanged after shorthand expansion;
 non-strings and unrecognized strings are returned as-is."
   (if (not (stringp target))
       target
-    (let ((path (remoto--normalize-shorthand target)))
+    (let* ((path (remoto--normalize-shorthand target))
+           (parsed (remoto--parse path)))
       (cond
-       ((remoto--parse-path path) path)
-       ((string-match-p (rx "#" (+ digit) eos) path) path)
-       ((string-match (rx bos "/github:"
-                          (group (+ (not (in "/@:#"))))            ; owner
-                          "/"
-                          (group (+ (not (in "/@:#"))))            ; repo
-                          (group (? "@" (+ (not (in "/:#")))))     ; @ref
-                          (group (* nonl))                         ; rest
-                          eos)
-                      path)
-        (let ((rest (match-string 4 path)))
-          (format "/github:%s/%s%s:%s"
-                  (match-string 1 path) (match-string 2 path) (match-string 3 path)
-                  (if (string-empty-p rest) "/" rest))))
+       ((null parsed) path)
+       ((and (eq (remoto-path-level parsed) 'tree)
+             (remoto-path-short parsed))
+        (format "%s%s/%s:%s" (remoto--path-prefix parsed) (remoto-path-owner parsed)
+                (remoto-path-repo parsed) (remoto-path-path parsed)))
+       ((remoto--repo-root parsed)
+        (remoto--canonical-path (remoto--repo-root parsed)))
        (t path)))))
 
 (defun remoto--embark-classify (path fallback &optional ref)
@@ -260,19 +254,17 @@ TARGET may be a repository, directory, file, issue/PR, or owner."
   "Copy a permalink, pinned to the commit SHA, for remoto file TARGET."
   (interactive "sRemoto file: ")
   (let* ((ctx (remoto--embark-context target))
-         (sha (remoto--resolve-commit-sha (plist-get ctx :owner)
-                                          (plist-get ctx :repo)
-                                          (plist-get ctx :ref))))
+         (sha (remoto--context-commit-sha ctx)))
     (remoto--kill-url (remoto--context-url ctx (plist-get ctx :kind) sha))))
 
 (defun remoto-embark-open-in-remoto (url)
   "Open the forge URL (or `owner/repo' shorthand) URL in remoto.
-Parses URL with `remoto--parse-input' and visits the canonical remoto
-path; a directory opens Dired and the ref resolves lazily.  Turns on
-`global-remoto-mode' when it is off, as `remoto-browse' does."
+Visits the canonical remoto path the URL names; a directory opens Dired
+and the ref resolves lazily.  Turns on `global-remoto-mode' when it is
+off, as `remoto-browse' does."
   (interactive "sForge URL: ")
   (remoto--ensure-global-mode)
-  (find-file (remoto--canonical-path (remoto--parse-input url))))
+  (find-file (remoto--canonical-path (remoto--url-path url))))
 
 (defun remoto-embark-copy-branch-url (target)
   "Copy the web URL for the remoto ref (branch/tag) TARGET."

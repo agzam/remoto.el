@@ -131,21 +131,6 @@
   "Insert a visual separator line."
   (insert (propertize (make-string 60 ?-) 'face 'remoto-topic-separator) "\n"))
 
-;;;; PR-specific data fetching
-
-(defun remoto-topic--fetch-pr (owner repo number)
-  "Fetch full PR data for NUMBER in OWNER/REPO.
-Returns PR alist with merge status, diff stats, review state."
-  (condition-case nil
-      (remoto--api (format "repos/%s/%s/pulls/%s" owner repo number))
-    (user-error nil)))
-
-(defun remoto-topic--fetch-reviews (owner repo number)
-  "Fetch reviews for PR NUMBER in OWNER/REPO."
-  (condition-case nil
-      (remoto--api (format "repos/%s/%s/pulls/%s/reviews" owner repo number))
-    (user-error nil)))
-
 ;;;; Rendering
 
 (defun remoto-topic--render-header (data is-pr)
@@ -261,13 +246,12 @@ Returns PR alist with merge status, diff stats, review state."
 ;;;; Entry points
 
 (defun remoto-topic--parse-repo-path (repo-path)
-  "Extract owner and repo from REPO-PATH.
-Returns (OWNER . REPO) or nil."
-  (when (string-match (rx "/github:" (group (+ (not (in "/@#"))))
-                          "/" (group (+ (not (in "/@#")))))
-                      repo-path)
-    (cons (match-string 1 repo-path)
-          (match-string 2 repo-path))))
+  "Extract the forge, owner and repo from REPO-PATH.
+Returns (FORGE OWNER REPO) or nil."
+  (when-let* ((parsed (remoto--parse repo-path))
+              (repo (remoto--repo-root parsed)))
+    (list (remoto-path-forge repo) (remoto-path-owner repo)
+          (remoto-path-repo repo))))
 
 (defun remoto-topic-display (number repo-path)
   "Fetch and display issue/PR NUMBER for the repo at REPO-PATH.
@@ -276,17 +260,16 @@ Detects whether NUMBER is a PR and renders accordingly."
   (let ((parsed (remoto-topic--parse-repo-path repo-path)))
     (unless parsed
       (user-error "Remoto: invalid repo path: %s" repo-path))
-    (let* ((owner (car parsed))
-           (repo (cdr parsed))
-           (issue (remoto--fetch-issue owner repo number)))
+    (pcase-let* ((`(,forge ,owner ,repo) parsed)
+                 (issue (remoto-forge-topic forge owner repo number)))
       (unless issue
         (user-error "Remoto: not found: %s/%s#%s" owner repo number))
       (let* ((is-pr (and (alist-get 'pull_request issue) t))
              (pr-data (when is-pr
-                        (remoto-topic--fetch-pr owner repo number)))
+                        (remoto-forge-pull-request forge owner repo number)))
              (reviews (when is-pr
-                        (remoto-topic--fetch-reviews owner repo number)))
-             (comments (remoto--fetch-issue-comments owner repo number))
+                        (remoto-forge-reviews forge owner repo number)))
+             (comments (remoto-forge-topic-comments forge owner repo number))
              (display-data (or pr-data issue))
              (buf-name (format "*remoto: %s/%s#%s*" owner repo number))
              (buf (get-buffer-create buf-name)))

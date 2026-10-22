@@ -99,11 +99,11 @@ test-e2e-record: $(ELPA_DIR)
 lint: $(ELPA_DIR)
 	$(EMACS_BATCH) --directory . \
 	--eval "(require 'package-lint)" \
-	-f package-lint-batch-and-exit remoto.el remoto-embark.el remoto-topic.el
+	-f package-lint-batch-and-exit remoto.el remoto-github.el remoto-embark.el remoto-topic.el
 	$(EMACS_BATCH) \
 	--eval "(require 'checkdoc)" \
 	--eval "(setq checkdoc-verb-check-experimental-flag t)" \
-	--eval "(dolist (f '(\"remoto.el\" \"remoto-embark.el\" \"remoto-topic.el\")) \
+	--eval "(dolist (f '(\"remoto.el\" \"remoto-github.el\" \"remoto-embark.el\" \"remoto-topic.el\")) \
 	           (with-current-buffer (find-file-noselect f) \
 	             (check-parens) \
 	             (checkdoc-current-buffer t)))" \
@@ -126,9 +126,9 @@ check-compile: $(ELPA_DIR) check-autoloads
 	$(EMACS_BATCH) \
 	--eval "(setq byte-compile-error-on-warn t)" \
 	--eval "(add-to-list 'load-path \".\")" \
-	--eval "(dolist (f '(\"remoto.el\" \"remoto-embark.el\" \"remoto-topic.el\")) \
+	--eval "(dolist (f '(\"remoto.el\" \"remoto-github.el\" \"remoto-embark.el\" \"remoto-topic.el\")) \
 	           (unless (byte-compile-file f) (kill-emacs 1)))"
-	rm -f remoto.elc remoto-embark.elc remoto-topic.elc
+	rm -f remoto.elc remoto-github.elc remoto-embark.elc remoto-topic.elc
 
 compile: $(ELPA_DIR)
 	@echo "Byte-compiling package files..."

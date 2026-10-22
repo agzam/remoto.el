@@ -23,7 +23,7 @@ Sometimes you just want to look at code. Check a function signature, read a READ
 
 * Where
 
-For now it works only with GitHub repos. Future plans include support for other forges - GitLab, Codeberg, etc.
+For now it works only with GitHub repos. The core asks a forge for its data through a small set of generic functions, and GitHub answers them in ~remoto-github.el~; support for other forges - gists, Codeberg, GitLab - builds on that.
 
 * How
 ** use-package 
