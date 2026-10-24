@@ -2057,9 +2057,15 @@ PAYLOAD is the body that came with it, as the reader returned it."
     (expect (remoto-test--ghub-get-message)
             :to-equal "Remoto: access denied (rate limit or permissions): repos/o/r"))
 
-  (it "says authentication failed on 401"
+  (it "says authentication failed on 401, naming the API host"
     (remoto-test--ghub-fails-with 401)
-    (expect (remoto-test--ghub-get-message) :to-match "\\`Remoto: authentication failed"))
+    (expect (remoto-test--ghub-get-message)
+            :to-equal "Remoto: authentication failed for api.github.com; configure \
+a token for it in auth-source, then M-x remoto-reset-auth")
+    (expect (condition-case err
+                (remoto--ghub-get remoto--codeberg "/repos/o/r" 'none "repos/o/r")
+              (user-error (cadr err)))
+            :to-match "\\`Remoto: authentication failed for codeberg\\.org/api/v1;"))
 
   (it "falls back to the generic message for other codes"
     (remoto-test--ghub-fails-with 500)
@@ -2598,6 +2604,38 @@ using unauthenticated access until M-x remoto-reset-auth")
                           ("codeberg.org/api/v1" "/repos/o/r" none)))
       (maphash (lambda (_key req) (kill-buffer (remoto--request-buffer req)))
                remoto--pending-requests)))
+
+  (it "goes on anonymously once the forge refuses the token, and says so"
+    (let ((remoto--logins (remoto-test--logins))
+          (auths nil))
+      (setf (remoto--login-token (remoto--login "codeberg.org/api/v1")) "revoked")
+      (spy-on 'message)
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (push (plist-get args :auth) auths)
+                (if (eq (plist-get args :auth) 'none)
+                    '((name . "docs"))
+                  (signal 'ghub-http-error
+                          (list 401 "Unauthorized" "https://codeberg.org/api/v1/x" nil)))))
+      (expect (remoto--api remoto--codeberg "repos/o/r") :to-equal '((name . "docs")))
+      (expect (remoto--api remoto--codeberg "repos/o/r") :to-equal '((name . "docs")))
+      (expect (reverse auths) :to-equal '("revoked" none none))
+      (expect (remoto--login-failed (remoto--login "codeberg.org/api/v1")) :to-be t)
+      (expect (remoto--login-failed (remoto-test--github-login)) :to-be nil)
+      (expect 'message :to-have-been-called-with
+              "Remoto: %s rejected the token; reading it anonymously until M-x remoto-reset-auth"
+              "codeberg.org/api/v1")))
+
+  (it "asks the token's own endpoints nothing anonymously after the token is refused"
+    (let ((remoto--logins (remoto-test--logins)))
+      (setf (remoto--login-token (remoto--login "codeberg.org/api/v1")) "revoked")
+      (spy-on 'message)
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (&rest _)
+                (signal 'ghub-http-error
+                        (list 401 "Unauthorized" "https://codeberg.org/api/v1/user" nil))))
+      (expect (remoto--get-authenticated-user remoto--codeberg) :to-be nil)
+      (expect 'ghub-get :to-have-been-called-times 1)))
 
   (it "names the host of the forge when every auth avenue fails"
     (let ((remoto--logins (remoto-test--logins))

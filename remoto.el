@@ -798,6 +798,10 @@ Forgejo's 400 for a ref it lacks is one too.
 Callers that take a missing resource for an answer test for it: a child
 error of `user-error' would print its message in quotes.")
 
+(defconst remoto--auth-rejected "Remoto: authentication failed for "
+  "How the `user-error' for an answer of 401 starts, the API host after it.
+`remoto--api' tests for it to go on without the token that was refused.")
+
 (defun remoto--error-payload-message (err)
   "Return the message in the body that came with ERR, a `ghub-http-error'."
   (let ((payload (nth 4 err)))
@@ -832,8 +836,8 @@ explicit: ghub's default for a forge is its web host, which answers HTML."
         (user-error "%s%s" remoto--not-found endpoint))
        (403 (user-error "Remoto: access denied (rate limit or permissions): %s"
                         endpoint))
-       (401 (user-error "Remoto: authentication failed; \
-configure ghub token in auth-source"))
+       (401 (user-error "%s%s; configure a token for it in auth-source, \
+then M-x remoto-reset-auth" remoto--auth-rejected (remoto--api-host forge)))
        (_ (user-error "Remoto: API error: %s" (error-message-string err)))))
     (json-error
      (user-error "Remoto: could not parse API response for %s" endpoint))))
@@ -893,16 +897,24 @@ without any setup via unauthenticated fallback."
                 (message "Remoto: auth lookup timed out; retrying next call (see `remoto-auth-timeout')")
                 (setq result (remoto--anonymous-get forge endpoint)))
               result))
-        ;; Re-raise API errors (404, 403, etc.) from remoto--ghub-get;
-        ;; these are not auth failures.
         (user-error
-         (if (string-prefix-p "Remoto:" (cadr err))
-             (signal (car err) (cdr err))
-           ;; ghub auth config error.  Every avenue exhausted - fail loudly.
+         (cond
+          ;; The forge refused the token: go on without it, as the GitHub
+          ;; warm-up does, until `remoto-reset-auth'.
+          ((string-prefix-p remoto--auth-rejected (cadr err))
+           (setf (remoto--login-failed login) t)
+           (message "Remoto: %s rejected the token; reading it anonymously \
+until M-x remoto-reset-auth" (remoto--api-host forge))
+           (remoto--anonymous-get forge endpoint))
+          ;; Any other answer of the API (404, 403, ...) is no auth failure.
+          ((string-prefix-p "Remoto:" (cadr err))
+           (signal (car err) (cdr err)))
+          ;; ghub auth config error.  Every avenue exhausted - fail loudly.
+          (t
            (setf (remoto--login-failed login) t)
            (user-error "Remoto: authentication failed for %s; \
 configure a token for %s in auth-source, then M-x remoto-reset-auth"
-                       endpoint (remoto--api-host forge))))
+                       endpoint (remoto--api-host forge)))))
         (error
          ;; ghub could not resolve auth at all.  Fail loudly so the
          ;; user knows auth is the problem, not a missing repo.
