@@ -19,8 +19,10 @@
 (global-remoto-mode 1)
 
 ;; A request that gets past the fakes goes to a dead port: a forge that
-;; happens to answer would let a spec pass that no fake covers.
-(setq url-proxy-services '(("http" . "127.0.0.1:9") ("https" . "127.0.0.1:9")))
+;; happens to answer would let a spec pass that no fake covers.  No
+;; auth-source either: the specs of the lookup stub it themselves.
+(setq url-proxy-services '(("http" . "127.0.0.1:9") ("https" . "127.0.0.1:9"))
+      auth-sources nil)
 
 ;;; Helpers
 
@@ -1884,6 +1886,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
     (let ((remoto--logins (remoto-test--logins :failed nil))
           (remoto-github-auth nil)
           (remoto-auth-timeout 0.3))
+      (spy-on 'remoto--find-token :and-return-value nil)
       (spy-on 'ghub-get :and-call-fake
               (lambda (_resource &optional _params &rest args)
                 (if (eq (plist-get args :auth) 'none)
@@ -1938,6 +1941,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
     (let ((remoto--logins (remoto-test--logins :failed nil))
           (remoto-github-auth nil)
           (remoto-auth-timeout 5))
+      (spy-on 'remoto--find-token :and-return-value nil)
       (spy-on 'ghub-get :and-call-fake
               (lambda (_resource &optional _params &rest _args)
                 '((name . "test-repo"))))
