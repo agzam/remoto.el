@@ -3075,6 +3075,17 @@ using unauthenticated access until M-x remoto-reset-auth")
     (expect 'display-warning :to-have-been-called)
     (expect (cdr (remoto--prefix-of "/gh:o/r")) :to-be remoto--github))
 
+  (it "refuses a prefix with a colon or a slash and a host with a scheme or a path"
+    (spy-on 'display-warning)
+    (remoto-forgejo--register-instances '(("gitea:" "gitea.com") ("g/t" "gitea.com")
+                                          ("gs" "https://gitea.com") ("gp" "gitea.com/x")
+                                          ("ok" "127.0.0.1:8899")))
+    (expect 'display-warning :to-have-been-called-times 4)
+    (expect (mapcar #'car remoto-forgejo--instances) :to-equal '("ok"))
+    (expect (remoto-forge-host (cdr (remoto--prefix-of "/ok:o/r")))
+            :to-equal "127.0.0.1:8899")
+    (expect (remoto--prefix-of "/gs:o/r") :to-be nil))
+
   (it "applies the option when it is set through custom"
     (customize-set-variable 'remoto-forgejo-instances '(("gitea" "gitea.com")))
     (expect (remoto-forge-host (cdr (remoto--prefix-of "/gitea:o/r")))

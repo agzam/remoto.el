@@ -339,16 +339,25 @@ canonical.  The web URL templates of HOST go under NAME."
 
 (defun remoto-forgejo--register-instances (instances)
   "Register one forge per (PREFIX HOST) of INSTANCES, and drop the rest.
-A PREFIX that another forge owns is refused with a warning."
+A PREFIX that another forge owns, or that holds a colon or a slash, and
+a HOST with a scheme or a path are refused with a warning."
   (dolist (entry remoto-forgejo--instances)
     (remoto-unregister-forge (cdr entry)))
   (setq remoto-forgejo--instances nil)
   (pcase-dolist (`(,prefix ,host) instances)
-    (if (assoc prefix remoto--forges)
-        (display-warning 'remoto (format "the prefix %s belongs to another forge; \
-remove it from `remoto-forgejo-instances'" prefix))
+    (cond
+     ((not (and (stringp prefix) (string-match-p "\\`[^:/]+\\'" prefix)))
+      (display-warning 'remoto (format "the prefix %S of `remoto-forgejo-instances' \
+holds a colon or a slash; give it bare, as \"gitea\"" prefix)))
+     ((not (and (stringp host) (string-match-p "\\`[^/]+\\'" host)))
+      (display-warning 'remoto (format "the host %S of `remoto-forgejo-instances' \
+holds a scheme or a path; give the host alone, as \"gitea.com\"" host)))
+     ((assoc prefix remoto--forges)
+      (display-warning 'remoto (format "the prefix %s belongs to another forge; \
+remove it from `remoto-forgejo-instances'" prefix)))
+     (t
       (push (cons prefix (remoto-forgejo-register (intern prefix) (list prefix) host))
-            remoto-forgejo--instances))))
+            remoto-forgejo--instances)))))
 
 (defcustom remoto-forgejo-instances nil
   "Forgejo and Gitea servers to browse besides Codeberg, as (PREFIX HOST) pairs.
