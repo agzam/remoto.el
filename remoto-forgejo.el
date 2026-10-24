@@ -61,25 +61,82 @@ The search is at users/search on FORGE."
   (format "users/search?q=%s&%s" (url-hexify-string query)
           (remoto--page-params forge count)))
 
-(defvar remoto-forgejo--uids (make-hash-table :test 'equal)
-  "Cache: forge prefix and owner -> the numeric id of the account.
-Forgejo's repository search filters by the id of the owner, not its name.")
+(defvar remoto-forgejo--accounts (make-hash-table :test 'equal)
+  "Cache: forge prefix and lowercase name -> the account users/NAME answers.
+`none' marks a name of no account.  users/NAME answers for organizations,
+which users/search leaves out, and gives the id repos/search filters by.")
+
+(defvar remoto-forgejo--account-timer nil
+  "Idle timer of the account lookup that completion waits for, or nil.")
+
+(defun remoto-forgejo--account-key (forge name)
+  "Return the key of the account NAME of FORGE in `remoto-forgejo--accounts'."
+  (concat (remoto--prefix forge) (downcase name)))
+
+(defun remoto-forgejo--account (forge name)
+  "Return the account NAME of FORGE as users/NAME answers it, nil for none.
+It is asked for once, a name of no account included."
+  (let* ((key (remoto-forgejo--account-key forge name))
+         (known (gethash key remoto-forgejo--accounts)))
+    (if known
+        (unless (eq known 'none) known)
+      (let ((data (remoto--if-found #'remoto--api forge
+                                    (concat "users/" (url-hexify-string name)))))
+        (puthash key (or data 'none) remoto-forgejo--accounts)
+        data))))
+
+(defun remoto-forgejo--account-soon (forge name)
+  "Return the account NAME of FORGE if known, else ask for it in the background.
+The request waits for `remoto-debounce-delay' of idle time, as the search
+does, and the completions refresh when it answers."
+  (let* ((key (remoto-forgejo--account-key forge name))
+         (known (gethash key remoto-forgejo--accounts)))
+    (if known
+        (unless (eq known 'none) known)
+      (when (timerp remoto-forgejo--account-timer)
+        (cancel-timer remoto-forgejo--account-timer))
+      (setq remoto-forgejo--account-timer
+            (run-with-idle-timer
+             remoto-debounce-delay nil
+             (lambda ()
+               (setq remoto-forgejo--account-timer nil)
+               (remoto--api-async forge (concat "users/" (url-hexify-string name))
+                                  (lambda (data)
+                                    (puthash key data remoto-forgejo--accounts)
+                                    (remoto--refresh-minibuffer-completions))))))
+      nil)))
+
+(cl-defmethod remoto-forge-search-accounts ((forge remoto-forgejo) query wait)
+  "Forgejo's `search-accounts' for QUERY and WAIT on FORGE.
+The account QUERY names comes first: users/search finds no organization,
+users/QUERY answers for one."
+  (let* ((found (cl-call-next-method))
+         (account (cond (wait (remoto-forgejo--account forge query))
+                        ((<= remoto-min-search-chars (length query))
+                         (remoto-forgejo--account-soon forge query))))
+         (login (alist-get 'login account)))
+    (if login
+        (cons (propertize login 'remoto-acct-type "")
+              (seq-remove (lambda (name) (string-equal-ignore-case name login))
+                          found))
+      found)))
 
 (defun remoto-forgejo--uid (forge owner)
-  "Return the id of the account OWNER on FORGE, asking once."
-  (let ((key (concat (remoto--prefix forge) owner)))
-    (or (gethash key remoto-forgejo--uids)
-        (puthash key (alist-get 'id (remoto--api forge (concat "users/" owner)))
-                 remoto-forgejo--uids))))
+  "Return the id of the account OWNER on FORGE, nil when there is none."
+  (alist-get 'id (remoto-forgejo--account forge owner)))
 
 (cl-defmethod remoto--repo-search-endpoint ((forge remoto-forgejo) owner query count)
   "Forgejo's endpoint for QUERY among OWNER's repositories, COUNT at most.
-The search is at repos/search on FORGE, filtered by the id of OWNER."
-  (format "repos/search?%suid=%s&exclusive=true%s&%s"
-          (if (string-empty-p query) "" (format "q=%s&" (url-hexify-string query)))
-          (remoto-forgejo--uid forge owner)
-          (if (string-empty-p query) "&sort=updated&order=desc" "")
-          (remoto--page-params forge count)))
+The search is at repos/search on FORGE, filtered by the id of OWNER.  For
+an OWNER of no account it is OWNER's own listing, which answers 404:
+repos/search without an id searches every account."
+  (if-let* ((uid (remoto-forgejo--uid forge owner)))
+      (format "repos/search?%suid=%s&exclusive=true%s&%s"
+              (if (string-empty-p query) "" (format "q=%s&" (url-hexify-string query)))
+              uid
+              (if (string-empty-p query) "&sort=updated&order=desc" "")
+              (remoto--page-params forge count))
+    (format "users/%s/repos?%s" owner (remoto--page-params forge count))))
 
 (cl-defmethod remoto-forge-search-topics ((forge remoto-forgejo) owner repo query)
   "Forgejo's `search-topics' for OWNER, REPO and QUERY on FORGE.
@@ -173,8 +230,8 @@ The states come in GitHub's spelling, review requests left out."
     (user-error nil)))
 
 (cl-defmethod remoto-forge-forget-all ((forge remoto-forgejo))
-  "Forgejo's `forget-all' on FORGE drops the account ids too."
-  (clrhash remoto-forgejo--uids)
+  "Forgejo's `forget-all' on FORGE drops the accounts too."
+  (clrhash remoto-forgejo--accounts)
   (cl-call-next-method forge))
 
 ;;;; Web URLs

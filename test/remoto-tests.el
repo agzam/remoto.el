@@ -74,7 +74,7 @@ PROPS are the slots of `remoto--login': :failed, :token and :user."
          (remoto--file-commits-cache (make-hash-table :test 'equal))
          (remoto--listing-cache (make-hash-table :test 'equal))
          (remoto--entry-cache (make-hash-table :test 'equal))
-         (remoto-forgejo--uids (make-hash-table :test 'equal))
+         (remoto-forgejo--accounts (make-hash-table :test 'equal))
          (remoto--logins (remoto-test--logins)))
      (puthash "/github:testowner/testrepo" "main" remoto--default-branch-cache)
      (remoto-test--install-mock-tree)
@@ -2700,7 +2700,8 @@ using unauthenticated access until M-x remoto-reset-auth")
       (spy-on 'remoto--api :and-call-fake
               (lambda (_forge endpoint)
                 (pcase endpoint
-                  ("users/forgejo" '((id . 70422)))
+                  ("users/forgejo" '((id . 70422) (login . "forgejo")))
+                  ("users/forge" (user-error "%s%s" remoto--not-found endpoint))
                   ("users/search?q=forge&limit=50"
                    '((ok . t) (data . (((login . "forgejo-bot"))))))
                   ("repos/search?q=doc&uid=70422&exclusive=true&limit=50"
@@ -2719,6 +2720,62 @@ using unauthenticated access until M-x remoto-reset-auth")
               :to-equal "next")
       ;; The id was asked for once.
       (expect (seq-count (lambda (args) (equal (cadr args) "users/forgejo"))
+                         (spy-calls-all-args 'remoto--api))
+              :to-equal 1)))
+
+  (it "puts the account the query names first, an organization users/search misses"
+    (remoto-test-with-cache
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_forge endpoint)
+                (pcase endpoint
+                  ("users/search?q=Forgejo&limit=50"
+                   '((ok . t) (data . (((login . "forgejo-bot")) ((login . "niceforgejo"))))))
+                  ("users/Forgejo" '((id . 70422) (login . "forgejo")))
+                  (_ (error "Unexpected %s" endpoint)))))
+      (expect (remoto-forge-search-accounts remoto--codeberg "Forgejo" t)
+              :to-equal '("forgejo" "forgejo-bot" "niceforgejo"))
+      (expect (cdr (remoto--account-matches "/codeberg:Forgejo"))
+              :to-equal '("forgejo" "forgejo-bot" "niceforgejo"))))
+
+  (it "offers the account the query names in completion once its lookup answers"
+    (remoto-test-with-cache
+      (spy-on 'run-with-idle-timer :and-call-fake
+              (lambda (_secs _repeat fn &rest args) (apply fn args) nil))
+      (spy-on 'remoto--api-async :and-call-fake
+              (lambda (_forge endpoint callback &optional _errback)
+                (funcall callback
+                         (pcase endpoint
+                           ("users/search?q=forgejo&limit=30"
+                            '((ok . t) (data . (((login . "forgejo-bot"))))))
+                           ("users/forgejo" '((id . 70422) (login . "forgejo")))
+                           (_ (error "Unexpected %s" endpoint))))))
+      (remoto-forge-search-accounts remoto--codeberg "forgejo" nil)
+      (expect (remoto-forge-search-accounts remoto--codeberg "forgejo" nil)
+              :to-equal '("forgejo" "forgejo-bot"))
+      (expect 'remoto--api-async :to-have-been-called-times 2)))
+
+  (it "searches no repositories for an owner of no account, in the background or not"
+    ;; repos/search with no uid searches every account; a timer that signals
+    ;; prints "Error running timer".
+    (remoto-test-with-cache
+      (spy-on 'run-with-idle-timer :and-call-fake
+              (lambda (_secs _repeat fn &rest args) (apply fn args) nil))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_forge endpoint)
+                (pcase endpoint
+                  ((or "users/zz9q" "users/zz9q/repos?limit=50" "repos/zz9q/x")
+                   (user-error "%s%s" remoto--not-found endpoint))
+                  (_ (error "Unexpected %s" endpoint)))))
+      (spy-on 'remoto--api-async :and-call-fake
+              (lambda (_forge endpoint _callback &optional errback)
+                (expect endpoint :to-equal "users/zz9q/repos?limit=30")
+                (when errback (funcall errback))))
+      (expect (remoto-forge-recent-repos remoto--codeberg "zz9q" nil) :to-be nil)
+      (expect (condition-case err (remoto--repo-matches "/codeberg:zz9q/x")
+                (user-error (cadr err)))
+              :to-equal "Remoto: no account zz9q")
+      ;; The account was asked for once.
+      (expect (seq-count (lambda (args) (equal (cadr args) "users/zz9q"))
                          (spy-calls-all-args 'remoto--api))
               :to-equal 1)))
 
