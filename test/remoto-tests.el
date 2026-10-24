@@ -2523,6 +2523,40 @@ using unauthenticated access until M-x remoto-reset-auth")
       (remoto--api remoto--github "repos/o/r")
       (expect (nreverse auths) :to-equal '(none "ghp_x"))))
 
+  (it "sends a string remoto-github-auth to GitHub only"
+    (let ((remoto--logins (remoto-test--logins))
+          (remoto-github-auth "ghp_literal")
+          (auths nil))
+      (spy-on 'remoto--find-token :and-call-fake
+              (lambda (forge) (and (eq forge remoto--codeberg) "cb_token")))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (push (cons (plist-get args :host) (plist-get args :auth)) auths)
+                '((ok . t))))
+      (remoto--api remoto--codeberg "repos/o/r")
+      (remoto--api remoto--github "repos/o/r")
+      (expect (nreverse auths)
+              :to-equal '(("codeberg.org/api/v1" . "cb_token")
+                          ("api.github.com" . "ghp_literal")))))
+
+  (it "reads Codeberg anonymously with a string remoto-github-auth and no Codeberg token"
+    (let ((remoto--logins (remoto-test--logins))
+          (remoto-github-auth "ghp_literal")
+          (auths nil))
+      (spy-on 'remoto--find-token :and-call-fake
+              (lambda (forge)
+                (setf (remoto--login-failed (remoto--forge-login forge)) t)
+                nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (push (plist-get args :auth) auths)
+                '((ok . t))))
+      (remoto--api remoto--codeberg "repos/o/r")
+      (expect auths :to-equal '(none))
+      (expect (remoto--literal-token
+               (remoto-forgejo-create :name 'x :prefixes '("x") :host "x.org"))
+              :to-be nil)))
+
   (it "keeps pending requests of two hosts apart"
     (let ((remoto--pending-requests (make-hash-table :test 'equal))
           (started nil))

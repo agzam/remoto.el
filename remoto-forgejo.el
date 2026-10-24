@@ -36,6 +36,10 @@
   "Forgejo and Gitea are `forgejo' to ghub."
   'forgejo)
 
+(cl-defmethod remoto--literal-token ((_forge remoto-forgejo))
+  "A Forgejo server has no token option: `remoto-github-auth' is GitHub's."
+  nil)
+
 (cl-defmethod remoto--page-params ((_forge remoto-forgejo) count &optional page)
   "Forgejo's query for COUNT items, those of PAGE: it spells the size `limit'."
   (concat (format "limit=%d" count)
