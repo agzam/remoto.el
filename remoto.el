@@ -9,7 +9,7 @@
 ;; Version: 2.3.0
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
-;; Package-Requires: ((emacs "29.1") (ghub "5.0.0"))
+;; Package-Requires: ((emacs "29.1") (ghub "5.3.0"))
 ;;
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;
@@ -3040,11 +3040,13 @@ nothing opens a Dired of the names that match it."
 
 (defun remoto--git-user-key (forge)
   "Return the git config key, in ghub's spelling, of the account name for FORGE.
-KIND.user serves only the default host of ghub's kind of forge; any
+KIND.user serves only the domain of ghub's default host for the kind of
+forge, which is api.github.com or github.com by ghub's version; any
 other host needs KIND.HOST.user."
   (let ((kind (or (remoto--ghub-forge forge) 'github))
         (host (remoto-forge-host forge)))
-    (if (equal host (alist-get kind ghub-default-host-alist))
+    (if (equal (ghub--host-domain host)
+               (ghub--host-domain (alist-get kind ghub-default-host-alist)))
         (format "%s.user" kind)
       (format "%s.%s.user" kind host))))
 

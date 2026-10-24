@@ -551,7 +551,7 @@ GitLab (`/gitlab:`) and gists (`/gist:`) follow, after the contract is reshaped 
 ## Dependencies
 
 - Emacs 29.1+
-- `ghub` 5.0+ (token configured in auth-source; see ghub docs; 5.0 knows Forgejo)
+- `ghub` 5.3+ (token configured in auth-source; see ghub docs; Forgejo since 5.0, `FORGE.user` for the domain of the web host since 5.3)
 - No optional dependencies - completion works with any frontend (vertico, ivy, helm, vanilla Emacs)
 
 ## File Structure

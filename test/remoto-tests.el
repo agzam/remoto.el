@@ -2711,14 +2711,17 @@ using unauthenticated access until M-x remoto-reset-auth")
               "forgejo.user" "codeberg.org")))
 
   (it "names the git config key ghub reads for the host of the forge"
-    ;; ghub takes KIND.user for its default host of the kind only.
+    ;; ghub takes KIND.user for the domain of its default host of the kind
+    ;; only; its releases name GitHub's api.github.com, some snapshots github.com.
     (unwind-protect
         (progn
           (remoto-forgejo--register-instances '(("gitea" "gitea.com")))
-          (expect (remoto--git-user-key remoto--github) :to-equal "github.user")
-          (expect (remoto--git-user-key remoto--codeberg) :to-equal "forgejo.user")
-          (expect (remoto--git-user-key (cdr (remoto--prefix-of "/gitea:o/r")))
-                  :to-equal "forgejo.gitea.com.user"))
+          (dolist (github '("api.github.com" "github.com"))
+            (let ((ghub-default-host-alist `((github . ,github) (forgejo . "codeberg.org"))))
+              (expect (remoto--git-user-key remoto--github) :to-equal "github.user")
+              (expect (remoto--git-user-key remoto--codeberg) :to-equal "forgejo.user")
+              (expect (remoto--git-user-key (cdr (remoto--prefix-of "/gitea:o/r")))
+                      :to-equal "forgejo.gitea.com.user"))))
       (remoto-forgejo--register-instances nil))))
 
 (describe "caches keyed by forge"

@@ -15,7 +15,7 @@ Changes to the project, following Keep a Changelog conventions.
 - ~remoto-unregister-forge~.
 
 ** Changed
-- ~remoto--api~ and every GitHub function take the forge they speak for, so a forge whose API copies GitHub's inherits them against its own host. ~ghub~ 5.0.0 or later is required: it knows Forgejo.
+- ~remoto--api~ and every GitHub function take the forge they speak for, so a forge whose API copies GitHub's inherits them against its own host. ~ghub~ 5.3.0 or later is required: it knows Forgejo, and takes ~github.user~ or ~forgejo.user~ for the domain of the forge's web host.
 - The autoload cookie that loads remoto for a ~/github:~ path lives in ~remoto-github.el~; ~remoto-forgejo.el~ carries its own for ~/codeberg:~ and ~/cb:~.
 - A token that the forge refuses with a 401 marks the login of its host failed: remoto says so, naming the host, and asks again without the token, until ~remoto-reset-auth~. GitHub's login used to fall back only from the idle warm-up, and until then every request failed with "Remoto: authentication failed; configure ghub token in auth-source".
 - A topic buffer is named after the topic's canonical name, ~*remoto: /github:OWNER/REPO#N*~, so the same ~OWNER/REPO#N~ on two forges opens two buffers.
