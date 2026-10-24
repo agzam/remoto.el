@@ -2020,12 +2020,13 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
     (expect (remoto--ghub-get remoto--github "/repos/owner/repo" 'none "repos/owner/repo")
             :to-throw 'user-error)))
 
-(defun remoto-test--ghub-fails-with (code)
-  "Make `ghub-get' signal the `ghub-http-error' ghub raises for status CODE."
+(defun remoto-test--ghub-fails-with (code &optional payload)
+  "Make `ghub-get' signal the `ghub-http-error' ghub raises for status CODE.
+PAYLOAD is the body that came with it, as the reader returned it."
   (spy-on 'ghub-get :and-call-fake
           (lambda (&rest _)
             (signal 'ghub-http-error
-                    (list code "status text" "https://api.github.com/x" nil)))))
+                    (list code "status text" "https://api.github.com/x" payload)))))
 
 (defun remoto-test--ghub-get-message ()
   "The `user-error' text `remoto--ghub-get' produces for repos/o/r."
@@ -2042,6 +2043,14 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
   (it "says not found on 422, a search of an account that does not exist"
     (remoto-test--ghub-fails-with 422)
     (expect (remoto-test--ghub-get-message) :to-equal "Remoto: not found: repos/o/r"))
+
+  (it "says not found on a 400 whose body says not found, Forgejo's answer to an unknown ref"
+    (remoto-test--ghub-fails-with 400 '((message . "sha not found [v1]")))
+    (expect (remoto-test--ghub-get-message) :to-equal "Remoto: not found: repos/o/r")
+    (remoto-test--ghub-fails-with 400 '((message . "invalid limit")))
+    (expect (remoto-test--ghub-get-message) :not :to-match (regexp-quote remoto--not-found))
+    (remoto-test--ghub-fails-with 400 "not found, as text")
+    (expect (remoto-test--ghub-get-message) :not :to-match (regexp-quote remoto--not-found)))
 
   (it "says access denied on 403"
     (remoto-test--ghub-fails-with 403)
@@ -4313,6 +4322,29 @@ release-2, and only main and release-1 have a tree."
                 (rx bol "  drwxr-xr-x " (+ nonl) " release-1" (>= 4 " ") "branch" eol))
         (expect (buffer-string) :to-match
                 (rx bol "  drwxr-xr-x " (+ nonl) " release-2" (>= 4 " ") "tag" eol)))))
+
+  (it "opens the Dired of the matching refs on Codeberg, which answers 400 to the ref"
+    (remoto-test-with-cache
+      (let ((remoto--logins (remoto-test--logins :failed t))
+            (dired-listing-switches "-al")
+            (before (buffer-list)))
+        (spy-on 'ghub-get :and-call-fake
+                (lambda (resource &rest _)
+                  (pcase resource
+                    ("/repos/acme/tool/git/trees/rel?recursive=1&per_page=1000&page=1"
+                     (signal 'ghub-http-error
+                             (list 400 "Bad Request" "https://codeberg.org/api/v1/x"
+                                   '((message . "sha not found [rel]")))))
+                    ("/repos/acme/tool/branches?limit=50&page=1"
+                     '(((name . "main")) ((name . "release-1"))))
+                    ("/repos/acme/tool/tags?limit=50&page=1" '(((name . "release-2"))))
+                    (_ (error "Unexpected %s" resource)))))
+        (unwind-protect
+            (expect (buffer-local-value 'dired-directory
+                                        (find-file-noselect "/cb:acme/tool@rel"))
+                    :to-equal '("/codeberg:acme/tool@" "release-1" "release-2"))
+          (dolist (buf (buffer-list))
+            (unless (memq buf before) (kill-buffer buf)))))))
 
   (it "lists every branch and tag after a bare @, a slash in a ref included"
     (remoto-test-with-listings

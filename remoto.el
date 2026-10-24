@@ -794,8 +794,15 @@ Return the value or signal the condition the synchronous call would."
 
 (defconst remoto--not-found "Remoto: not found: "
   "How the `user-error' for an answer of 404 starts, or of 422 to a search.
+Forgejo's 400 for a ref it lacks is one too.
 Callers that take a missing resource for an answer test for it: a child
 error of `user-error' would print its message in quotes.")
+
+(defun remoto--error-payload-message (err)
+  "Return the message in the body that came with ERR, a `ghub-http-error'."
+  (let ((payload (nth 4 err)))
+    (and (listp payload) (stringp (alist-get 'message payload))
+         (alist-get 'message payload))))
 
 (defun remoto--ghub-get (forge resource auth endpoint)
   "Call `ghub-get' on RESOURCE of FORGE with AUTH, translating errors.
@@ -819,6 +826,10 @@ explicit: ghub's default for a forge is its web host, which answers HTML."
      (pcase (cadr err)
        ;; A search answers 422 when its user: qualifier names no account.
        ((or 404 422) (user-error "%s%s" remoto--not-found endpoint))
+       ;; Forgejo answers 400 "sha not found [REF]" to a ref it lacks.
+       ((and 400 (guard (string-match-p "not found"
+                                        (or (remoto--error-payload-message err) ""))))
+        (user-error "%s%s" remoto--not-found endpoint))
        (403 (user-error "Remoto: access denied (rate limit or permissions): %s"
                         endpoint))
        (401 (user-error "Remoto: authentication failed; \
