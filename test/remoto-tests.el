@@ -2020,11 +2020,13 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
     (expect (remoto--ghub-get remoto--github "/repos/owner/repo" 'none "repos/owner/repo")
             :to-throw 'user-error)))
 
-(defun remoto-test--ghub-fails-with (code &optional payload)
+(defun remoto-test--ghub-fails-with (code &optional payload headers)
   "Make `ghub-get' signal the `ghub-http-error' ghub raises for status CODE.
-PAYLOAD is the body that came with it, as the reader returned it."
+PAYLOAD is the body that came with it, as the reader returned it, and
+HEADERS the headers, which ghub leaves in `ghub-response-headers'."
   (spy-on 'ghub-get :and-call-fake
           (lambda (&rest _)
+            (setq-default ghub-response-headers headers)
             (signal 'ghub-http-error
                     (list code "status text" "https://api.github.com/x" payload)))))
 
@@ -2067,10 +2069,39 @@ a token for it in auth-source, then M-x remoto-reset-auth")
               (user-error (cadr err)))
             :to-match "\\`Remoto: authentication failed for codeberg\\.org/api/v1;"))
 
-  (it "falls back to the generic message for other codes"
+  (it "names the host and the status for other codes, with no raw data"
     (remoto-test--ghub-fails-with 500)
     (expect (remoto-test--ghub-get-message)
-            :to-match "\\`Remoto: API error: HTTP Error: 500")))
+            :to-equal "Remoto: api.github.com answered 500 status text for repos/o/r")
+    (remoto-test--ghub-fails-with 400 '((message . "invalid limit")))
+    (expect (remoto-test--ghub-get-message)
+            :to-equal "Remoto: api.github.com answered 400 status text for repos/o/r: invalid limit")
+    (remoto-test--ghub-fails-with 503 nil '(("Retry-After" . "30")))
+    (expect (remoto-test--ghub-get-message)
+            :to-equal "Remoto: api.github.com answered 503 status text for repos/o/r; retry in 30 seconds"))
+
+  (it "says rate limited on 429, with the wait Retry-After asks for"
+    (remoto-test--ghub-fails-with 429 nil '(("retry-after" . "60")))
+    (expect (remoto-test--ghub-get-message)
+            :to-equal "Remoto: api.github.com rate limited repos/o/r (429); retry in 60 seconds")
+    (remoto-test--ghub-fails-with 429 nil '(("Retry-After" . "Wed, 21 Oct 2026 07:28:00 GMT")))
+    (expect (remoto-test--ghub-get-message)
+            :to-equal "Remoto: api.github.com rate limited repos/o/r (429); \
+retry after Wed, 21 Oct 2026 07:28:00 GMT")
+    (remoto-test--ghub-fails-with 429)
+    (expect (remoto-test--ghub-get-message)
+            :to-equal "Remoto: api.github.com rate limited repos/o/r (429); retry later"))
+
+  (it "reads no Retry-After of an earlier answer"
+    (setq-default ghub-response-headers '(("Retry-After" . "999")))
+    (unwind-protect
+        (progn
+          (spy-on 'ghub-get :and-call-fake
+                  (lambda (&rest _)
+                    (signal 'ghub-http-error
+                            (list 429 "Too Many Requests" "https://api.github.com/x" nil))))
+          (expect (remoto-test--ghub-get-message) :to-match "retry later\\'"))
+      (setq-default ghub-response-headers nil))))
 
 (defvar remoto-test--reply nil
   "The callback and errorback of the last faked callback request.")

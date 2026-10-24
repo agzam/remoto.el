@@ -808,39 +808,60 @@ error of `user-error' would print its message in quotes.")
     (and (listp payload) (stringp (alist-get 'message payload))
          (alist-get 'message payload))))
 
+(defun remoto--http-error-message (forge endpoint err headers)
+  "Return the message for ERR, the `ghub-http-error' of ENDPOINT on FORGE.
+HEADERS came with the answer; a Retry-After among them says how long to wait."
+  (let ((code (nth 1 err))
+        (wait (cdr (assoc-string "retry-after" headers t)))
+        (detail (remoto--error-payload-message err)))
+    (concat (format "Remoto: %s " (remoto--api-host forge))
+            (if (eql code 429)
+                (format "rate limited %s (429)" endpoint)
+              (format "answered %s%s for %s" code
+                      (if (nth 2 err) (concat " " (nth 2 err)) "") endpoint))
+            (and detail (concat ": " detail))
+            (cond ((null wait) (and (eql code 429) "; retry later"))
+                  ((string-match-p "\\`[0-9]+\\'" wait)
+                   (format "; retry in %s seconds" wait))
+                  (t (format "; retry after %s" wait))))))
+
 (defun remoto--ghub-get (forge resource auth endpoint)
   "Call `ghub-get' on RESOURCE of FORGE with AUTH, translating errors.
 ENDPOINT is used in error messages for context.  The host is always
 explicit: ghub's default for a forge is its web host, which answers HTML."
-  (condition-case err
-      (remoto--with-fetch-indicator
-        (let ((inhibit-message (not ghub-debug)))
-          ;; `while-no-input' binds `throw-on-input'; only then can input
-          ;; abandon the call, and only then is the callback path needed.
-          (if throw-on-input
-              (remoto--ghub-get-interruptible forge resource auth)
-            (ghub-get resource nil
-                      :auth auth
-                      :reader #'remoto--json-reader
-                      :host (remoto--api-host forge)
-                      :forge (remoto--ghub-forge forge)))))
-    ;; ghub signals every HTTP failure as (ghub-http-error CODE MESSAGE URL
-    ;; PAYLOAD); there are no per-status error symbols to match on.
-    (ghub-http-error
-     (pcase (cadr err)
-       ;; A search answers 422 when its user: qualifier names no account.
-       ((or 404 422) (user-error "%s%s" remoto--not-found endpoint))
-       ;; Forgejo answers 400 "sha not found [REF]" to a ref it lacks.
-       ((and 400 (guard (string-match-p "not found"
-                                        (or (remoto--error-payload-message err) ""))))
-        (user-error "%s%s" remoto--not-found endpoint))
-       (403 (user-error "Remoto: access denied (rate limit or permissions): %s"
-                        endpoint))
-       (401 (user-error "%s%s; configure a token for it in auth-source, \
+  ;; A synchronous ghub-get leaves the headers of its answer here, so
+  ;; the binding holds this request's and no earlier one's.
+  (let ((ghub-response-headers nil))
+    (condition-case err
+        (remoto--with-fetch-indicator
+          (let ((inhibit-message (not ghub-debug)))
+            ;; `while-no-input' binds `throw-on-input'; only then can input
+            ;; abandon the call, and only then is the callback path needed.
+            (if throw-on-input
+                (remoto--ghub-get-interruptible forge resource auth)
+              (ghub-get resource nil
+                        :auth auth
+                        :reader #'remoto--json-reader
+                        :host (remoto--api-host forge)
+                        :forge (remoto--ghub-forge forge)))))
+      ;; ghub signals every HTTP failure as (ghub-http-error CODE MESSAGE URL
+      ;; PAYLOAD); there are no per-status error symbols to match on.
+      (ghub-http-error
+       (pcase (cadr err)
+         ;; A search answers 422 when its user: qualifier names no account.
+         ((or 404 422) (user-error "%s%s" remoto--not-found endpoint))
+         ;; Forgejo answers 400 "sha not found [REF]" to a ref it lacks.
+         ((and 400 (guard (string-match-p "not found"
+                                          (or (remoto--error-payload-message err) ""))))
+          (user-error "%s%s" remoto--not-found endpoint))
+         (403 (user-error "Remoto: access denied (rate limit or permissions): %s"
+                          endpoint))
+         (401 (user-error "%s%s; configure a token for it in auth-source, \
 then M-x remoto-reset-auth" remoto--auth-rejected (remoto--api-host forge)))
-       (_ (user-error "Remoto: API error: %s" (error-message-string err)))))
-    (json-error
-     (user-error "Remoto: could not parse API response for %s" endpoint))))
+         (_ (user-error "%s" (remoto--http-error-message
+                              forge endpoint err ghub-response-headers)))))
+      (json-error
+       (user-error "Remoto: could not parse API response for %s" endpoint)))))
 
 (cl-defgeneric remoto--literal-token (_forge)
   "Return the token of FORGE from a user option, or nil."
