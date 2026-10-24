@@ -23,7 +23,30 @@ Sometimes you just want to look at code. Check a function signature, read a READ
 
 * Where
 
-For now it works only with GitHub repos. The core asks a forge for its data through a small set of generic functions, and GitHub answers them in ~remoto-github.el~; support for other forges - gists, Codeberg, GitLab - builds on that.
+GitHub, under ~/github:~ and ~/gh:~, and Codeberg, under ~/codeberg:~ and ~/cb:~. The core asks a forge for its data through a small set of generic functions; GitHub answers them in ~remoto-github.el~, and ~remoto-forgejo.el~ reuses those answers for Forgejo and Gitea servers, Codeberg among them. Support for other forges - gists, GitLab - builds on that.
+
+** Codeberg and other Forgejo servers
+
+Everything below works the same with a Codeberg path:
+
+#+begin_example
+C-x C-f /cb:forgejo/forgejo RET          -> the tree on the default branch
+C-x C-f /cb:forgejo/forgejo@ TAB         -> branches, then tags
+C-x C-f /cb:forgejo/forgejo#14933 RET    -> a pull request, with its reviews
+C-x d   /cb:forgejo/ RET                 -> the repositories of an account
+C-x C-f https://codeberg.org/forgejo/forgejo/src/branch/forgejo/go.mod RET
+#+end_example
+
+Public repositories need no token. For private ones, and for ~/cb:~ alone, which lists your account and organizations, set up a token the way ~ghub~ wants it for Forgejo: name your account in ~git config --global forgejo.user USER~ and store the token in ~auth-source~ under the host ~codeberg.org/api/v1~ with the login ~USER^ghub~ (a ~USER^forge~ token from the Forge package works as well). Without a ~forgejo.user~, remoto reads Codeberg anonymously and says so once.
+
+Other Forgejo or Gitea servers get a prefix each through ~remoto-forgejo-instances~, a list of ~(PREFIX HOST)~ pairs; the token goes under ~HOST/api/v1~:
+
+#+begin_src emacs-lisp
+(setopt remoto-forgejo-instances '(("gitea" "gitea.com")))
+;; C-x C-f /gitea:gitea/tea RET
+#+end_src
+
+The built-in prefixes load remoto on their first use; a prefix from this option exists once remoto is loaded, so turn ~global-remoto-mode~ on in your config to type it at the first prompt of a session.
 
 * How
 ** use-package 
@@ -179,8 +202,9 @@ We can only imagine a world where git's transport layer gives you a browsable fi
 - No git operations (log, blame, diff).
 - Timestamps in a repository's Dired are synthetic (the tree API has no timestamps); a listing of repositories shows their last push.
 - Very large repos (100k+ files) use slower per-directory fetching.
-- Rate limit: 5,000 requests/hour (normal browsing stays well within this).
+- Rate limit: 5,000 requests/hour on GitHub, 2,000 per 10 minutes on Codeberg (normal browsing stays well within this).
 - Per-file commit annotations make up to 20 API calls on first directory listing (cached after).
+- Forgejo serves a repository's tree 1,000 entries a page; a large repository takes a few seconds to open the first time, and one with more than 20,000 files falls back to per-directory fetching.
 
 * Changelog
 

@@ -120,10 +120,13 @@ every source older than an existing output file, so it must not exist."
   (it "finds a repository on a line of an owner listing, and an account above it"
     (let ((remoto--listing-cache (make-hash-table :test 'equal))
           (remoto--default-branch-cache (make-hash-table :test 'equal))
-          (remoto--authenticated-user "me")
+          (remoto--logins (let ((logins (make-hash-table :test 'equal)))
+                            (puthash "api.github.com" (remoto--login-create :user "me")
+                                     logins)
+                            logins))
           (dired-listing-switches "-al"))
       (spy-on 'remoto--api :and-call-fake
-              (lambda (endpoint)
+              (lambda (_forge endpoint)
                 (cond ((string-prefix-p "user/orgs" endpoint)
                        '(((login . "acme") (description . "Acme tools"))))
                       ((string-prefix-p "user/repos" endpoint)

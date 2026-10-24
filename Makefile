@@ -17,7 +17,7 @@ EMACS_SANDBOX = emacs -Q --init-directory $(SANDBOX) \
 E2E_PROFILES = vanilla fido vertico orderless evil embark
 E2E = $(EMACS_BATCH) --directory . -l test/remoto-e2e.el
 
-.PHONY: help test test-embark test-integration test-all deps lint check-autoloads check-compile compile clean sandbox test-e2e test-e2e-update test-e2e-record
+.PHONY: help test test-embark test-integration test-all deps lint check-autoloads check-compile compile clean sandbox test-e2e test-e2e-update test-e2e-record test-fixtures-codeberg
 
 help:
 	@echo "Available commands:"
@@ -28,6 +28,7 @@ help:
 	@echo "  make test-e2e-PROFILE  The same in one profile: $(E2E_PROFILES)"
 	@echo "  make test-e2e-update   Rewrite test/e2e/expected from a run (-j6 too)"
 	@echo "  make test-e2e-record   Record the GitHub answers test/e2e/fixtures.jsonl lacks (needs REMOTO_E2E_TOKEN and network)"
+	@echo "  make test-fixtures-codeberg  Record test/fixtures/codeberg.jsonl from codeberg.org (needs network)"
 	@echo "  make test-integration  Run integration tests (needs network)"
 	@echo "  make test-all          Run all tests"
 	@echo "  make lint              package-lint and checkdoc the package files"
@@ -89,6 +90,10 @@ test-e2e-%: $(ELPA_DIR)
 test-e2e-update:
 	$(MAKE) test-e2e REMOTO_E2E_UPDATE=1
 
+# The answers the Codeberg conformance kit replays, asked of codeberg.org anonymously.
+test-fixtures-codeberg: $(ELPA_DIR)
+	$(EMACS_BATCH) -l test/record-codeberg-fixtures.el -f record-codeberg-fixtures
+
 # One profile at a time: each run adds to the fixtures the next one reads.
 test-e2e-record: $(ELPA_DIR)
 	@test -n "$$REMOTO_E2E_TOKEN" || { echo "REMOTO_E2E_TOKEN must hold a GitHub token"; exit 1; }
@@ -99,11 +104,11 @@ test-e2e-record: $(ELPA_DIR)
 lint: $(ELPA_DIR)
 	$(EMACS_BATCH) --directory . \
 	--eval "(require 'package-lint)" \
-	-f package-lint-batch-and-exit remoto.el remoto-github.el remoto-embark.el remoto-topic.el
+	-f package-lint-batch-and-exit remoto.el remoto-github.el remoto-forgejo.el remoto-embark.el remoto-topic.el
 	$(EMACS_BATCH) \
 	--eval "(require 'checkdoc)" \
 	--eval "(setq checkdoc-verb-check-experimental-flag t)" \
-	--eval "(dolist (f '(\"remoto.el\" \"remoto-github.el\" \"remoto-embark.el\" \"remoto-topic.el\")) \
+	--eval "(dolist (f '(\"remoto.el\" \"remoto-github.el\" \"remoto-forgejo.el\" \"remoto-embark.el\" \"remoto-topic.el\")) \
 	           (with-current-buffer (find-file-noselect f) \
 	             (check-parens) \
 	             (checkdoc-current-buffer t)))" \
@@ -126,9 +131,9 @@ check-compile: $(ELPA_DIR) check-autoloads
 	$(EMACS_BATCH) \
 	--eval "(setq byte-compile-error-on-warn t)" \
 	--eval "(add-to-list 'load-path \".\")" \
-	--eval "(dolist (f '(\"remoto.el\" \"remoto-github.el\" \"remoto-embark.el\" \"remoto-topic.el\")) \
+	--eval "(dolist (f '(\"remoto.el\" \"remoto-github.el\" \"remoto-forgejo.el\" \"remoto-embark.el\" \"remoto-topic.el\")) \
 	           (unless (byte-compile-file f) (kill-emacs 1)))"
-	rm -f remoto.elc remoto-github.elc remoto-embark.elc remoto-topic.elc
+	rm -f remoto.elc remoto-github.elc remoto-forgejo.elc remoto-embark.elc remoto-topic.elc
 
 compile: $(ELPA_DIR)
 	@echo "Byte-compiling package files..."
