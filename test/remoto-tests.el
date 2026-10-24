@@ -18,6 +18,12 @@
 ;; advice and the hooks, so flip the switch the way an init file does.
 (global-remoto-mode 1)
 
+;; A request that gets past the fakes goes to a dead port: a forge that
+;; happens to answer would let a spec pass that no fake covers.  No
+;; auth-source either: the specs of the lookup stub it themselves.
+(setq url-proxy-services '(("http" . "127.0.0.1:9") ("https" . "127.0.0.1:9"))
+      auth-sources nil)
+
 ;;; Helpers
 
 (defvar remoto-test--mock-tree
@@ -41,7 +47,19 @@
   (let ((table (make-hash-table :test 'equal)))
     (dolist (entry remoto-test--mock-tree)
       (puthash (car entry) (cadr entry) table))
-    (puthash "testowner/testrepo@main" table remoto--tree-cache)))
+    (puthash "/github:testowner/testrepo@main" table remoto--tree-cache)))
+
+(defun remoto-test--logins (&rest props)
+  "Return a login table with the same entry, made from PROPS, for every forge.
+PROPS are the slots of `remoto--login': :failed, :token and :user."
+  (let ((table (make-hash-table :test 'equal)))
+    (dolist (forge (seq-uniq (mapcar #'cdr remoto--forges)))
+      (puthash (remoto--api-host forge) (apply #'remoto--login-create props) table))
+    table))
+
+(defun remoto-test--github-login ()
+  "Return the login state of GitHub's API host."
+  (remoto--login "api.github.com"))
 
 (defmacro remoto-test-with-cache (&rest body)
   "Run BODY with a mock tree cache installed."
@@ -56,9 +74,9 @@
          (remoto--file-commits-cache (make-hash-table :test 'equal))
          (remoto--listing-cache (make-hash-table :test 'equal))
          (remoto--entry-cache (make-hash-table :test 'equal))
-         (remoto--auth-failed nil)
-         (remoto--authenticated-user nil))
-     (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
+         (remoto-forgejo--uids (make-hash-table :test 'equal))
+         (remoto--logins (remoto-test--logins)))
+     (puthash "/github:testowner/testrepo" "main" remoto--default-branch-cache)
      (remoto-test--install-mock-tree)
      ,@body))
 
@@ -156,7 +174,7 @@
       (expect (remoto-path-ref p) :to-equal "main")
       (expect (remoto-path-path p) :to-equal "/src/x.el")
       (expect 'remoto--matching-refs :to-have-been-called-times 1)
-      (expect 'remoto--matching-refs :to-have-been-called-with "o" "r" "heads" "main")))
+      (expect 'remoto--matching-refs :to-have-been-called-with remoto--github "o" "r" "heads" "main")))
 
   (it "asks nothing for a tree URL that ends at the ref"
     (spy-on 'remoto--matching-refs)
@@ -177,7 +195,7 @@
 
   (it "falls back to the tags when no branch starts the URL"
     (spy-on 'remoto--matching-refs :and-call-fake
-            (lambda (_owner _repo kind _prefix)
+            (lambda (_forge _owner _repo kind _prefix)
               (and (equal kind "tags") '("v1/beta"))))
     (let ((p (remoto--parse-input "https://github.com/o/r/blob/v1/beta/x.el")))
       (expect (remoto-path-ref p) :to-equal "v1/beta")
@@ -209,7 +227,7 @@
     (let ((p (remoto--parse-input "https://github.com/o/r/blob/feat%2Bx/docs/caf%C3%A9%20au%20lait.md")))
       (expect (list (remoto-path-ref p) (remoto-path-path p))
               :to-equal '("feat+x" "/docs/café au lait.md"))
-      (expect 'remoto--matching-refs :to-have-been-called-with "o" "r" "heads" "feat+x")))
+      (expect 'remoto--matching-refs :to-have-been-called-with remoto--github "o" "r" "heads" "feat+x")))
 
   (it "reads back every blob and tree URL remoto builds"
     (let ((refs nil))
@@ -230,7 +248,7 @@
     (let ((p (remoto--parse-input "https://github.com/o/r/blob/ceaf310/test/x.el")))
       (expect (remoto-path-ref p) :to-equal "ceaf310")
       (expect (remoto-path-path p) :to-equal "/test/x.el")
-      (expect 'remoto--matching-refs :to-have-been-called-with "o" "r" "tags" "ceaf310")))
+      (expect 'remoto--matching-refs :to-have-been-called-with remoto--github "o" "r" "tags" "ceaf310")))
 
   (it "parses git@github.com:owner/repo.git"
     (let ((p (remoto--parse-input "git@github.com:torvalds/linux.git")))
@@ -346,17 +364,17 @@
     (let ((remoto--tree-cache (make-hash-table :test 'equal))
           (remoto--default-branch-cache (make-hash-table :test 'equal))
           (remoto--content-cache (make-hash-table :test 'equal)))
-      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
+      (puthash "/github:testowner/testrepo" "main" remoto--default-branch-cache)
       ;; Simulate a truncated tree with only root and src dir
       (let ((table (make-hash-table :test 'equal)))
         (puthash "" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
         (puthash "/" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
         (puthash "src" '((type . "tree") (size . 0) (sha . "bbb") (mode . "040000")) table)
         (puthash "\0truncated" t table)
-        (puthash "testowner/testrepo@main" table remoto--tree-cache))
+        (puthash "/github:testowner/testrepo@main" table remoto--tree-cache))
       ;; Mock the API call for on-demand fetch
       (spy-on 'remoto--api :and-call-fake
-              (lambda (endpoint)
+              (lambda (_forge endpoint)
                 (cond
                  ((string-match-p "contents/src" endpoint)
                   '(((name . "main.el") (path . "src/main.el")
@@ -376,15 +394,15 @@
     (let ((remoto--tree-cache (make-hash-table :test 'equal))
           (remoto--default-branch-cache (make-hash-table :test 'equal))
           (remoto--content-cache (make-hash-table :test 'equal)))
-      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
+      (puthash "/github:testowner/testrepo" "main" remoto--default-branch-cache)
       (let ((table (make-hash-table :test 'equal)))
         (puthash "" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
         (puthash "/" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
         (puthash "src" '((type . "tree") (size . 0) (sha . "bbb") (mode . "040000")) table)
         (puthash "\0truncated" t table)
-        (puthash "testowner/testrepo@main" table remoto--tree-cache))
+        (puthash "/github:testowner/testrepo@main" table remoto--tree-cache))
       (spy-on 'remoto--api :and-call-fake
-              (lambda (endpoint)
+              (lambda (_forge endpoint)
                 (cond
                  ((string-match-p "contents/src" endpoint)
                   '(((name . "main.el") (path . "src/main.el")
@@ -401,7 +419,7 @@
     (let ((remoto--tree-cache (make-hash-table :test 'equal))
           (remoto--default-branch-cache (make-hash-table :test 'equal))
           (remoto--content-cache (make-hash-table :test 'equal)))
-      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
+      (puthash "/github:testowner/testrepo" "main" remoto--default-branch-cache)
       (let ((table (make-hash-table :test 'equal)))
         (puthash "" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
         (puthash "/" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
@@ -409,7 +427,7 @@
         (puthash "src" '((type . "tree") (size . 0) (sha . "bbb") (mode . "040000")) table)
         (puthash "\0truncated" t table)
         (puthash "\0fetched:" t table)
-        (puthash "testowner/testrepo@main" table remoto--tree-cache))
+        (puthash "/github:testowner/testrepo@main" table remoto--tree-cache))
       (let* ((children (remoto--tree-children
                         (remoto--parse-path "/github:testowner/testrepo@main:/")))
              (names (mapcar #'car children)))
@@ -421,15 +439,15 @@
           (remoto--default-branch-cache (make-hash-table :test 'equal))
           (remoto--content-cache (make-hash-table :test 'equal))
           (api-call-count 0))
-      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
+      (puthash "/github:testowner/testrepo" "main" remoto--default-branch-cache)
       (let ((table (make-hash-table :test 'equal)))
         (puthash "" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
         (puthash "/" '((type . "tree") (size . 0) (sha . "") (mode . "040000")) table)
         (puthash "src" '((type . "tree") (size . 0) (sha . "bbb") (mode . "040000")) table)
         (puthash "\0truncated" t table)
-        (puthash "testowner/testrepo@main" table remoto--tree-cache))
+        (puthash "/github:testowner/testrepo@main" table remoto--tree-cache))
       (spy-on 'remoto--api :and-call-fake
-              (lambda (endpoint)
+              (lambda (_forge endpoint)
                 (when (string-match-p "contents/src" endpoint)
                   (setq api-call-count (1+ api-call-count))
                   '(((name . "main.el") (path . "src/main.el")
@@ -646,7 +664,7 @@
     ;; with `buffer-file-coding-system', so the bytes must round-trip.
     (remoto-test-with-cache
       (puthash "logo.png" '((type . "blob") (size . 31) (sha . "ggg") (mode . "100644"))
-               (gethash "testowner/testrepo@main" remoto--tree-cache))
+               (gethash "/github:testowner/testrepo@main" remoto--tree-cache))
       (spy-on 'remoto--fetch-file-content :and-return-value remoto-test--png-bytes)
       (with-temp-buffer
         (let* ((result (insert-file-contents "/github:testowner/testrepo@main:/logo.png" t))
@@ -1428,26 +1446,26 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
               ((name . "develop") (commit . ((sha . "def"))))
               ((name . "feature/x") (commit . ((sha . "ghi"))))))
     (let ((remoto--branches-cache (make-hash-table :test 'equal)))
-      (expect (remoto--fetch-branches "torvalds" "linux")
+      (expect (remoto--fetch-branches remoto--github "torvalds" "linux")
               :to-equal '("main" "develop" "feature/x"))))
 
   (it "caches results"
     (let ((remoto--branches-cache (make-hash-table :test 'equal))
           (call-count 0))
       (spy-on 'remoto--api :and-call-fake
-              (lambda (_endpoint)
+              (lambda (_forge _endpoint)
                 (setq call-count (1+ call-count))
                 '(((name . "main")))))
-      (remoto--fetch-branches "torvalds" "linux")
-      (remoto--fetch-branches "torvalds" "linux")
+      (remoto--fetch-branches remoto--github "torvalds" "linux")
+      (remoto--fetch-branches remoto--github "torvalds" "linux")
       (expect call-count :to-equal 1)))
 
   (it "returns nil on API errors"
     (spy-on 'remoto--api :and-call-fake
-            (lambda (_endpoint)
+            (lambda (_forge _endpoint)
               (user-error "not found")))
     (let ((remoto--branches-cache (make-hash-table :test 'equal)))
-      (expect (remoto--fetch-branches "no" "repo") :to-be nil))))
+      (expect (remoto--fetch-branches remoto--github "no" "repo") :to-be nil))))
 
 (describe "remoto--search-repos"
   (it "returns nil for short queries"
@@ -1462,7 +1480,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
   (it "populates cache via async callback"
     (spy-on 'remoto--debounce :and-call-fake (lambda (_key fn) (funcall fn)))
     (spy-on 'remoto--api-async :and-call-fake
-            (lambda (_endpoint callback)
+            (lambda (_forge _endpoint callback)
               (funcall callback '((items . (((full_name . "torvalds/linux"))
                                             ((full_name . "torvalds/subsurface"))))))))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
@@ -1487,13 +1505,13 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
     (expect (remoto--search-repos "agzam/space")
             :to-equal '("agzam/spacehammer" "agzam/spaceship"))
     (expect 'remoto--search-owner-repos
-            :to-have-been-called-with "agzam" "space"))
+            :to-have-been-called-with remoto--github "agzam" "space"))
 
   (it "delegates an owner/ query (no repo part) to recent-owner-repos"
     (spy-on 'remoto--recent-owner-repos :and-return-value '("dotfiles"))
     (expect (remoto--search-repos "agzam/")
             :to-equal '("agzam/dotfiles"))
-    (expect 'remoto--recent-owner-repos :to-have-been-called-with "agzam"))
+    (expect 'remoto--recent-owner-repos :to-have-been-called-with remoto--github "agzam"))
 
   (it "performs the precise owner search even when a capped parent is cached"
     ;; Regression: a cached owner/ listing (user:owner, capped at the page
@@ -1510,7 +1528,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
               :to-equal '("qlik-trial/stitch-environments"
                           "qlik-trial/stitch-agent-service"))
       (expect 'remoto--search-owner-repos
-              :to-have-been-called-with "qlik-trial" "stitch-")))
+              :to-have-been-called-with remoto--github "qlik-trial" "stitch-")))
 
   (it "schedules async for non-narrowable cache miss"
     (spy-on 'remoto--debounce)
@@ -1537,7 +1555,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
   (it "caches empty results without re-scheduling async"
     (spy-on 'remoto--debounce :and-call-fake (lambda (_key fn) (funcall fn)))
     (spy-on 'remoto--api-async :and-call-fake
-            (lambda (_endpoint callback)
+            (lambda (_forge _endpoint callback)
               (funcall callback '((items)))))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
       ;; First call: async populates cache with nil results
@@ -1789,7 +1807,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
   (it "opens dired for plain owner/repo"
     (let ((remoto--default-branch-cache (make-hash-table :test 'equal))
           (remoto--tree-cache (make-hash-table :test 'equal)))
-      (puthash "torvalds/linux" "master" remoto--default-branch-cache)
+      (puthash "/github:torvalds/linux" "master" remoto--default-branch-cache)
       (spy-on 'remoto--fetch-tree :and-return-value (make-hash-table :test 'equal))
       (spy-on 'dired)
       (spy-on 'remoto--tree-entry :and-return-value '((type . "tree")))
@@ -1804,7 +1822,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
 
   (it "opens dired for owner/repo/ files mode"
     (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
-      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
+      (puthash "/github:testowner/testrepo" "main" remoto--default-branch-cache)
       (spy-on 'dired)
       (spy-on 'remoto--tree-entry :and-return-value '((type . "tree")))
       (remoto-browse "testowner/testrepo/")
@@ -1812,7 +1830,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
 
   (it "opens file for owner/repo/path/file.el"
     (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
-      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
+      (puthash "/github:testowner/testrepo" "main" remoto--default-branch-cache)
       (spy-on 'find-file)
       (spy-on 'remoto--tree-entry :and-return-value '((type . "blob")))
       (remoto-browse "testowner/testrepo/src/main.el")
@@ -1865,31 +1883,31 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
 
 (describe "remoto--api auth fallback"
   (it "falls back to unauthenticated when auth times out but does not cache failure"
-    (let ((remoto--auth-failed nil)
+    (let ((remoto--logins (remoto-test--logins :failed nil))
           (remoto-github-auth nil)
           (remoto-auth-timeout 0.3))
+      (spy-on 'remoto--find-token :and-return-value nil)
       (spy-on 'ghub-get :and-call-fake
               (lambda (_resource &optional _params &rest args)
                 (if (eq (plist-get args :auth) 'none)
                     '((name . "test-repo"))
                   (sleep-for 5))))
-      (expect (remoto--api "repos/owner/repo") :to-equal '((name . "test-repo")))
-      (expect remoto--auth-failed :to-be nil)))
+      (expect (remoto--api remoto--github "repos/owner/repo") :to-equal '((name . "test-repo")))
+      (expect (remoto--login-failed (remoto-test--github-login)) :to-be nil)))
 
     (it "signals user-error on auth error instead of silent fallback"
-      (let ((remoto--auth-failed nil)
-            (remoto--effective-auth nil)
+      (let ((remoto--logins (remoto-test--logins :failed nil :token nil))
             (remoto-github-auth nil)
             (remoto-auth-timeout 5))
         (spy-on 'ghub-get :and-call-fake
                 (lambda (_resource &optional _params &rest _args)
                   (error "Package ghub requires a Github API token")))
-        (spy-on 'remoto--find-github-token :and-return-value nil)
-        (expect (remoto--api "repos/owner/repo")
+        (spy-on 'remoto--find-token :and-return-value nil)
+        (expect (remoto--api remoto--github "repos/owner/repo")
                 :to-throw 'user-error)))
 
   (it "skips auth when failure is cached"
-    (let ((remoto--auth-failed t)
+    (let ((remoto--logins (remoto-test--logins :failed t))
           (remoto-github-auth nil)
           (remoto-auth-timeout 5)
           (auth-used nil))
@@ -1897,38 +1915,38 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
               (lambda (_resource &optional _params &rest args)
                 (push (plist-get args :auth) auth-used)
                 '((name . "test-repo"))))
-      (remoto--api "repos/owner/repo")
+      (remoto--api remoto--github "repos/owner/repo")
       (expect auth-used :to-equal '(none))))
 
   (it "clears cache with remoto-reset-auth"
-    (let ((remoto--auth-failed t))
+    (let ((remoto--logins (remoto-test--logins :failed t)))
       (remoto-reset-auth)
-      (expect remoto--auth-failed :to-be nil)))
+      (expect (remoto--login-failed (remoto-test--github-login)) :to-be nil)))
 
   (it "goes unauthenticated on the same call when the token lookup itself fails"
-    (let ((remoto--auth-failed nil)
-          (remoto--effective-auth nil)
+    (let ((remoto--logins (remoto-test--logins :failed nil :token nil))
           (remoto-github-auth nil)
           (remoto-auth-timeout 5)
           (auth-used nil))
-      (spy-on 'remoto--find-github-token :and-call-fake
-              (lambda () (setq remoto--auth-failed t) nil))
+      (spy-on 'remoto--find-token :and-call-fake
+              (lambda (_forge) (setf (remoto--login-failed (remoto-test--github-login)) t) nil))
       (spy-on 'ghub-get :and-call-fake
               (lambda (_resource &optional _params &rest args)
                 (push (plist-get args :auth) auth-used)
                 '((name . "test-repo"))))
-      (expect (remoto--api "repos/owner/repo") :to-equal '((name . "test-repo")))
+      (expect (remoto--api remoto--github "repos/owner/repo") :to-equal '((name . "test-repo")))
       (expect auth-used :to-equal '(none))))
 
   (it "does not cache failure when auth succeeds"
-    (let ((remoto--auth-failed nil)
+    (let ((remoto--logins (remoto-test--logins :failed nil))
           (remoto-github-auth nil)
           (remoto-auth-timeout 5))
+      (spy-on 'remoto--find-token :and-return-value nil)
       (spy-on 'ghub-get :and-call-fake
               (lambda (_resource &optional _params &rest _args)
                 '((name . "test-repo"))))
-      (remoto--api "repos/owner/repo")
-      (expect remoto--auth-failed :to-be nil))))
+      (remoto--api remoto--github "repos/owner/repo")
+      (expect (remoto--login-failed (remoto-test--github-login)) :to-be nil))))
 
 (describe "remoto--ghub-get message suppression"
   (it "suppresses messages when ghub-debug is nil"
@@ -1938,7 +1956,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
               (lambda (_resource &optional _params &rest _args)
                 (setq captured-inhibit inhibit-message)
                 '((result . t))))
-      (remoto--ghub-get "/repos/owner/repo" 'none "repos/owner/repo")
+      (remoto--ghub-get remoto--github "/repos/owner/repo" 'none "repos/owner/repo")
       (expect captured-inhibit :to-be t)))
 
   (it "allows messages when ghub-debug is t"
@@ -1948,7 +1966,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
               (lambda (_resource &optional _params &rest _args)
                 (setq captured-inhibit inhibit-message)
                 '((result . t))))
-      (remoto--ghub-get "/repos/owner/repo" 'none "repos/owner/repo")
+      (remoto--ghub-get remoto--github "/repos/owner/repo" 'none "repos/owner/repo")
       (expect captured-inhibit :to-be nil))))
 
 (describe "remoto--json-reader"
@@ -1978,14 +1996,14 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
     (spy-on 'ghub-get :and-call-fake
             (lambda (_resource &optional _params &rest _args)
               (signal 'json-parse-error '("unexpected character"))))
-    (expect (remoto--ghub-get "/repos/owner/repo" 'none "repos/owner/repo")
+    (expect (remoto--ghub-get remoto--github "/repos/owner/repo" 'none "repos/owner/repo")
             :to-throw 'user-error))
 
   (it "translates json-end-of-file to user-error"
     (spy-on 'ghub-get :and-call-fake
             (lambda (_resource &optional _params &rest _args)
               (signal 'json-end-of-file '("premature end"))))
-    (expect (remoto--ghub-get "/repos/owner/repo" 'none "repos/owner/repo")
+    (expect (remoto--ghub-get remoto--github "/repos/owner/repo" 'none "repos/owner/repo")
             :to-throw 'user-error)))
 
 (defun remoto-test--ghub-fails-with (code)
@@ -1998,7 +2016,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
 (defun remoto-test--ghub-get-message ()
   "The `user-error' text `remoto--ghub-get' produces for repos/o/r."
   (condition-case err
-      (remoto--ghub-get "/repos/o/r" 'none "repos/o/r")
+      (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r")
     (user-error (error-message-string err))))
 
 (describe "remoto--ghub-get HTTP status messages"
@@ -2056,7 +2074,7 @@ The test delivers the reply through `remoto-test--reply' when it decides."
               (lambda (_resource _params &rest args)
                 (setq callback (plist-get args :callback))
                 '((name . "main"))))
-      (expect (remoto--ghub-get "/repos/o/r" 'none "repos/o/r")
+      (expect (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r")
               :to-equal '((name . "main")))
       (expect callback :to-be nil)))
 
@@ -2064,7 +2082,7 @@ The test delivers the reply through `remoto-test--reply' when it decides."
     (let ((throw-on-input 'remoto-test-input))
       (remoto-test--ghub-answers-later)
       (run-at-time 0.01 nil (lambda () (funcall (car remoto-test--reply) '((name . "main")))))
-      (expect (remoto--ghub-get "/repos/o/r" 'none "repos/o/r")
+      (expect (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r")
               :to-equal '((name . "main")))
       (expect (hash-table-count remoto--pending-requests) :to-equal 0)))
 
@@ -2074,10 +2092,10 @@ The test delivers the reply through `remoto-test--reply' when it decides."
       ;; A timer plays the keystroke that makes `while-no-input' throw.
       (expect (catch 'remoto-test-input
                 (run-at-time 0.01 nil (lambda () (throw 'remoto-test-input 'typed)))
-                (remoto--ghub-get "/repos/o/r" 'none "repos/o/r"))
+                (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r"))
               :to-be 'typed)
       (funcall (car remoto-test--reply) '((name . "main")))
-      (expect (remoto--ghub-get "/repos/o/r" 'none "repos/o/r")
+      (expect (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r")
               :to-equal '((name . "main")))
       (expect 'ghub-get :to-have-been-called-times 1)
       (expect (hash-table-count remoto--pending-requests) :to-equal 0)))
@@ -2087,9 +2105,9 @@ The test delivers the reply through `remoto-test--reply' when it decides."
       (remoto-test--ghub-answers-later)
       (catch 'remoto-test-input
         (run-at-time 0.01 nil (lambda () (throw 'remoto-test-input 'typed)))
-        (remoto--ghub-get "/repos/o/r" 'none "repos/o/r"))
+        (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r"))
       (run-at-time 0.01 nil (lambda () (funcall (car remoto-test--reply) '((name . "main")))))
-      (expect (remoto--ghub-get "/repos/o/r" 'none "repos/o/r")
+      (expect (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r")
               :to-equal '((name . "main")))
       (expect 'ghub-get :to-have-been-called-times 1)))
 
@@ -2098,9 +2116,9 @@ The test delivers the reply through `remoto-test--reply' when it decides."
       (remoto-test--ghub-answers-later)
       (catch 'remoto-test-input
         (run-at-time 0.01 nil (lambda () (throw 'remoto-test-input 'typed)))
-        (remoto--ghub-get "/repos/o/r" 'none "repos/o/r"))
+        (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r"))
       (run-at-time 0.01 nil (lambda () (funcall (car remoto-test--reply) '((name . "private")))))
-      (expect (remoto--ghub-get "/repos/o/r" "ghp_token" "repos/o/r")
+      (expect (remoto--ghub-get remoto--github "/repos/o/r" "ghp_token" "repos/o/r")
               :to-equal '((name . "private")))
       (expect 'ghub-get :to-have-been-called-times 2)))
 
@@ -2112,7 +2130,7 @@ The test delivers the reply through `remoto-test--reply' when it decides."
       (remoto-test--ghub-answers-later)
       (catch 'remoto-test-input
         (run-at-time 0.01 nil (lambda () (throw 'remoto-test-input 'typed)))
-        (remoto--ghub-get "/repos/o/r" token "repos/o/r"))
+        (remoto--ghub-get remoto--github "/repos/o/r" token "repos/o/r"))
       (expect (hash-table-count remoto--pending-requests) :to-equal 1)
       (expect (seq-find (lambda (key) (string-search token (format "%S" key)))
                         (hash-table-keys remoto--pending-requests))
@@ -2134,10 +2152,10 @@ The test delivers the reply through `remoto-test--reply' when it decides."
               (lambda (&rest _)
                 (setq buffer (generate-new-buffer " *remoto-test-http*"))))
       (run-at-time 0.01 nil (lambda () (kill-buffer buffer)))
-      (expect (remoto--ghub-get "/repos/o/r" 'none "repos/o/r") :to-throw 'error)
+      (expect (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r") :to-throw 'error)
       (expect (hash-table-count remoto--pending-requests) :to-equal 0))))
 
-(describe "remoto--find-github-token"
+(describe "remoto--find-token"
   (it "finds token at api.github.com with ^forge suffix"
     (spy-on 'ghub--username :and-return-value "testuser")
     (spy-on 'auth-source-search :and-call-fake
@@ -2147,25 +2165,25 @@ The test delivers the reply through `remoto-test--reply' when it decides."
                 (when (and (equal host "api.github.com")
                            (equal user "testuser^forge"))
                   (list (list :secret "ghp_found_token"))))))
-    (expect (remoto--find-github-token) :to-equal "ghp_found_token"))
+    (expect (remoto--find-token remoto--github) :to-equal "ghp_found_token"))
 
   (it "returns nil when no token found anywhere"
     (spy-on 'ghub--username :and-return-value "testuser")
     (spy-on 'auth-source-search :and-return-value nil)
-    (expect (remoto--find-github-token) :to-be nil))
+    (expect (remoto--find-token remoto--github) :to-be nil))
 
   (it "returns nil when username cannot be determined"
     (spy-on 'ghub--username :and-call-fake
             (lambda (&rest _) (error "Cannot determine username")))
-    (expect (remoto--find-github-token) :to-be nil))
+    (expect (remoto--find-token remoto--github) :to-be nil))
 
   (it "reports a failing auth-source backend once, stops, and marks auth failed"
-    (let ((remoto--auth-failed nil))
+    (let ((remoto--logins (remoto-test--logins :failed nil)))
       (spy-on 'ghub--username :and-return-value "testuser")
       (spy-on 'auth-source-search :and-call-fake
               (lambda (&rest _) (error "Decryption failed")))
       (spy-on 'message)
-      (expect (remoto--find-github-token) :to-be nil)
+      (expect (remoto--find-token remoto--github) :to-be nil)
       (expect 'auth-source-search :to-have-been-called-times 1)
       (expect 'message :to-have-been-called-times 1)
       (expect (apply #'format (spy-calls-args-for 'message 0))
@@ -2173,82 +2191,70 @@ The test delivers the reply through `remoto-test--reply' when it decides."
 using unauthenticated access until M-x remoto-reset-auth")
       ;; Every API call retries the lookup while this is nil, and each
       ;; retry would repeat the message.
-      (expect remoto--auth-failed :to-be t))))
+      (expect (remoto--login-failed (remoto-test--github-login)) :to-be t))))
 
 (describe "remoto--warm-auth"
   (it "caches authenticated user and token on success"
-    (let ((remoto--authenticated-user nil)
-          (remoto--auth-failed nil)
-          (remoto--effective-auth nil))
-      (spy-on 'remoto--find-github-token :and-return-value "ghp_fake_token")
+    (let ((remoto--logins (remoto-test--logins :user nil :failed nil :token nil)))
+      (spy-on 'remoto--find-token :and-return-value "ghp_fake_token")
       (spy-on 'ghub-get :and-return-value '((login . "agzam")))
       (spy-on 'message)
       (remoto--warm-auth)
-      (expect remoto--authenticated-user :to-equal "agzam")
-      (expect remoto--effective-auth :to-equal "ghp_fake_token")
-      (expect remoto--auth-failed :to-be nil)))
+      (expect (remoto--login-user (remoto-test--github-login)) :to-equal "agzam")
+      (expect (remoto--login-token (remoto-test--github-login)) :to-equal "ghp_fake_token")
+      (expect (remoto--login-failed (remoto-test--github-login)) :to-be nil)))
 
   (it "does not set auth-failed when no token found"
-    (let ((remoto--authenticated-user nil)
-          (remoto--auth-failed nil)
-          (remoto--effective-auth nil)
+    (let ((remoto--logins (remoto-test--logins :user nil :failed nil :token nil))
           (remoto-github-auth nil))
-      (spy-on 'remoto--find-github-token :and-return-value nil)
+      (spy-on 'remoto--find-token :and-return-value nil)
       (spy-on 'message)
       (remoto--warm-auth)
       ;; warm-auth is opportunistic; missing token should NOT lock out
       ;; auth permanently - remoto--api will try ghub's own resolution.
-      (expect remoto--auth-failed :to-be nil)
-      (expect remoto--authenticated-user :to-be nil)))
+      (expect (remoto--login-failed (remoto-test--github-login)) :to-be nil)
+      (expect (remoto--login-user (remoto-test--github-login)) :to-be nil)))
 
   (it "adds no message of its own after the lookup reported a backend failure"
-    (let ((remoto--authenticated-user nil)
-          (remoto--auth-failed nil)
-          (remoto--effective-auth nil)
+    (let ((remoto--logins (remoto-test--logins :user nil :failed nil :token nil))
           (remoto-github-auth nil))
-      (spy-on 'remoto--find-github-token :and-call-fake
-              (lambda () (setq remoto--auth-failed t) nil))
+      (spy-on 'remoto--find-token :and-call-fake
+              (lambda (_forge) (setf (remoto--login-failed (remoto-test--github-login)) t) nil))
       (spy-on 'message)
       (remoto--warm-auth)
       (expect 'message :not :to-have-been-called)))
 
   (it "sets auth-failed when API call fails with found token"
-    (let ((remoto--authenticated-user nil)
-          (remoto--auth-failed nil)
-          (remoto--effective-auth nil))
-      (spy-on 'remoto--find-github-token :and-return-value "ghp_bad_token")
+    (let ((remoto--logins (remoto-test--logins :user nil :failed nil :token nil)))
+      (spy-on 'remoto--find-token :and-return-value "ghp_bad_token")
       (spy-on 'ghub-get :and-call-fake
               (lambda (_resource &optional _params &rest _args)
                 (error "401 Unauthorized")))
       (spy-on 'message)
       (remoto--warm-auth)
-      (expect remoto--auth-failed :to-be-truthy)
-      (expect remoto--effective-auth :to-be nil)))
+      (expect (remoto--login-failed (remoto-test--github-login)) :to-be-truthy)
+      (expect (remoto--login-token (remoto-test--github-login)) :to-be nil)))
 
   (it "skips when user already cached"
-    (let ((remoto--authenticated-user "agzam")
-          (remoto--auth-failed nil))
-      (spy-on 'remoto--find-github-token)
+    (let ((remoto--logins (remoto-test--logins :user "agzam" :failed nil)))
+      (spy-on 'remoto--find-token)
       (remoto--warm-auth)
-      (expect 'remoto--find-github-token :not :to-have-been-called)))
+      (expect 'remoto--find-token :not :to-have-been-called)))
 
   (it "skips when auth already failed"
-    (let ((remoto--authenticated-user nil)
-          (remoto--auth-failed t))
-      (spy-on 'remoto--find-github-token)
+    (let ((remoto--logins (remoto-test--logins :user nil :failed t)))
+      (spy-on 'remoto--find-token)
       (remoto--warm-auth)
-      (expect 'remoto--find-github-token :not :to-have-been-called)))
+      (expect 'remoto--find-token :not :to-have-been-called)))
 
   (it "uses literal remoto-github-auth string directly"
-    (let ((remoto--authenticated-user nil)
-          (remoto--auth-failed nil)
-          (remoto--effective-auth nil)
+    (let ((remoto--logins (remoto-test--logins :user nil :failed nil :token nil))
           (remoto-github-auth "ghp_explicit_token"))
-      (spy-on 'remoto--find-github-token)
+      (spy-on 'remoto--find-token)
       (spy-on 'ghub-get :and-return-value '((login . "agzam")))
       (remoto--warm-auth)
-      (expect 'remoto--find-github-token :not :to-have-been-called)
-      (expect remoto--effective-auth :to-equal "ghp_explicit_token"))))
+      (expect 'remoto--find-token :not :to-have-been-called)
+      (expect (remoto--login-token (remoto-test--github-login)) :to-equal "ghp_explicit_token"))))
 
 ;;; Partial path parsing
 
@@ -2383,8 +2389,9 @@ using unauthenticated access until M-x remoto-reset-auth")
         (expect (file-remote-p "/fake:o/r@v1:/a" 'method) :to-equal "fake")
         (expect (file-remote-p "/fake:o" 'host) :to-equal nil))))
 
-  (it "keeps the GitHub prefixes in the spelling of the autoload cookie"
-    (expect remoto--handler-regexp :to-equal "\\`/\\(?:github\\|gh\\):")))
+  (it "names the prefixes of the built-in forges in the spelling of the cookies"
+    (expect remoto--handler-regexp
+            :to-equal "\\`/\\(?:github\\|gh\\|codeberg\\|cb\\):")))
 
 (describe "the forge contract"
   :var ((fake (remoto-forge-create :name 'fake :prefixes '("fake") :delimiters '(?@))))
@@ -2410,6 +2417,10 @@ using unauthenticated access until M-x remoto-reset-auth")
 
   (it "lists children from the tree where a forge has no cheaper answer"
     (remoto-test-with-cache
+      ;; The tree cache is keyed by forge: the fake forge's tree is its own.
+      (puthash "/fake:testowner/testrepo@main"
+               (gethash "/github:testowner/testrepo@main" remoto--tree-cache)
+               remoto--tree-cache)
       (expect (mapcar #'car (remoto-forge-children fake "testowner" "testrepo"
                                                    "main" "src"))
               :to-equal '("main.el" "utils.el"))))
@@ -2421,7 +2432,7 @@ using unauthenticated access until M-x remoto-reset-auth")
     (expect (remoto-forge-branches remoto--github "o" "r") :to-equal '("main"))
     (expect (remoto-forge-topic remoto--github "o" "r" "1") :to-equal '((number . 1)))
     (expect (remoto-forge-commit-sha remoto--github "o" "r" "main") :to-equal "abc")
-    (expect 'remoto--fetch-branches :to-have-been-called-with "o" "r"))
+    (expect 'remoto--fetch-branches :to-have-been-called-with remoto--github "o" "r"))
 
   (it "routes a URL to the forge that recognizes it"
     (expect (remoto--url-forge "https://github.com/o/r") :to-be remoto--github)
@@ -2471,7 +2482,388 @@ using unauthenticated access until M-x remoto-reset-auth")
     (expect (remoto--repo-root (remoto--parse "/github:a/b@main:/src")) :to-be nil)
     (expect (remoto--repo-root (remoto--parse "/github:agzam/spacehammer#193")) :to-be nil)
     (expect (remoto--repo-root (remoto--parse "/github:")) :to-be nil)
-    (expect (remoto--repo-root (remoto--parse "/github:a/b@")) :to-be nil)))
+    (expect (remoto--repo-root (remoto--parse "/github:a/b@")) :to-be nil))
+
+  (it "keeps the forge of the name it was made from"
+    (expect (remoto-forge-name
+             (remoto-path-forge (remoto--repo-root (remoto--parse "/codeberg:o/r"))))
+            :to-be 'codeberg)
+    (expect (remoto-forge-name
+             (remoto-path-forge (remoto--repo-root (remoto--parse "/codeberg:o/r@v1"))))
+            :to-be 'codeberg)))
+
+;;; The transport and the login, per forge and host
+
+(describe "remoto--api per forge"
+  (it "sends a request to the API host of the forge, in ghub's spelling"
+    (let ((remoto--logins (remoto-test--logins :failed t))
+          (calls nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (resource &optional _params &rest args)
+                (push (list resource (plist-get args :host) (plist-get args :forge))
+                      calls)
+                '((ok . t))))
+      (remoto--api remoto--github "repos/o/r")
+      (remoto--api remoto--codeberg "repos/o/r")
+      (expect (nreverse calls)
+              :to-equal '(("/repos/o/r" "api.github.com" nil)
+                          ("/repos/o/r" "codeberg.org/api/v1" forgejo)))))
+
+  (it "keeps the login state of each host apart"
+    (let ((remoto--logins (remoto-test--logins))
+          (auths nil))
+      (setf (remoto--login-failed (remoto--login "codeberg.org/api/v1")) t
+            (remoto--login-token (remoto--login "api.github.com")) "ghp_x"
+            (remoto--login-user (remoto--login "api.github.com")) "me")
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (push (plist-get args :auth) auths)
+                '((ok . t))))
+      (remoto--api remoto--codeberg "repos/o/r")
+      (remoto--api remoto--github "repos/o/r")
+      (expect (nreverse auths) :to-equal '(none "ghp_x"))))
+
+  (it "keeps pending requests of two hosts apart"
+    (let ((remoto--pending-requests (make-hash-table :test 'equal))
+          (started nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (push (list (plist-get args :host) (plist-get args :forge)) started)
+                (generate-new-buffer " *fake request*")))
+      (dolist (forge (list remoto--github remoto--codeberg))
+        (let ((key (list (remoto--api-host forge) "/repos/o/r" 'none)))
+          (remoto--request-start key forge "/repos/o/r" 'none)))
+      (expect (sort started (lambda (a b) (string< (car a) (car b))))
+              :to-equal '(("api.github.com" nil) ("codeberg.org/api/v1" forgejo)))
+      (expect (sort (hash-table-keys remoto--pending-requests)
+                    (lambda (a b) (string< (car a) (car b))))
+              :to-equal '(("api.github.com" "/repos/o/r" none)
+                          ("codeberg.org/api/v1" "/repos/o/r" none)))
+      (maphash (lambda (_key req) (kill-buffer (remoto--request-buffer req)))
+               remoto--pending-requests)))
+
+  (it "names the host of the forge when every auth avenue fails"
+    (let ((remoto--logins (remoto-test--logins))
+          (remoto-github-auth nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (&rest _) (error "Required Forgejo token does not exist")))
+      (spy-on 'remoto--find-token :and-return-value nil)
+      (expect (remoto--api remoto--codeberg "repos/o/r")
+              :to-throw 'user-error)
+      (expect (remoto--login-failed (remoto--login "codeberg.org/api/v1")) :to-be t)
+      (expect (remoto--login-failed (remoto-test--github-login)) :to-be nil))))
+
+(describe "remoto--find-token per forge"
+  (it "searches the API host and the web host of the forge, as ghub stores tokens"
+    (let ((remoto--logins (remoto-test--logins))
+          (searched nil))
+      (spy-on 'ghub--username :and-return-value "me")
+      (spy-on 'auth-source-search :and-call-fake
+              (lambda (&rest args)
+                (push (cons (plist-get args :host) (plist-get args :user)) searched)
+                nil))
+      (expect (remoto--find-token remoto--codeberg) :to-be nil)
+      (expect 'ghub--username :to-have-been-called-with "codeberg.org" 'forgejo)
+      (expect (seq-uniq (mapcar #'car (reverse searched)))
+              :to-equal '("codeberg.org/api/v1" "codeberg.org"))
+      (expect (mapcar #'cdr (seq-take (reverse searched) 3))
+              :to-equal '("me^forge" "me^ghub" "me"))
+      (expect (remoto--login-failed (remoto--login "codeberg.org/api/v1")) :to-be nil)))
+
+  (it "goes anonymous for good when git config names no account for the forge"
+    (let ((remoto--logins (remoto-test--logins)))
+      (spy-on 'ghub--username :and-call-fake
+              (lambda (&rest _) (error "Cannot determine username")))
+      (spy-on 'auth-source-search)
+      (spy-on 'message)
+      (expect (remoto--find-token remoto--codeberg) :to-be nil)
+      (expect 'auth-source-search :not :to-have-been-called)
+      (expect (remoto--login-failed (remoto--login "codeberg.org/api/v1")) :to-be t)
+      (expect (remoto--login-failed (remoto-test--github-login)) :to-be nil)
+      (expect 'message :to-have-been-called-with
+              "Remoto: no %s.user in git config, reading %s anonymously"
+              'forgejo "codeberg.org"))))
+
+(describe "caches keyed by forge"
+  (it "keeps the trees and default branches of two forges apart"
+    (remoto-test-with-cache
+      (puthash "/codeberg:testowner/testrepo" "forgejo" remoto--default-branch-cache)
+      (expect (remoto--maybe-rewrite "/github:testowner/testrepo/")
+              :to-equal "/github:testowner/testrepo@main:/")
+      (expect (remoto--maybe-rewrite "/codeberg:testowner/testrepo/")
+              :to-equal "/codeberg:testowner/testrepo@forgejo:/")
+      (expect (remoto--repo-key (remoto--parse-path "/codeberg:o/r@main:/"))
+              :to-equal "/codeberg:o/r@main")
+      (expect (file-exists-p "/github:testowner/testrepo@main:/README.md") :to-be t)
+      (spy-on 'remoto-forge-tree :and-call-fake
+              (lambda (&rest _) (signal 'remoto-unsupported '(codeberg tree))))
+      ;; GitHub's cached tree answers for nothing else.
+      (expect (ignore-errors (file-exists-p "/codeberg:testowner/testrepo@main:/README.md"))
+              :to-be nil)
+      (expect 'remoto-forge-tree :to-have-been-called)))
+
+  (it "remembers a listed repository under the prefix of its forge"
+    (remoto-test-with-cache
+      (remoto--remember-repo "/codeberg:" "o/r" '((name . "r") (default_branch . "dev")))
+      (expect (gethash "/codeberg:o/r" remoto--default-branch-cache) :to-equal "dev")
+      (expect (gethash "o/r" remoto--default-branch-cache) :to-be nil))))
+
+;;; The Forgejo forge
+
+(describe "the Forgejo forge"
+  (it "is registered for Codeberg under /codeberg: and /cb:"
+    (expect (remoto-forge-name (cdr (remoto--prefix-of "/cb:o/r"))) :to-be 'codeberg)
+    (expect (remoto--prefix remoto--codeberg) :to-equal "/codeberg:")
+    (expect (remoto-forgejo-p remoto--codeberg) :to-be t)
+    (expect (remoto-github-p remoto--codeberg) :to-be t)
+    (expect (remoto--api-host remoto--codeberg) :to-equal "codeberg.org/api/v1")
+    (expect (remoto--ghub-forge remoto--codeberg) :to-be 'forgejo))
+
+  (it "spells pages and page sizes Forgejo's way"
+    (expect (remoto--page-params remoto--codeberg 30) :to-equal "limit=30")
+    (expect (remoto--page-params remoto--codeberg 50 2) :to-equal "limit=50&page=2")
+    (expect (remoto--page-size remoto--codeberg) :to-equal 50)
+    (expect (remoto--page-params remoto--github 100 2) :to-equal "per_page=100&page=2"))
+
+  (it "pages branches and tags by 50 and stops at a short page"
+    (remoto-test-with-cache
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_forge endpoint)
+                (pcase endpoint
+                  ("repos/o/r/branches?limit=50&page=1"
+                   (cl-loop for i from 1 to 50 collect `((name . ,(format "b%d" i)))))
+                  ("repos/o/r/branches?limit=50&page=2" '(((name . "last"))))
+                  (_ (error "Unexpected %s" endpoint)))))
+      (let ((branches (remoto-forge-branches remoto--codeberg "o" "r")))
+        (expect (length branches) :to-equal 51)
+        (expect (car (last branches)) :to-equal "last"))))
+
+  (it "searches accounts and repositories at Forgejo's endpoints, by the owner's id"
+    (remoto-test-with-cache
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_forge endpoint)
+                (pcase endpoint
+                  ("users/forgejo" '((id . 70422)))
+                  ("users/search?q=forge&limit=50"
+                   '((ok . t) (data . (((login . "forgejo-bot"))))))
+                  ("repos/search?q=doc&uid=70422&exclusive=true&limit=50"
+                   '((ok . t) (data . (((name . "docs") (full_name . "forgejo/docs")
+                                        (default_branch . "next"))))))
+                  ("repos/search?uid=70422&exclusive=true&sort=updated&order=desc&limit=30"
+                   '((ok . t) (data . (((name . "website") (full_name . "forgejo/website"))))))
+                  (_ (error "Unexpected %s" endpoint)))))
+      (expect (remoto-forge-search-accounts remoto--codeberg "forge" t)
+              :to-equal '("forgejo-bot"))
+      (expect (remoto-forge-search-repos remoto--codeberg "forgejo" "doc" t)
+              :to-equal '("docs"))
+      (expect (remoto-forge-recent-repos remoto--codeberg "forgejo" t)
+              :to-equal '("website"))
+      (expect (gethash "/codeberg:forgejo/docs" remoto--default-branch-cache)
+              :to-equal "next")
+      ;; The id was asked for once.
+      (expect (seq-count (lambda (args) (equal (cadr args) "users/forgejo"))
+                         (spy-calls-all-args 'remoto--api))
+              :to-equal 1)))
+
+  (it "searches topics in the repository's own issues endpoint"
+    (spy-on 'remoto--api :and-return-value '(((number . 7) (title . "rate limit"))))
+    (expect (remoto-forge-search-topics remoto--codeberg "o" "r" "rate limit")
+            :to-equal '(((number . 7) (title . "rate limit"))))
+    (expect 'remoto--api :to-have-been-called-with
+            remoto--codeberg "repos/o/r/issues?q=rate%20limit&state=all&type=all&limit=30"))
+
+  (it "joins the pages of a recursive tree, asked for at once after the first"
+    (remoto-test-with-cache
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_forge endpoint)
+                (expect endpoint :to-equal
+                        "repos/o/r/git/trees/main?recursive=1&per_page=1000&page=1")
+                '((total_count . 2500) (truncated . t)
+                  (tree . (((path . "a") (type . "blob") (size . 1) (sha . "1")
+                            (mode . "100644")))))))
+      (spy-on 'remoto--api-async :and-call-fake
+              (lambda (_forge endpoint callback &optional _errback)
+                (funcall callback
+                         `((truncated . ,(string-suffix-p "page=2" endpoint))
+                           (tree . (((path . ,(if (string-suffix-p "page=2" endpoint)
+                                                   "b" "c"))
+                                     (type . "blob") (size . 1) (sha . "2")
+                                     (mode . "100644"))))))))
+      (let ((tree (remoto-forge-tree remoto--codeberg "o" "r" "main")))
+        (expect (sort (seq-remove (lambda (k) (string-prefix-p "\0" k))
+                                  (hash-table-keys tree))
+                      #'string<)
+                :to-equal '("" "/" "a" "b" "c"))
+        (expect (gethash "\0truncated" tree) :to-be nil)
+        (expect (mapcar #'cadr (spy-calls-all-args 'remoto--api-async))
+                :to-equal '("repos/o/r/git/trees/main?recursive=1&per_page=1000&page=2"
+                            "repos/o/r/git/trees/main?recursive=1&per_page=1000&page=3")))))
+
+  (it "leaves the tree partial when a page fails"
+    (remoto-test-with-cache
+      (spy-on 'remoto--api :and-return-value
+              '((total_count . 1500) (truncated . t)
+                (tree . (((path . "a") (type . "blob") (size . 1) (sha . "1")
+                          (mode . "100644"))))))
+      (spy-on 'remoto--api-async :and-call-fake
+              (lambda (_forge _endpoint _callback &optional errback)
+                (funcall errback)))
+      (spy-on 'message)
+      (let ((tree (remoto-forge-tree remoto--codeberg "o" "r" "main")))
+        (expect (gethash "a" tree) :to-be-truthy)
+        (expect (gethash "\0truncated" tree) :to-be t))))
+
+  (it "looks refs up under a prefix at git/refs, and a commit at git/commits"
+    (spy-on 'remoto--api :and-call-fake
+            (lambda (_forge endpoint)
+              (pcase endpoint
+                ("repos/o/r/git/refs/heads/v12" '(((ref . "refs/heads/v12.0/forgejo"))))
+                ("repos/o/r/git/commits/main" '((sha . "abc")))
+                (_ (error "Unexpected %s" endpoint)))))
+    (expect (remoto--matching-refs remoto--codeberg "o" "r" "heads" "v12")
+            :to-equal '("v12.0/forgejo"))
+    (expect (remoto-forge-commit-sha remoto--codeberg "o" "r" "main") :to-equal "abc"))
+
+  (it "spells review states GitHub's way and drops review requests"
+    (spy-on 'remoto--api :and-return-value
+            '(((state . "APPROVED") (user . ((login . "a"))))
+              ((state . "REQUEST_CHANGES") (user . ((login . "b"))))
+              ((state . "COMMENT") (user . ((login . "c"))))
+              ((state . "REQUEST_REVIEW") (user . nil))))
+    (expect (mapcar (lambda (r) (alist-get 'state r))
+                    (remoto-forge-reviews remoto--codeberg "o" "r" "1"))
+            :to-equal '("APPROVED" "CHANGES_REQUESTED" "COMMENTED")))
+
+  (it "reads the organizations of the token by their username"
+    (spy-on 'remoto--api :and-return-value
+            '(((username . "forgejo") (description . "We forge."))))
+    (let ((orgs (remoto-forge-user-orgs remoto--codeberg "me")))
+      (expect (mapcar #'substring-no-properties orgs) :to-equal '("forgejo"))
+      (expect (get-text-property 0 'remoto-acct-desc (car orgs)) :to-equal "We forge."))))
+
+(describe "the web URLs of a Forgejo forge"
+  (it "spells the kind of the ref in the path, from the cached refs"
+    (spy-on 'remoto-forge-branches :and-return-value '("main" "v12.0/forgejo"))
+    (spy-on 'remoto-forge-tags :and-return-value '("v1.0"))
+    (expect (remoto--forge-url 'codeberg 'blob "o" "r" "main" "go.mod" 5 10)
+            :to-equal "https://codeberg.org/o/r/src/branch/main/go.mod#L5-L10")
+    (expect (remoto--forge-url 'codeberg 'raw "o" "r" "v1.0" "go.mod")
+            :to-equal "https://codeberg.org/o/r/raw/tag/v1.0/go.mod")
+    (expect (remoto--forge-url 'codeberg 'tree "o" "r" "v12.0/forgejo" "models")
+            :to-equal "https://codeberg.org/o/r/src/branch/v12.0/forgejo/models")
+    (expect (remoto--forge-url 'codeberg 'blame "o" "r" "1d9703c28a34" "go.mod" 3)
+            :to-equal "https://codeberg.org/o/r/blame/commit/1d9703c28a34/go.mod#L3")
+    (expect (remoto--forge-url 'codeberg 'history "o" "r" nil "")
+            :to-equal "https://codeberg.org/o/r/commits/branch/HEAD/")
+    (expect (remoto--forge-url 'codeberg 'repo "o" "r" nil "")
+            :to-equal "https://codeberg.org/o/r")
+    (expect (remoto--forge-url 'codeberg 'ssh "o" "r" nil "")
+            :to-equal "git@codeberg.org:o/r.git")
+    (expect (remoto--forge-url 'codeberg 'compare "o" "r" "dev" "")
+            :to-equal "https://codeberg.org/o/r/compare/dev")
+    (expect (remoto--forge-issue-url 'codeberg "o" "r" "7") :to-equal "https://codeberg.org/o/r/issues/7")
+    (expect (remoto--forge-issue-url 'codeberg "o" "r" "7" 'pr) :to-equal "https://codeberg.org/o/r/pulls/7")
+    (expect (remoto--forge-issue-url 'codeberg "o" "r" "7" 'pr-diff)
+            :to-equal "https://codeberg.org/o/r/pulls/7/files")
+    (expect (remoto--forge-owner-url 'codeberg "o") :to-equal "https://codeberg.org/o"))
+
+  (it "leaves GitHub's URLs as they were"
+    (expect (remoto--forge-url 'github 'blob "o" "r" "main" "a.el" 1)
+            :to-equal "https://github.com/o/r/blob/main/a.el#L1")
+    (expect (remoto--forge-issue-url 'github "o" "r" "7" 'pr)
+            :to-equal "https://github.com/o/r/pull/7"))
+
+  (it "reads Codeberg's URLs and remotes, the kind of the ref spelled or not"
+    (spy-on 'remoto--matching-refs :and-call-fake
+            (lambda (_forge _owner _repo kind prefix)
+              (and (equal kind "heads") (equal prefix "v12.0") '("v12.0/forgejo"))))
+    (dolist (case '(("https://codeberg.org/o/r" . "/codeberg:o/r:/")
+                    ("https://codeberg.org/o/r.git" . "/codeberg:o/r:/")
+                    ("codeberg.org/o/r" . "/codeberg:o/r:/")
+                    ("/codeberg.org/o/r/" . "/codeberg:o/r:/")
+                    ("git@codeberg.org:o/r.git" . "/codeberg:o/r:/")
+                    ("https://codeberg.org/o/r/src/branch/main/go.mod"
+                     . "/codeberg:o/r@main:/go.mod")
+                    ("https://codeberg.org/o/r/src/tag/v1.0/docs"
+                     . "/codeberg:o/r@v1.0:/docs")
+                    ("https://codeberg.org/o/r/src/commit/1d9703c/go.mod"
+                     . "/codeberg:o/r@1d9703c:/go.mod")
+                    ("https://codeberg.org/o/r/src/main/go.mod?display=source#L5"
+                     . "/codeberg:o/r@main:/go.mod")
+                    ("https://codeberg.org/o/r/raw/branch/main/go.mod"
+                     . "/codeberg:o/r@main:/go.mod")
+                    ("https://codeberg.org/o/r/src/branch/v12.0/forgejo/go.mod"
+                     . "/codeberg:o/r@v12.0/forgejo:/go.mod")
+                    ("https://codeberg.org/o/r/pulls/7" . "/codeberg:o/r:/")))
+      (expect (remoto--canonical-path
+               (remoto-forge-parse-url remoto--codeberg (car case)))
+              :to-equal (cdr case)))
+    (expect (remoto-forge-parse-url remoto--codeberg "https://github.com/o/r") :to-be nil)
+    (expect (remoto-forge-url-input-p remoto--codeberg "https://codeberg.org/o/r") :to-be-truthy)
+    (expect (remoto-forge-url-input-p remoto--codeberg "https://github.com/o/r") :to-be nil)
+    (expect (remoto-forge-parse-topic-url remoto--codeberg
+                                          "https://codeberg.org/o/r/pulls/7/files")
+            :to-equal '("o" "r" "7"))
+    (expect (remoto-forge-parse-topic-url remoto--codeberg "codeberg.org/o/r/issues/8#x")
+            :to-equal '("o" "r" "8"))
+    (expect (remoto-forge-parse-topic-url remoto--codeberg "https://codeberg.org/o/r")
+            :to-be nil))
+
+  (it "routes a URL to the forge of its host"
+    (expect (remoto--url-forge "https://codeberg.org/o/r") :to-be remoto--codeberg)
+    (expect (remoto--url-forge "git@codeberg.org:o/r.git") :to-be remoto--codeberg)
+    (expect (remoto--url-forge "https://github.com/o/r") :to-be remoto--github)
+    (remoto-test-with-cache
+      (puthash "/codeberg:o/r" "main" remoto--default-branch-cache)
+      (expect (remoto--maybe-rewrite "https://codeberg.org/o/r")
+              :to-equal "/codeberg:o/r@main:/")))
+
+  (it "opens a topic in the browser at the forge's pull or issue page"
+    (require 'remoto-topic)
+    (spy-on 'browse-url)
+    (with-temp-buffer
+      (setq remoto-topic--number "7"
+            remoto-topic--repo-path "/codeberg:o/r"
+            remoto-topic--is-pr t)
+      (remoto-topic-browse)
+      (expect 'browse-url :to-have-been-called-with "https://codeberg.org/o/r/pulls/7")
+      (setq remoto-topic--repo-path "/github:o/r" remoto-topic--is-pr nil)
+      (remoto-topic-browse)
+      (expect 'browse-url :to-have-been-called-with "https://github.com/o/r/issues/7"))))
+
+(describe "remoto-forgejo-instances"
+  (after-each
+    (remoto-forgejo--register-instances nil))
+
+  (it "registers a forge per (PREFIX HOST) and drops it when the entry goes"
+    (remoto-forgejo--register-instances '(("gitea" "gitea.com")))
+    (let ((forge (cdr (remoto--prefix-of "/gitea:o/r"))))
+      (expect (remoto-forgejo-p forge) :to-be t)
+      (expect (remoto-forge-name forge) :to-be 'gitea)
+      (expect (remoto-forge-host forge) :to-equal "gitea.com")
+      (expect (remoto--api-host forge) :to-equal "gitea.com/api/v1")
+      (expect (remoto--canonical-path (remoto--parse-path "/gitea:o/r@main:/x"))
+              :to-equal "/gitea:o/r@main:/x")
+      (expect (remoto--forge-url 'gitea 'repo "o" "r" nil "")
+              :to-equal "https://gitea.com/o/r")
+      (expect (string-match-p remoto--handler-regexp "/gitea:o/r") :to-be 0))
+    (remoto-forgejo--register-instances nil)
+    (expect (remoto--prefix-of "/gitea:o/r") :to-be nil)
+    (expect (string-match-p remoto--handler-regexp "/gitea:o/r") :to-be nil)
+    (expect (string-match-p remoto--handler-regexp "/cb:o/r") :to-be 0))
+
+  (it "refuses a prefix that another forge owns"
+    (spy-on 'display-warning)
+    (remoto-forgejo--register-instances '(("gh" "gitea.com")))
+    (expect 'display-warning :to-have-been-called)
+    (expect (cdr (remoto--prefix-of "/gh:o/r")) :to-be remoto--github))
+
+  (it "applies the option when it is set through custom"
+    (customize-set-variable 'remoto-forgejo-instances '(("gitea" "gitea.com")))
+    (expect (remoto-forge-host (cdr (remoto--prefix-of "/gitea:o/r")))
+            :to-equal "gitea.com")
+    (customize-set-variable 'remoto-forgejo-instances nil)
+    (expect (remoto--prefix-of "/gitea:o/r") :to-be nil)))
 
 ;;; Partial path file operations
 
@@ -2634,32 +3026,32 @@ using unauthenticated access until M-x remoto-reset-auth")
 (describe "remoto--search-users"
   (it "returns nil for queries below min-search-chars"
     (let ((remoto-min-search-chars 3))
-      (expect (remoto--search-users "") :to-be nil)
-      (expect (remoto--search-users "a") :to-be nil)
-      (expect (remoto--search-users "ab") :to-be nil)))
+      (expect (remoto--search-users remoto--github "") :to-be nil)
+      (expect (remoto--search-users remoto--github "a") :to-be nil)
+      (expect (remoto--search-users remoto--github "ab") :to-be nil)))
 
   (it "schedules async fetch on cache miss, returns nil"
     (spy-on 'remoto--debounce)
     (let ((remoto--search-cache (make-hash-table :test 'equal))
           (remoto--users-cache (make-hash-table :test 'equal))
           (remoto-min-search-chars 3))
-      (expect (remoto--search-users "tor") :to-be nil)
+      (expect (remoto--search-users remoto--github "tor") :to-be nil)
       (expect 'remoto--debounce :to-have-been-called)))
 
   (it "populates cache via async callback"
     ;; Make debounce execute immediately, mock api-async to invoke callback
     (spy-on 'remoto--debounce :and-call-fake (lambda (_key fn) (funcall fn)))
     (spy-on 'remoto--api-async :and-call-fake
-            (lambda (_endpoint callback)
+            (lambda (_forge _endpoint callback)
               (funcall callback '((items . (((login . "torvalds") (type . "User"))
                                             ((login . "torgeirhelge") (type . "User"))))))))
     (let ((remoto--search-cache (make-hash-table :test 'equal))
           (remoto--users-cache (make-hash-table :test 'equal))
           (remoto-min-search-chars 3))
       ;; First call: triggers async, returns nil
-      (remoto--search-users "tor")
+      (remoto--search-users remoto--github "tor")
       ;; Cache should now be populated by the callback
-      (expect (remoto--search-users "tor")
+      (expect (remoto--search-users remoto--github "tor")
               :to-equal '("torvalds" "torgeirhelge"))))
 
   (it "returns cached results without async call"
@@ -2668,9 +3060,9 @@ using unauthenticated access until M-x remoto-reset-auth")
           (remoto--users-cache (make-hash-table :test 'equal))
           (remoto-min-search-chars 3))
       ;; Pre-populate cache
-      (puthash "\0users:tor" (cons (float-time) '("torvalds" "torgeirhelge"))
+      (puthash "\0users:/github:tor" (cons (float-time) '("torvalds" "torgeirhelge"))
                remoto--search-cache)
-      (expect (remoto--search-users "tor")
+      (expect (remoto--search-users remoto--github "tor")
               :to-equal '("torvalds" "torgeirhelge"))
       ;; Should not have scheduled any async fetch
       (expect 'remoto--debounce :not :to-have-been-called)))
@@ -2681,9 +3073,9 @@ using unauthenticated access until M-x remoto-reset-auth")
           (remoto--users-cache (make-hash-table :test 'equal))
           (remoto-min-search-chars 3))
       ;; Seed the users-cache with a shorter query
-      (puthash "tor" (cons (float-time) '("torvalds" "torgeirhelge"))
+      (puthash "/github:tor" (cons (float-time) '("torvalds" "torgeirhelge"))
                remoto--users-cache)
-      (let ((result (remoto--search-users "torv")))
+      (let ((result (remoto--search-users remoto--github "torv")))
         (expect result :to-equal '("torvalds"))
         (expect 'remoto--debounce :not :to-have-been-called)))))
 
@@ -2693,48 +3085,48 @@ using unauthenticated access until M-x remoto-reset-auth")
   (it "returns nil for empty query"
     (let ((remoto--search-cache (make-hash-table :test 'equal))
           (remoto-min-search-chars 3))
-      (expect (remoto--search-owner-repos "torvalds" "") :to-be nil)))
+      (expect (remoto--search-owner-repos remoto--github "torvalds" "") :to-be nil)))
 
   (it "narrows from recent-repos cache below min-search-chars"
     (let ((remoto--search-cache (make-hash-table :test 'equal))
           (remoto-min-search-chars 3)
           (remoto-repo-cache-ttl 1800))
       ;; Seed recent-repos cache
-      (puthash "\0repos-recent:torvalds"
+      (puthash "\0repos-recent:/github:torvalds"
                (cons (float-time) '("linux" "libfdt" "subsurface"))
                remoto--search-cache)
       ;; Short query ("li") narrows from recent cache
-      (expect (remoto--search-owner-repos "torvalds" "li")
+      (expect (remoto--search-owner-repos remoto--github "torvalds" "li")
               :to-equal '("linux" "libfdt"))))
 
   (it "schedules async fetch on cache miss"
     (spy-on 'remoto--debounce)
     (let ((remoto--search-cache (make-hash-table :test 'equal))
           (remoto-min-search-chars 3))
-      (expect (remoto--search-owner-repos "torvalds" "lin") :to-be nil)
+      (expect (remoto--search-owner-repos remoto--github "torvalds" "lin") :to-be nil)
       (expect 'remoto--debounce :to-have-been-called)))
 
   (it "populates cache via async callback"
     (spy-on 'remoto--debounce :and-call-fake (lambda (_key fn) (funcall fn)))
     (spy-on 'remoto--api-async :and-call-fake
-            (lambda (_endpoint callback)
+            (lambda (_forge _endpoint callback)
               (funcall callback '((items . (((name . "linux"))
                                             ((name . "libfdt"))))))))
     (let ((remoto--search-cache (make-hash-table :test 'equal))
           (remoto-min-search-chars 3))
-      (remoto--search-owner-repos "torvalds" "lin")
+      (remoto--search-owner-repos remoto--github "torvalds" "lin")
       ;; Cache now populated
-      (expect (remoto--search-owner-repos "torvalds" "lin")
+      (expect (remoto--search-owner-repos remoto--github "torvalds" "lin")
               :to-equal '("linux" "libfdt"))))
 
   (it "returns cached results without async call"
     (spy-on 'remoto--debounce)
     (let ((remoto--search-cache (make-hash-table :test 'equal))
           (remoto-min-search-chars 3))
-      (puthash "\0repos:torvalds/lin"
+      (puthash "\0repos:/github:torvalds/lin"
                (cons (float-time) '("linux" "libfdt"))
                remoto--search-cache)
-      (expect (remoto--search-owner-repos "torvalds" "lin")
+      (expect (remoto--search-owner-repos remoto--github "torvalds" "lin")
               :to-equal '("linux" "libfdt"))
       (expect 'remoto--debounce :not :to-have-been-called)))
 
@@ -2743,10 +3135,10 @@ using unauthenticated access until M-x remoto-reset-auth")
     (let ((remoto--search-cache (make-hash-table :test 'equal))
           (remoto-min-search-chars 3))
       ;; Seed with shorter query
-      (puthash "\0repos:torvalds/li"
+      (puthash "\0repos:/github:torvalds/li"
                (cons (float-time) '("linux" "libfdt"))
                remoto--search-cache)
-      (let ((result (remoto--search-owner-repos "torvalds" "lin")))
+      (let ((result (remoto--search-owner-repos remoto--github "torvalds" "lin")))
         (expect result :to-equal '("linux"))
         (expect 'remoto--debounce :not :to-have-been-called)))))
 
@@ -2754,7 +3146,7 @@ using unauthenticated access until M-x remoto-reset-auth")
   (it "extracts repo names with description properties"
     (let* ((data '((items . (((name . "linux") (description . "kernel"))
                               ((name . "uemacs") (description . nil))))))
-           (repos (remoto--extract-search-repos data)))
+           (repos (remoto--extract-search-repos remoto--github data)))
       (expect (length repos) :to-equal 2)
       (expect (car repos) :to-equal "linux")
       (expect (get-text-property 0 'remoto-repo-desc (car repos))
@@ -2765,7 +3157,7 @@ using unauthenticated access until M-x remoto-reset-auth")
   (it "uses alternate name key when provided"
     (let* ((data '((items . (((full_name . "torvalds/linux")
                                (description . "kernel"))))))
-           (repos (remoto--extract-search-repos data 'full_name)))
+           (repos (remoto--extract-search-repos remoto--github data 'full_name)))
       (expect (car repos) :to-equal "torvalds/linux"))))
 
 (describe "remoto--owner-search"
@@ -2774,21 +3166,21 @@ using unauthenticated access until M-x remoto-reset-auth")
             '((items . (((name . "linux") (description . "kernel"))
                          ((name . "libfdt") (description . ""))))))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
-      (let ((result (remoto--owner-search "torvalds" "lin")))
+      (let ((result (remoto--owner-search remoto--github "torvalds" "lin")))
         (expect (length result) :to-equal 2)
         (expect (car result) :to-equal "linux")
         ;; Cache should be warm now
         (pcase-let ((`(,hit ,cached) (remoto--search-cache-get
-                                       "\0repos:torvalds/lin")))
+                                       "\0repos:/github:torvalds/lin")))
           (expect hit :to-be-truthy)
           (expect (length cached) :to-equal 2)))))
 
   (it "signals on an API error, which completion turns into no candidates"
     (spy-on 'remoto--api :and-call-fake
-            (lambda (_) (error "network error")))
+            (lambda (_forge _) (error "network error")))
     (spy-on 'remoto--search-owner-repos :and-return-value nil)
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
-      (expect (remoto--owner-search "torvalds" "lin") :to-throw)
+      (expect (remoto--owner-search remoto--github "torvalds" "lin") :to-throw)
       (expect (remoto--handle-file-name-all-completions "lin" "/github:torvalds/")
               :to-be nil))))
 
@@ -2797,20 +3189,20 @@ using unauthenticated access until M-x remoto-reset-auth")
     (spy-on 'remoto--api :and-return-value
             '((items . (((name . "linux") (description . "kernel"))))))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
-      (let ((result (remoto--recent-owner-repos-sync "torvalds")))
+      (let ((result (remoto--recent-owner-repos-sync remoto--github "torvalds")))
         (expect (length result) :to-equal 1)
         (expect (car result) :to-equal "linux")
         ;; Cache should be warm
         (pcase-let ((`(,hit ,_) (remoto--search-cache-get
-                                  "\0repos-recent:torvalds"
+                                  "\0repos-recent:/github:torvalds"
                                   remoto-repo-cache-ttl)))
           (expect hit :to-be-truthy)))))
 
   (it "returns nil on API error without signaling"
     (spy-on 'remoto--api :and-call-fake
-            (lambda (_) (error "network error")))
+            (lambda (_forge _) (error "network error")))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
-      (expect (remoto--recent-owner-repos-sync "torvalds")
+      (expect (remoto--recent-owner-repos-sync remoto--github "torvalds")
               :to-be nil))))
 
 (describe "owner-level sync fallback in file-name-all-completions"
@@ -2821,7 +3213,7 @@ using unauthenticated access until M-x remoto-reset-auth")
                         "lin" "/github:torvalds/")))
       (expect completions :to-equal '("linux/"))
       (expect 'remoto--owner-search
-              :to-have-been-called-with "torvalds" "lin")))
+              :to-have-been-called-with remoto--github "torvalds" "lin")))
 
   (it "falls back to sync recent repos when async returns nil"
     (spy-on 'remoto--recent-owner-repos :and-return-value nil)
@@ -2830,7 +3222,7 @@ using unauthenticated access until M-x remoto-reset-auth")
                         "" "/github:torvalds/")))
       (expect completions :to-equal '("linux/"))
       (expect 'remoto--recent-owner-repos-sync
-              :to-have-been-called-with "torvalds")))
+              :to-have-been-called-with remoto--github "torvalds")))
 
   (it "skips sync fallback when async has results"
     (spy-on 'remoto--search-owner-repos :and-return-value '("linux"))
@@ -2856,50 +3248,46 @@ using unauthenticated access until M-x remoto-reset-auth")
 
 (describe "remoto--get-authenticated-user"
   (it "returns login from /user endpoint"
-    (let ((remoto--authenticated-user nil)
-          (remoto--auth-failed nil))
+    (let ((remoto--logins (remoto-test--logins :user nil :failed nil)))
       (spy-on 'remoto--api :and-return-value '((login . "agzam")))
-      (expect (remoto--get-authenticated-user) :to-equal "agzam")))
+      (expect (remoto--get-authenticated-user remoto--github) :to-equal "agzam")))
 
   (it "caches the result for subsequent calls"
-    (let ((remoto--authenticated-user nil)
-          (remoto--auth-failed nil)
+    (let ((remoto--logins (remoto-test--logins :user nil :failed nil))
           (call-count 0))
       (spy-on 'remoto--api :and-call-fake
-              (lambda (_)
+              (lambda (_forge _)
                 (setq call-count (1+ call-count))
                 '((login . "agzam"))))
-      (remoto--get-authenticated-user)
-      (remoto--get-authenticated-user)
+      (remoto--get-authenticated-user remoto--github)
+      (remoto--get-authenticated-user remoto--github)
       (expect call-count :to-equal 1)))
 
   (it "returns nil when auth has failed"
-    (let ((remoto--authenticated-user nil)
-          (remoto--auth-failed t))
+    (let ((remoto--logins (remoto-test--logins :user nil :failed t)))
       (spy-on 'remoto--api)
-      (expect (remoto--get-authenticated-user) :to-be nil)
+      (expect (remoto--get-authenticated-user remoto--github) :to-be nil)
       (expect 'remoto--api :not :to-have-been-called)))
 
   (it "returns nil on API error"
-    (let ((remoto--authenticated-user nil)
-          (remoto--auth-failed nil))
+    (let ((remoto--logins (remoto-test--logins :user nil :failed nil)))
       (spy-on 'remoto--api :and-call-fake
-              (lambda (_) (user-error "auth failed")))
-      (expect (remoto--get-authenticated-user) :to-be nil))))
+              (lambda (_forge _) (user-error "auth failed")))
+      (expect (remoto--get-authenticated-user remoto--github) :to-be nil))))
 
 (describe "remoto-reset-auth clears authenticated user"
   (it "clears cached authenticated user"
-    (let ((old-auth remoto--auth-failed)
-          (old-user remoto--authenticated-user))
-      (unwind-protect
-          (progn
-            (setq remoto--auth-failed t
-                  remoto--authenticated-user "agzam")
-            (remoto-reset-auth)
-            (expect remoto--authenticated-user :to-be nil)
-            (expect remoto--auth-failed :to-be nil))
-        (setq remoto--auth-failed old-auth
-              remoto--authenticated-user old-user)))))
+    (let ((remoto--logins (remoto-test--logins :failed t :user "agzam")))
+      (remoto-reset-auth)
+      (expect (remoto--login-user (remoto-test--github-login)) :to-be nil)
+      (expect (remoto--login-failed (remoto-test--github-login)) :to-be nil)))
+
+  (it "clears one host and keeps the others"
+    (let ((remoto--logins (remoto-test--logins :failed t :user "agzam")))
+      (setf (remoto--login-user (remoto--login "codeberg.org/api/v1")) "ag")
+      (remoto-reset-auth "codeberg.org/api/v1")
+      (expect (remoto--login-user (remoto--login "codeberg.org/api/v1")) :to-be nil)
+      (expect (remoto--login-user (remoto-test--github-login)) :to-equal "agzam"))))
 
 ;;; Partial path file operations - repo@ level
 
@@ -2961,7 +3349,7 @@ using unauthenticated access until M-x remoto-reset-auth")
       (expect (remoto--handle-file-name-all-completions "" "/github:torvalds/")
               :to-equal '("linux/"))
       (expect 'remoto--search-owner-repos
-              :to-have-been-called-with "torvalds" "lin"))))
+              :to-have-been-called-with remoto--github "torvalds" "lin"))))
 
 ;;; Pre-repo completions
 
@@ -2980,7 +3368,7 @@ using unauthenticated access until M-x remoto-reset-auth")
     (spy-on 'remoto--search-users :and-return-value '("torvalds" "torgeirhelge"))
     (spy-on 'remoto--prefetch-owner-repos)
     (remoto--handle-file-name-all-completions "tor" "/github:")
-    (expect 'remoto--prefetch-owner-repos :to-have-been-called-with "torvalds"))
+    (expect 'remoto--prefetch-owner-repos :to-have-been-called-with remoto--github "torvalds"))
 
   (it "returns nil for empty user query"
     (let ((completions (remoto--handle-file-name-all-completions "" "/github:")))
@@ -2990,7 +3378,7 @@ using unauthenticated access until M-x remoto-reset-auth")
     (spy-on 'remoto--recent-owner-repos :and-return-value '("linux" "uemacs"))
     (let ((completions (remoto--handle-file-name-all-completions "" "/github:torvalds/")))
       (expect completions :to-equal '("linux/" "uemacs/"))
-      (expect 'remoto--recent-owner-repos :to-have-been-called-with "torvalds")))
+      (expect 'remoto--recent-owner-repos :to-have-been-called-with remoto--github "torvalds")))
 
   (it "searches repos by query"
     (spy-on 'remoto--search-owner-repos :and-return-value '("linux"))
@@ -3081,7 +3469,7 @@ using unauthenticated access until M-x remoto-reset-auth")
 
 (defun remoto-test--add-listing-entries ()
   "Add a one-letter directory and a symlink to the cached mock tree."
-  (let ((tree (gethash "testowner/testrepo@main" remoto--tree-cache)))
+  (let ((tree (gethash "/github:testowner/testrepo@main" remoto--tree-cache)))
     (puthash "a" '((type . "tree") (size . 0) (sha . "hhh") (mode . "040000"))
              tree)
     (puthash "a/b" '((type . "blob") (size . 1) (sha . "iii") (mode . "100644"))
@@ -3161,11 +3549,11 @@ Return the buffer that RET leaves current."
       (remoto-test-with-listing switches
         ;; .. at the root lists the owner, here without a token.
         (spy-on 'remoto--api :and-call-fake
-                (lambda (endpoint)
+                (lambda (_forge endpoint)
                   (if (string-prefix-p "users/testowner/repos" endpoint)
                       (list (remoto-test--repo-item "testrepo" "2026-10-20T12:00:00Z"))
                     (error "Unexpected endpoint %s" endpoint))))
-        (let ((remoto--auth-failed t)
+        (let ((remoto--logins (remoto-test--logins :failed t))
               (root "/github:testowner/testrepo@main:/")
               (src "/github:testowner/testrepo@main:/src/"))
           (with-current-buffer (remoto-test--visit-entry src "..")
@@ -3216,7 +3604,7 @@ PROPS sets :desc, :private, :fork, :archived, :size and :branch, and
            collect (remoto-test--repo-item (format "%s%03d" prefix i)
                                            "2026-01-01T00:00:00Z")))
 
-(defun remoto-test--listing-api (endpoint)
+(defun remoto-test--listing-api (forge endpoint)
   "Answer ENDPOINT as GitHub does for the token of the account \"me\"."
   (cond
    ((string-prefix-p "user/orgs" endpoint)
@@ -3244,7 +3632,7 @@ Buffers BODY creates are killed afterwards."
   (declare (indent 0))
   (let ((before (make-symbol "before")))
     `(remoto-test-with-cache
-       (let ((remoto--authenticated-user "me")
+       (let ((remoto--logins (remoto-test--logins :user "me"))
              (dired-listing-switches "-al")
              (,before (buffer-list)))
          (spy-on 'remoto--api :and-call-fake #'remoto-test--listing-api)
@@ -3257,11 +3645,11 @@ Buffers BODY creates are killed afterwards."
   (with-current-buffer (dired-noselect dir (or switches "-al"))
     (buffer-substring-no-properties (point-min) (point-max))))
 
-(defun remoto-test--with-big-owner (endpoint)
+(defun remoto-test--with-big-owner (forge endpoint)
   "Answer ENDPOINT with full first pages for the account \"big\"."
   (if (string-prefix-p "users/big/repos" endpoint)
       (remoto-test--repo-items 100 "a")
-    (remoto-test--listing-api endpoint)))
+    (remoto-test--listing-api forge endpoint)))
 
 (describe "Dired listing of /github:"
   (it "lists the account of the token and its organizations"
@@ -3275,8 +3663,7 @@ Buffers BODY creates are killed afterwards."
 
   (it "says why, and leaves no buffer, when no token answers"
     (remoto-test-with-listings
-      (let ((remoto--authenticated-user nil)
-            (remoto--auth-failed t)
+      (let ((remoto--logins (remoto-test--logins :user nil :failed t))
             (before (buffer-list)))
         (expect (dired-noselect "/github:") :to-throw 'user-error)
         (expect (seq-difference (buffer-list) before) :to-be nil))))
@@ -3337,7 +3724,7 @@ Buffers BODY creates are killed afterwards."
       (with-current-buffer (remoto-test--visit-entry "/github:me/" "alpha")
         (expect dired-directory :to-equal "/github:me/alpha@trunk:/")
         (expect (buffer-string) :to-match "README\\.md"))
-      (expect (mapcar #'car (spy-calls-all-args 'remoto--api))
+      (expect (mapcar #'cadr (spy-calls-all-args 'remoto--api))
               :to-equal '("repos/me/alpha/git/trees/trunk?recursive=1"))))
 
   (it "climbs from a repository root to its owner, then to /github:"
@@ -3353,10 +3740,10 @@ Buffers BODY creates are killed afterwards."
     (remoto-test-with-listings
       (let ((before (buffer-list)))
         (spy-on 'remoto--api :and-call-fake
-                (lambda (endpoint)
+                (lambda (forge endpoint)
                   (if (string-prefix-p "users/nobody/" endpoint)
                       (user-error "Remoto: not found: %s" endpoint)
-                    (remoto-test--listing-api endpoint))))
+                    (remoto-test--listing-api forge endpoint))))
         (expect (dired-noselect "/github:nobody/") :to-throw 'user-error)
         (expect (seq-difference (buffer-list) before) :to-be nil)))))
 
@@ -3365,25 +3752,24 @@ Buffers BODY creates are killed afterwards."
     (remoto-test-with-listings
       (remoto-test--listing-text "/github:me/")
       (expect 'remoto--api :to-have-been-called-with
-              "user/repos?affiliation=owner&sort=pushed&per_page=100&page=1")))
+              remoto--github "user/repos?affiliation=owner&sort=pushed&per_page=100&page=1")))
 
   (it "lists an organization of the token through the organization endpoint"
     (remoto-test-with-listings
       (expect (remoto-test--listing-text "/github:acme/")
               :to-match "^  drwx------ .* tool$")
       (expect 'remoto--api :to-have-been-called-with
-              "orgs/acme/repos?sort=pushed&per_page=100&page=1")))
+              remoto--github "orgs/acme/repos?sort=pushed&per_page=100&page=1")))
 
   (it "lists the public repositories of any other account, token or not"
     (remoto-test-with-listings
       (expect (remoto-test--listing-text "/github:torvalds/") :to-match " linux$")
       (expect 'remoto--api :to-have-been-called-with
-              "users/torvalds/repos?sort=pushed&per_page=100&page=1"))
+              remoto--github "users/torvalds/repos?sort=pushed&per_page=100&page=1"))
     (remoto-test-with-listings
-      (let ((remoto--authenticated-user nil)
-            (remoto--auth-failed t))
+      (let ((remoto--logins (remoto-test--logins :user nil :failed t)))
         (expect (remoto-test--listing-text "/github:torvalds/") :to-match " linux$")
-        (expect (mapcar #'car (spy-calls-all-args 'remoto--api))
+        (expect (mapcar #'cadr (spy-calls-all-args 'remoto--api))
                 :to-equal '("users/torvalds/repos?sort=pushed&per_page=100&page=1"))))))
 
 (describe "the pages of an owner listing"
@@ -3398,7 +3784,7 @@ Buffers BODY creates are killed afterwards."
       (let ((pending nil))
         (spy-on 'remoto--api :and-call-fake #'remoto-test--with-big-owner)
         (spy-on 'remoto--api-async :and-call-fake
-                (lambda (endpoint callback &optional _errback)
+                (lambda (_forge endpoint callback &optional _errback)
                   (setq pending (append pending (list (cons endpoint callback))))))
         (let ((buf (dired-noselect "/github:big/")))
           (expect (with-current-buffer buf (buffer-string))
@@ -3424,7 +3810,7 @@ Buffers BODY creates are killed afterwards."
             (pending nil))
         (spy-on 'remoto--api :and-call-fake #'remoto-test--with-big-owner)
         (spy-on 'remoto--api-async :and-call-fake
-                (lambda (_endpoint callback &optional _errback)
+                (lambda (_forge _endpoint callback &optional _errback)
                   (push callback pending)))
         (let ((buf (dired-noselect "/github:big/")))
           (funcall (pop pending) (remoto-test--repo-items 100 "b"))
@@ -3442,7 +3828,7 @@ Buffers BODY creates are killed afterwards."
       (let ((errbacks nil))
         (spy-on 'remoto--api :and-call-fake #'remoto-test--with-big-owner)
         (spy-on 'remoto--api-async :and-call-fake
-                (lambda (_endpoint _callback &optional errback)
+                (lambda (_forge _endpoint _callback &optional errback)
                   (push errback errbacks)))
         (with-current-buffer (dired-noselect "/github:big/")
           (spy-calls-reset 'remoto--api)
@@ -3454,7 +3840,7 @@ Buffers BODY creates are killed afterwards."
           (expect errbacks :to-be nil)
           (remoto-refresh)
           (expect 'remoto--api :to-have-been-called-with
-                  "users/big/repos?sort=pushed&per_page=100&page=1")))))
+                  remoto--github "users/big/repos?sort=pushed&per_page=100&page=1")))))
 
   (it "fetches no page again when the pages took longer than the cache lives"
     ;; The revert at the end found the listing stale and fetched it all again.
@@ -3463,7 +3849,7 @@ Buffers BODY creates are killed afterwards."
             (pending nil))
         (spy-on 'remoto--api :and-call-fake #'remoto-test--with-big-owner)
         (spy-on 'remoto--api-async :and-call-fake
-                (lambda (_endpoint callback &optional _errback)
+                (lambda (_forge _endpoint callback &optional _errback)
                   (push callback pending)))
         (with-current-buffer (dired-noselect "/github:big/")
           (setf (remoto--listing-time (gethash "/github:big/" remoto--listing-cache))
@@ -3479,7 +3865,7 @@ Buffers BODY creates are killed afterwards."
       (let ((pending nil))
         (spy-on 'remoto--api :and-call-fake #'remoto-test--with-big-owner)
         (spy-on 'remoto--api-async :and-call-fake
-                (lambda (_endpoint callback &optional _errback)
+                (lambda (_forge _endpoint callback &optional _errback)
                   (push callback pending)))
         (with-current-buffer (dired-noselect "/github:big/")
           (let ((late (car (last pending))))
@@ -3493,7 +3879,7 @@ Buffers BODY creates are killed afterwards."
   (it "remembers each default branch, so opening a listed repository asks for none"
     (remoto-test-with-listings
       (remoto-test--listing-text "/github:me/")
-      (expect (gethash "me/alpha" remoto--default-branch-cache) :to-equal "trunk")
+      (expect (gethash "/github:me/alpha" remoto--default-branch-cache) :to-equal "trunk")
       (expect (remoto--maybe-rewrite "/github:me/alpha") :to-equal "/github:me/alpha@trunk:/")
       (expect 'remoto--api :not :to-have-been-called-with "repos/me/alpha"))))
 
@@ -3523,16 +3909,16 @@ Buffers BODY creates are killed afterwards."
       (with-current-buffer (dired-noselect "/github:")
         (spy-calls-reset 'remoto--api)
         (remoto-refresh)
-        (expect 'remoto--api :to-have-been-called-with "user/orgs?per_page=100&page=1")
+        (expect 'remoto--api :to-have-been-called-with remoto--github "user/orgs?per_page=100&page=1")
         (expect (buffer-string) :to-match " acme "))
       (with-current-buffer (dired-noselect "/github:me/")
         (spy-calls-reset 'remoto--api)
         (remoto-refresh)
         (expect 'remoto--api :to-have-been-called-with
-                "user/repos?affiliation=owner&sort=pushed&per_page=100&page=1")
+                remoto--github "user/repos?affiliation=owner&sort=pushed&per_page=100&page=1")
         (expect (buffer-string) :to-match " zeta ")))))
 
-(defun remoto-test--search-api (endpoint)
+(defun remoto-test--search-api (forge endpoint)
   "Answer ENDPOINT as `remoto-test--listing-api' does, plus a search of acme.
 A search for stitch finds stitch-env and stitch-api; acme has no other
 repository than tool, and a search for anything else finds none."
@@ -3547,7 +3933,7 @@ repository than tool, and a search for anything else finds none."
    ((equal endpoint "repos/acme/tool") '((default_branch . "main")))
    ((string-match-p "\\`repos/acme/[^/]+\\'" endpoint)
     (user-error "%s%s" remoto--not-found endpoint))
-   (t (remoto-test--listing-api endpoint))))
+   (t (remoto-test--listing-api forge endpoint))))
 
 (defun remoto-test--dired-names ()
   "Return the names that Dired reads in the current buffer."
@@ -3565,7 +3951,7 @@ repository than tool, and a search for anything else finds none."
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
       ;; Completion at /github:acme/ searched for the typed text already.
-      (remoto--owner-search "acme" "stitch")
+      (remoto--owner-search remoto--github "acme" "stitch")
       (spy-calls-reset 'remoto--api)
       (with-current-buffer (find-file-noselect "/gh:acme/stitch")
         (expect dired-directory :to-equal '("/github:acme/" "stitch-api" "stitch-env"))
@@ -3575,7 +3961,7 @@ repository than tool, and a search for anything else finds none."
                     (>= 4 " ") "Environments" eol))
         (expect (buffer-string) :to-match
                 (rx bol "  drwxr-xr-x " (+ nonl) " stitch-api" (>= 4 " ") "The API" eol)))
-      (expect (mapcar #'car (spy-calls-all-args 'remoto--api))
+      (expect (mapcar #'cadr (spy-calls-all-args 'remoto--api))
               :to-equal '("repos/acme/stitch"))))
 
   (it "lines the notes up across the matches, and keeps them on revert"
@@ -3608,7 +3994,7 @@ repository than tool, and a search for anything else finds none."
         (re-search-forward " stitch-env ")
         (dired-find-file)
         (expect dired-directory :to-equal "/github:acme/stitch-env@trunk:/"))
-      (expect (mapcar #'car (spy-calls-all-args 'remoto--api))
+      (expect (mapcar #'cadr (spy-calls-all-args 'remoto--api))
               :to-equal '("repos/acme/stitch-env/git/trees/trunk?recursive=1"))))
 
   (it "lists the matches for dired-noselect too"
@@ -3634,7 +4020,7 @@ repository than tool, and a search for anything else finds none."
               :to-equal '("stitch-api" "stitch-env"))
       (expect (remoto--query-matches "/github:acme/..") :to-be nil)
       (expect (remoto--query-matches "/github:acme/zeta@main:/..") :to-be nil)
-      (expect (seq-filter (lambda (args) (string-prefix-p "repos/" (car args)))
+      (expect (seq-filter (lambda (args) (string-prefix-p "repos/" (cadr args)))
                           (spy-calls-all-args 'remoto--api))
               :to-be nil)))
 
@@ -3649,7 +4035,7 @@ repository than tool, and a search for anything else finds none."
   (it "names the owner when GitHub cannot search an account that does not exist"
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake
-              (lambda (endpoint) (user-error "%s%s" remoto--not-found endpoint)))
+              (lambda (_forge endpoint) (user-error "%s%s" remoto--not-found endpoint)))
       (let ((before (buffer-list)))
         (expect (find-file-noselect "/gh:nobody/tool")
                 :to-throw 'user-error '("Remoto: no account nobody"))
@@ -3658,24 +4044,24 @@ repository than tool, and a search for anything else finds none."
   (it "lets a failed search or repository check signal its own error"
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake
-              (lambda (endpoint)
+              (lambda (forge endpoint)
                 (if (string-prefix-p "search/" endpoint)
                     (user-error "Remoto: access denied (rate limit or permissions): x")
-                  (remoto-test--search-api endpoint))))
+                  (remoto-test--search-api forge endpoint))))
       (expect (find-file-noselect "/gh:acme/stitch")
               :to-throw 'user-error '("Remoto: access denied (rate limit or permissions): x")))
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake
-              (lambda (endpoint)
+              (lambda (_forge endpoint)
                 (user-error "Remoto: access denied (rate limit or permissions): %s" endpoint)))
       (expect (find-file-noselect "/gh:acme/stitch") :to-throw 'user-error)
-      (expect (mapcar #'car (spy-calls-all-args 'remoto--api))
+      (expect (mapcar #'cadr (spy-calls-all-args 'remoto--api))
               :to-equal '("repos/acme/stitch"))))
 
   (it "gets one line from insert-directory without FULL-DIRECTORY-P"
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
-      (remoto--owner-search "acme" "stitch")
+      (remoto--owner-search remoto--github "acme" "stitch")
       (with-temp-buffer
         (let ((default-directory "/github:acme/"))
           (remoto--handle-insert-directory "stitch-api" "-al" nil nil))
@@ -3692,13 +4078,13 @@ repository than tool, and a search for anything else finds none."
   (it "remembers a repository a search found, so that it exists and opens"
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
-      (remoto--owner-search "acme" "stitch")
+      (remoto--owner-search remoto--github "acme" "stitch")
       (expect (file-exists-p "/github:acme/stitch-env") :to-be t)
       (expect (file-exists-p "/github:acme/stitch") :to-be nil)
-      (expect (gethash "acme/stitch-env" remoto--default-branch-cache)
+      (expect (gethash "/github:acme/stitch-env" remoto--default-branch-cache)
               :to-equal "trunk"))))
 
-(defun remoto-test--account-api (endpoint)
+(defun remoto-test--account-api (forge endpoint)
   "Answer ENDPOINT as `remoto-test--listing-api' does, plus a user search.
 A search for qlik finds the user qlik, the organizations qlik-oss and
 qlik-trial, and jdoe, whose login lacks the word; qlik-trial has one
@@ -3712,7 +4098,7 @@ repository."
    ((string-prefix-p "search/users?" endpoint) '((items)))
    ((string-prefix-p "users/qlik-trial/repos?sort=pushed&" endpoint)
     (list (remoto-test--repo-item "stitch" "2026-10-01T00:00:00Z")))
-   (t (remoto-test--listing-api endpoint))))
+   (t (remoto-test--listing-api forge endpoint))))
 
 (describe "a bare account name"
   (it "opens a Dired of the accounts whose login holds the typed words"
@@ -3725,18 +4111,18 @@ repository."
                 (rx bol "  drwxr-xr-x " (+ nonl) " qlik-trial" (>= 4 " ") "Organization" eol))
         (expect (buffer-string) :to-match
                 (rx bol "  drwxr-xr-x " (+ nonl) " qlik" (>= 4 " ") "User" eol)))
-      (expect (mapcar #'car (spy-calls-all-args 'remoto--api))
+      (expect (mapcar #'cadr (spy-calls-all-args 'remoto--api))
               :to-equal '("search/users?q=qlik&per_page=100"))))
 
   (it "puts the account typed first, whatever its case"
     ;; Capitals sort first, which put Qlik-PE and QlikSense above qlik.
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake
-              (lambda (endpoint)
+              (lambda (_forge endpoint)
                 (if (string-prefix-p "search/users?" endpoint)
                     `((items ,@(mapcar (lambda (login) `((login . ,login) (type . "User")))
                                        '("qlik-trial" "QlikSense" "qlik" "Qlik-PE"))))
-                  (remoto-test--listing-api endpoint))))
+                  (remoto-test--listing-api forge endpoint))))
       (with-current-buffer (find-file-noselect "/gh:Qlik")
         (expect (cdr dired-directory)
                 :to-equal '("qlik" "Qlik-PE" "QlikSense" "qlik-trial"))
@@ -3747,12 +4133,12 @@ repository."
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake #'remoto-test--account-api)
       (remoto--search-cache-put
-       "\0users:qlik" (list (propertize "qlik-trial" 'remoto-acct-type "Organization")))
+       "\0users:/github:qlik" (list (propertize "qlik-trial" 'remoto-acct-type "Organization")))
       (expect (cdr (buffer-local-value 'dired-directory (find-file-noselect "/gh:qlik")))
               :to-equal '("qlik" "qlik-oss" "qlik-trial"))
       (kill-buffer (find-file-noselect "/gh:qlik"))
       (find-file-noselect "/gh:qlik")
-      (expect (mapcar #'car (spy-calls-all-args 'remoto--api))
+      (expect (mapcar #'cadr (spy-calls-all-args 'remoto--api))
               :to-equal '("search/users?q=qlik&per_page=100"))))
 
   (it "opens an account from its line in the Dired of matches"
@@ -3782,15 +4168,15 @@ repository."
   (it "lets a failed search signal its own error"
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake
-              (lambda (endpoint)
+              (lambda (forge endpoint)
                 (if (string-prefix-p "search/" endpoint)
                     (user-error "Remoto: access denied (rate limit or permissions): x")
-                  (remoto-test--account-api endpoint))))
+                  (remoto-test--account-api forge endpoint))))
       (expect (find-file-noselect "/gh:qlik")
               :to-throw 'user-error
               '("Remoto: access denied (rate limit or permissions): x")))))
 
-(defun remoto-test--ref-api (endpoint)
+(defun remoto-test--ref-api (forge endpoint)
   "Answer ENDPOINT as `remoto-test--listing-api' does, plus the refs of acme/tool.
 Its branches are main, release-1 and feature/x, its tags v1.0 and
 release-2, and only main and release-1 have a tree."
@@ -3801,14 +4187,14 @@ release-2, and only main and release-1 have a tree."
     '(((name . "v1.0")) ((name . "release-2"))))
    ((string-match-p (rx bos "repos/acme/tool/git/trees/" (or "main" "release-1") "?")
                     endpoint)
-    (remoto-test--listing-api endpoint))
+    (remoto-test--listing-api forge endpoint))
    ((string-prefix-p "repos/acme/tool/git/trees/" endpoint)
     (user-error "%s%s" remoto--not-found endpoint))
-   (t (remoto-test--listing-api endpoint))))
+   (t (remoto-test--listing-api forge endpoint))))
 
 (defun remoto-test--asked-p (regexp)
   "Return non-nil when a spied `remoto--api' call asked for REGEXP."
-  (seq-some (lambda (args) (string-match-p regexp (car args)))
+  (seq-some (lambda (args) (string-match-p regexp (cadr args)))
             (spy-calls-all-args 'remoto--api)))
 
 (describe "a ref of no tree"
@@ -3891,10 +4277,10 @@ release-2, and only main and release-1 have a tree."
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake #'remoto-test--ref-api)
       (with-current-buffer (find-file-noselect "/gh:acme/tool@rel")
-        (expect (gethash "acme/tool" remoto--tags-cache) :not :to-be nil)
+        (expect (gethash "/github:acme/tool" remoto--tags-cache) :not :to-be nil)
         (remoto-refresh)
-        (expect (gethash "acme/tool" remoto--branches-cache) :to-be nil)
-        (expect (gethash "acme/tool" remoto--tags-cache) :to-be nil)
+        (expect (gethash "/github:acme/tool" remoto--branches-cache) :to-be nil)
+        (expect (gethash "/github:acme/tool" remoto--tags-cache) :to-be nil)
         (expect (remoto-test--dired-names) :to-equal '("release-1" "release-2"))))))
 
 (describe "a missing file name"
@@ -3932,7 +4318,7 @@ release-2, and only main and release-1 have a tree."
 (describe "remoto--maybe-rewrite with partial canonical paths"
   (it "rewrites /github:owner/repo to canonical path"
     (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
-      (puthash "torvalds/linux" "master" remoto--default-branch-cache)
+      (puthash "/github:torvalds/linux" "master" remoto--default-branch-cache)
       (expect (remoto--maybe-rewrite "/github:torvalds/linux")
               :to-equal "/github:torvalds/linux@master:/")))
 
@@ -3959,7 +4345,7 @@ release-2, and only main and release-1 have a tree."
 
   (it "normalizes the /gh: shorthand before rewriting"
     (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
-      (puthash "torvalds/linux" "master" remoto--default-branch-cache)
+      (puthash "/github:torvalds/linux" "master" remoto--default-branch-cache)
       (expect (remoto--maybe-rewrite "/gh:torvalds/linux")
               :to-equal "/github:torvalds/linux@master:/")
       (expect (remoto--maybe-rewrite "/gh:torvalds/linux/")
@@ -3973,7 +4359,7 @@ release-2, and only main and release-1 have a tree."
   ;; `dired' gets the raw argument; only URLs and remoto paths are rewritten.
   (it "rewrites the bare, short and shorthand forms to the canonical path"
     (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
-      (puthash "torvalds/linux" "master" remoto--default-branch-cache)
+      (puthash "/github:torvalds/linux" "master" remoto--default-branch-cache)
       (dolist (dir '("/github:torvalds/linux" "/github:torvalds/linux/"
                      "/gh:torvalds/linux" "/gh:torvalds/linux/"
                      "https://github.com/torvalds/linux"))
@@ -3982,7 +4368,7 @@ release-2, and only main and release-1 have a tree."
 
   (it "rewrites the directory of a (DIR . FILES) argument"
     (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
-      (puthash "torvalds/linux" "master" remoto--default-branch-cache)
+      (puthash "/github:torvalds/linux" "master" remoto--default-branch-cache)
       (expect (remoto--dired-around-a (lambda (d &rest _) d)
                                       '("/gh:torvalds/linux" "Makefile"))
               :to-equal '("/github:torvalds/linux@master:/" "Makefile"))))
@@ -4193,7 +4579,7 @@ Returns the full path after completion, or INPUT if no completion."
               ((name . "src") (type . "dir") (size . 0) (sha . "bbb"))
               ((name . "Makefile") (type . "file") (size . 200) (sha . "ccc"))))
     (let ((remoto--dir-contents-cache (make-hash-table :test 'equal)))
-      (let ((children (remoto--fetch-dir-children-light "owner" "repo" "main" "")))
+      (let ((children (remoto--fetch-dir-children-light remoto--github "owner" "repo" "main" "")))
         (expect (length children) :to-equal 3)
         (expect (assoc "README.md" children) :to-be-truthy)
         (expect (assoc "src" children) :to-be-truthy)
@@ -4206,25 +4592,25 @@ Returns the full path after completion, or INPUT if no completion."
                                            (type . "file") (size . 100) (sha . "x")))))
       (spy-on 'remoto--api :and-return-value many-entries)
       (let ((remoto--dir-contents-cache (make-hash-table :test 'equal)))
-        (let ((children (remoto--fetch-dir-children-light "owner" "repo" "main" "")))
+        (let ((children (remoto--fetch-dir-children-light remoto--github "owner" "repo" "main" "")))
           (expect (length children) :to-equal 20)))))
 
   (it "caches results"
     (let ((remoto--dir-contents-cache (make-hash-table :test 'equal))
           (call-count 0))
       (spy-on 'remoto--api :and-call-fake
-              (lambda (_endpoint)
+              (lambda (_forge _endpoint)
                 (setq call-count (1+ call-count))
                 '(((name . "a.el") (type . "file") (size . 10) (sha . "x")))))
-      (remoto--fetch-dir-children-light "owner" "repo" "main" "")
-      (remoto--fetch-dir-children-light "owner" "repo" "main" "")
+      (remoto--fetch-dir-children-light remoto--github "owner" "repo" "main" "")
+      (remoto--fetch-dir-children-light remoto--github "owner" "repo" "main" "")
       (expect call-count :to-equal 1)))
 
   (it "returns nil on API error"
     (spy-on 'remoto--api :and-call-fake
-            (lambda (_) (user-error "not found")))
+            (lambda (_forge _) (user-error "not found")))
     (let ((remoto--dir-contents-cache (make-hash-table :test 'equal)))
-      (expect (remoto--fetch-dir-children-light "owner" "repo" "main" "")
+      (expect (remoto--fetch-dir-children-light remoto--github "owner" "repo" "main" "")
               :to-be nil)))
 
   (it "fetches subdirectory contents"
@@ -4232,7 +4618,7 @@ Returns the full path after completion, or INPUT if no completion."
             '(((name . "main.el") (type . "file") (size . 1000) (sha . "aa"))
               ((name . "utils.el") (type . "file") (size . 500) (sha . "bb"))))
     (let ((remoto--dir-contents-cache (make-hash-table :test 'equal)))
-      (let ((children (remoto--fetch-dir-children-light "owner" "repo" "main" "src")))
+      (let ((children (remoto--fetch-dir-children-light remoto--github "owner" "repo" "main" "src")))
         (expect (length children) :to-equal 2)
         (expect (assoc "main.el" children) :to-be-truthy)))))
 
@@ -4616,13 +5002,13 @@ Returns the full path after completion, or INPUT if no completion."
 (describe "path normalization for files-default"
   (it "rewrites /github:owner/repo/ to canonical form"
     (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
-      (puthash "foobar/zapato" "main" remoto--default-branch-cache)
+      (puthash "/github:foobar/zapato" "main" remoto--default-branch-cache)
       (expect (remoto--maybe-rewrite "/github:foobar/zapato/")
               :to-equal "/github:foobar/zapato@main:/")))
 
   (it "rewrites /github:owner/repo/path to canonical form"
     (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
-      (puthash "foobar/zapato" "main" remoto--default-branch-cache)
+      (puthash "/github:foobar/zapato" "main" remoto--default-branch-cache)
       (expect (remoto--maybe-rewrite "/github:foobar/zapato/src/main.el")
               :to-equal "/github:foobar/zapato@main:/src/main.el"))))
 
@@ -4648,14 +5034,14 @@ Returns the full path after completion, or INPUT if no completion."
 (describe "root completion with user orgs"
   (it "shows user orgs when authenticated and query is empty"
     (spy-on 'remoto--fetch-user-orgs :and-return-value '("qlik-oss" "nebula-contrib"))
-    (let ((remoto--authenticated-user "agzam"))
+    (let ((remoto--logins (remoto-test--logins :user "agzam")))
       (let ((completions (remoto--handle-file-name-all-completions "" "/github:")))
         (expect (member "agzam/" completions) :to-be-truthy)
         (expect (member "qlik-oss/" completions) :to-be-truthy)
         (expect (member "nebula-contrib/" completions) :to-be-truthy))))
 
   (it "falls back to nil when not authenticated"
-    (let ((remoto--authenticated-user nil))
+    (let ((remoto--logins (remoto-test--logins :user nil)))
       (spy-on 'remoto--search-users :and-return-value nil)
       (let ((completions (remoto--handle-file-name-all-completions "" "/github:")))
         (expect completions :to-be nil)))))
@@ -4667,18 +5053,18 @@ Returns the full path after completion, or INPUT if no completion."
     (let ((remoto--issues-cache (make-hash-table :test 'equal))
           (call-count 0))
       (spy-on 'remoto--api :and-call-fake
-              (lambda (_endpoint)
+              (lambda (_forge _endpoint)
                 (setq call-count (1+ call-count))
                 '(((number . 1) (title . "Bug")))))
-      (remoto--fetch-issues "foo" "bar")
-      (remoto--fetch-issues "foo" "bar")
+      (remoto--fetch-issues remoto--github "foo" "bar")
+      (remoto--fetch-issues remoto--github "foo" "bar")
       (expect call-count :to-equal 1)))
 
   (it "returns nil on API error"
     (spy-on 'remoto--api :and-call-fake
-            (lambda (_) (user-error "not found")))
+            (lambda (_forge _) (user-error "not found")))
     (let ((remoto--issues-cache (make-hash-table :test 'equal)))
-      (expect (remoto--fetch-issues "foo" "nonexistent") :to-be nil))))
+      (expect (remoto--fetch-issues remoto--github "foo" "nonexistent") :to-be nil))))
 
 ;;; ---- find-file-noselect intercepts #NUM paths ----
 
@@ -4865,8 +5251,8 @@ Returns the full path after completion, or INPUT if no completion."
 (describe "fetch-user-orgs"
   (it "calls user/orgs endpoint (authenticated)"
     (spy-on 'remoto--api :and-return-value '(((login . "org1")) ((login . "org2"))))
-    (remoto--fetch-user-orgs "anyone")
-    (expect 'remoto--api :to-have-been-called-with "user/orgs?per_page=100&page=1")))
+    (remoto--fetch-user-orgs remoto--github "anyone")
+    (expect 'remoto--api :to-have-been-called-with remoto--github "user/orgs?per_page=100&page=1")))
 
 ;;; ---- remoto--paginated-api ----
 
@@ -4874,39 +5260,39 @@ Returns the full path after completion, or INPUT if no completion."
   (it "accumulates results across pages until a short page"
     (let ((calls nil))
       (spy-on 'remoto--api :and-call-fake
-              (lambda (endpoint)
+              (lambda (_forge endpoint)
                 (push endpoint calls)
                 (pcase (length calls)
                   (1 (make-list 100 '((n . 1))))
                   (2 (make-list 100 '((n . 2))))
                   (_ '(((n . 3)))))))
-      (let ((result (remoto--paginated-api "repos/o/r/branches" 100)))
+      (let ((result (remoto--paginated-api remoto--github "repos/o/r/branches")))
         (expect (length result) :to-equal 201)
         (expect (length calls) :to-equal 3)
         (expect (car calls) :to-equal "repos/o/r/branches?per_page=100&page=3"))))
 
   (it "stops after a single short page"
     (spy-on 'remoto--api :and-return-value '(((n . 1)) ((n . 2))))
-    (remoto--paginated-api "user/orgs" 100)
+    (remoto--paginated-api remoto--github "user/orgs")
     (expect 'remoto--api :to-have-been-called-times 1)
-    (expect 'remoto--api :to-have-been-called-with "user/orgs?per_page=100&page=1"))
+    (expect 'remoto--api :to-have-been-called-with remoto--github "user/orgs?per_page=100&page=1"))
 
   (it "caps total requests at MAX-PAGES on huge result sets"
     (spy-on 'remoto--api :and-return-value (make-list 100 '((n . 1))))
-    (remoto--paginated-api "repos/o/r/tags" 100 3)
+    (remoto--paginated-api remoto--github "repos/o/r/tags" 3)
     (expect 'remoto--api :to-have-been-called-times 3))
 
   (it "uses & as separator when the endpoint already has a query"
     (spy-on 'remoto--api :and-return-value nil)
-    (remoto--paginated-api "search/things?q=x" 100)
-    (expect 'remoto--api :to-have-been-called-with "search/things?q=x&per_page=100&page=1")))
+    (remoto--paginated-api remoto--github "search/things?q=x")
+    (expect 'remoto--api :to-have-been-called-with remoto--github "search/things?q=x&per_page=100&page=1")))
 
 ;;; ---- File commit annotations ----
 
 (describe "file commit annotations"
   (it "propertizes file candidates with commit messages"
     (spy-on 'remoto--api :and-call-fake
-            (lambda (endpoint)
+            (lambda (_forge endpoint)
               (cond
                ((string-match-p "git/trees" endpoint)
                 '((sha . "abc") (tree . (((path . "README.md") (type . "blob")
@@ -4921,9 +5307,9 @@ Returns the full path after completion, or INPUT if no completion."
     (let ((remoto--file-commits-cache (make-hash-table :test 'equal))
           (remoto--tree-cache (make-hash-table :test 'equal))
           (remoto--default-branch-cache (make-hash-table :test 'equal)))
-      (puthash "testowner/testrepo" "main" remoto--default-branch-cache)
+      (puthash "/github:testowner/testrepo" "main" remoto--default-branch-cache)
       (remoto-test--install-mock-tree)
-      (let ((result (remoto--fetch-file-commits "testowner" "testrepo" "main" ""
+      (let ((result (remoto--fetch-file-commits remoto--github "testowner" "testrepo" "main" ""
                                                 '("README.md" "src/"))))
         (expect (alist-get "README.md" result nil nil #'equal)
                 :to-equal "Initial commit")
@@ -4950,18 +5336,18 @@ Returns the full path after completion, or INPUT if no completion."
     (let ((remoto--file-commits-cache (make-hash-table :test 'equal))
           (call-count 0))
       (spy-on 'remoto--api :and-call-fake
-              (lambda (_endpoint)
+              (lambda (_forge _endpoint)
                 (cl-incf call-count)
                 '(((commit (message . "cached msg"))))))
-      (remoto--fetch-file-commits "o" "r" "main" "" '("f.el"))
-      (remoto--fetch-file-commits "o" "r" "main" "" '("f.el"))
+      (remoto--fetch-file-commits remoto--github "o" "r" "main" "" '("f.el"))
+      (remoto--fetch-file-commits remoto--github "o" "r" "main" "" '("f.el"))
       (expect call-count :to-equal 1)))
 
   (it "catches generic errors from API (not just user-error)"
     (let ((remoto--file-commits-cache (make-hash-table :test 'equal)))
       (spy-on 'remoto--api :and-call-fake
-              (lambda (_endpoint) (error "Connection refused")))
-      (expect (remoto--fetch-file-commits "o" "r" "main" "" '("f.el"))
+              (lambda (_forge _endpoint) (error "Connection refused")))
+      (expect (remoto--fetch-file-commits remoto--github "o" "r" "main" "" '("f.el"))
               :to-be nil))))
 
 ;;; Async completion infrastructure
@@ -5024,27 +5410,24 @@ Returns the full path after completion, or INPUT if no completion."
 (describe "remoto--api-async"
   (it "delegates to ghub-get with :callback"
     (spy-on 'ghub-get)
-    (let ((remoto--auth-failed nil)
-          (remoto-github-auth nil)
-          (remoto--authenticated-user "testuser"))
-      (remoto--api-async "search/users?q=foo" #'ignore)
+    (let ((remoto--logins (remoto-test--logins :failed nil :user "testuser"))
+          (remoto-github-auth nil))
+      (remoto--api-async remoto--github "search/users?q=foo" #'ignore)
       (expect 'ghub-get :to-have-been-called)))
 
   (it "uses auth=none when auth has failed"
     (spy-on 'ghub-get)
-    (let ((remoto--auth-failed t))
-      (remoto--api-async "user" #'ignore)
+    (let ((remoto--logins (remoto-test--logins :failed t)))
+      (remoto--api-async remoto--github "user" #'ignore)
       (let ((args (spy-calls-args-for 'ghub-get 0)))
         (expect (plist-get (cddr args) :auth) :to-equal 'none))))
 
   (it "passes nil auth for default ghub token when no token found"
     (spy-on 'ghub-get)
-    (spy-on 'remoto--find-github-token :and-return-value nil)
-    (let ((remoto--auth-failed nil)
-          (remoto-github-auth nil)
-          (remoto--authenticated-user "testuser")
-          (remoto--effective-auth nil))
-      (remoto--api-async "user/orgs" #'ignore)
+    (spy-on 'remoto--find-token :and-return-value nil)
+    (let ((remoto--logins (remoto-test--logins :failed nil :user "testuser" :token nil))
+          (remoto-github-auth nil))
+      (remoto--api-async remoto--github "user/orgs" #'ignore)
       (let ((args (spy-calls-args-for 'ghub-get 0)))
         ;; nil auth lets ghub use its default token mechanism
         (expect (plist-get (cddr args) :auth) :to-be nil)))))
@@ -5066,7 +5449,7 @@ Returns the full path after completion, or INPUT if no completion."
     (spy-on 'remoto--debounce)
     (let ((remoto--search-cache (make-hash-table :test 'equal))
           (remoto-repo-cache-ttl 1800))
-      (expect (remoto--recent-owner-repos "torvalds") :to-be nil)
+      (expect (remoto--recent-owner-repos remoto--github "torvalds") :to-be nil)
       (expect 'remoto--debounce :to-have-been-called)))
 
   (it "returns cached repos immediately"
@@ -5074,10 +5457,10 @@ Returns the full path after completion, or INPUT if no completion."
     (let ((remoto--search-cache (make-hash-table :test 'equal))
           (remoto-repo-cache-ttl 1800)
           (remoto-search-cache-ttl 300))
-      (puthash "\0repos-recent:torvalds"
+      (puthash "\0repos-recent:/github:torvalds"
                (cons (float-time) '("linux" "uemacs"))
                remoto--search-cache)
-      (expect (remoto--recent-owner-repos "torvalds")
+      (expect (remoto--recent-owner-repos remoto--github "torvalds")
               :to-equal '("linux" "uemacs"))
       ;; Should not schedule async since cache is fresh
       (expect 'remoto--debounce :not :to-have-been-called)))
@@ -5088,10 +5471,10 @@ Returns the full path after completion, or INPUT if no completion."
           (remoto-repo-cache-ttl 1800)
           (remoto-search-cache-ttl 300))
       ;; Cache entry older than short TTL but within repo TTL
-      (puthash "\0repos-recent:torvalds"
+      (puthash "\0repos-recent:/github:torvalds"
                (cons (- (float-time) 600) '("linux" "uemacs"))
                remoto--search-cache)
-      (let ((result (remoto--recent-owner-repos "torvalds")))
+      (let ((result (remoto--recent-owner-repos remoto--github "torvalds")))
         ;; Returns stale results immediately
         (expect result :to-equal '("linux" "uemacs"))
         ;; But also schedules background refresh
@@ -5130,7 +5513,7 @@ Returns the full path after completion, or INPUT if no completion."
               (type . "blob") (size . 3100) (sha . "fff") (mode . "100644")))))
   "Mock git/trees/:ref?recursive=1 response.")
 
-(defun remoto-test--pipe-api-fake (endpoint)
+(defun remoto-test--pipe-api-fake (_forge endpoint)
   "Mock API dispatcher for pipeline tests."
   (cond
    ((string-match-p "repos/acme/widgets$" endpoint)
@@ -5147,9 +5530,7 @@ Returns the full path after completion, or INPUT if no completion."
          (remoto--content-cache (make-hash-table :test 'equal))
          (remoto--dir-contents-cache (make-hash-table :test 'equal))
          (remoto--file-commits-cache (make-hash-table :test 'equal))
-         (remoto--auth-failed nil)
-         (remoto--effective-auth "ghp_mock_token")
-         (remoto--authenticated-user "mockuser"))
+         (remoto--logins (remoto-test--logins :failed nil :token "ghp_mock_token" :user "mockuser")))
      (spy-on 'remoto--api :and-call-fake #'remoto-test--pipe-api-fake)
      ,@body))
 
@@ -5157,7 +5538,7 @@ Returns the full path after completion, or INPUT if no completion."
   ;; Segment 1: API returns repo metadata
   (it "remoto--api returns repo metadata"
     (remoto-test-with-pipeline
-      (let ((data (remoto--api "repos/acme/widgets")))
+      (let ((data (remoto--api remoto--github "repos/acme/widgets")))
         (expect data :to-be-truthy)
         (expect (alist-get 'full_name data) :to-equal "acme/widgets")
         (expect (alist-get 'default_branch data) :to-equal "main"))))
@@ -5165,7 +5546,7 @@ Returns the full path after completion, or INPUT if no completion."
   ;; Segment 2: default branch extraction
   (it "remoto--default-branch returns a non-empty string"
     (remoto-test-with-pipeline
-      (let ((branch (remoto--default-branch "acme" "widgets")))
+      (let ((branch (remoto--default-branch remoto--github "acme" "widgets")))
         (expect branch :to-be-truthy)
         (expect (stringp branch) :to-be-truthy)
         (expect (string-empty-p branch) :not :to-be-truthy))))
@@ -5173,7 +5554,7 @@ Returns the full path after completion, or INPUT if no completion."
   ;; Segment 3: tree fetch builds a populated hash table
   (it "remoto--fetch-tree returns a hash table with entries"
     (remoto-test-with-pipeline
-      (let ((tree (remoto--fetch-tree "acme" "widgets" "main")))
+      (let ((tree (remoto--fetch-tree remoto--github "acme" "widgets" "main")))
         (expect tree :to-be-truthy)
         (expect (hash-table-p tree) :to-be-truthy)
         ;; Must have more than just root entries
@@ -5359,41 +5740,35 @@ Returns the full path after completion, or INPUT if no completion."
   (it "passes effective-auth token to remoto--ghub-get"
     (let ((remoto--tree-cache (make-hash-table :test 'equal))
           (remoto--default-branch-cache (make-hash-table :test 'equal))
-          (remoto--auth-failed nil)
-          (remoto--effective-auth "ghp_private_token")
-          (remoto--authenticated-user "testuser")
+          (remoto--logins (remoto-test--logins :failed nil :token "ghp_private_token" :user "testuser"))
           (captured-auth nil))
       (spy-on 'ghub-get :and-call-fake
               (lambda (_resource &optional _params &rest args)
                 (setq captured-auth (plist-get args :auth))
                 '((default_branch . "main"))))
-      (remoto--default-branch "acme" "widgets")
+      (remoto--default-branch remoto--github "acme" "widgets")
       (expect captured-auth :to-equal "ghp_private_token")))
 
   (it "uses auth=none when auth-failed is t"
     (let ((remoto--tree-cache (make-hash-table :test 'equal))
           (remoto--default-branch-cache (make-hash-table :test 'equal))
-          (remoto--auth-failed t)
-          (remoto--effective-auth nil)
-          (remoto--authenticated-user nil)
+          (remoto--logins (remoto-test--logins :failed t :token nil :user nil))
           (captured-auth nil))
       (spy-on 'ghub-get :and-call-fake
               (lambda (_resource &optional _params &rest args)
                 (setq captured-auth (plist-get args :auth))
                 '((default_branch . "main"))))
-      (remoto--default-branch "acme" "widgets")
+      (remoto--default-branch remoto--github "acme" "widgets")
       (expect captured-auth :to-equal 'none)))
 
   (it "signals user-error for private repo with auth=none (404)"
     (let ((remoto--tree-cache (make-hash-table :test 'equal))
           (remoto--default-branch-cache (make-hash-table :test 'equal))
-          (remoto--auth-failed t)
-          (remoto--effective-auth nil)
-          (remoto--authenticated-user nil))
+          (remoto--logins (remoto-test--logins :failed t :token nil :user nil)))
       (spy-on 'remoto--ghub-get :and-call-fake
-              (lambda (_resource _auth endpoint)
+              (lambda (_forge _resource _auth endpoint)
                 (user-error "Remoto: not found: %s" endpoint)))
-      (expect (remoto--api "repos/acme/private-repo")
+      (expect (remoto--api remoto--github "repos/acme/private-repo")
               :to-throw 'user-error))))
 
 ;;; Fresh session: try every auth avenue, fail loudly when none work
@@ -5401,12 +5776,10 @@ Returns the full path after completion, or INPUT if no completion."
 (describe "pipeline: fresh session auth resolution"
   ;; Simulate fresh Emacs: warm-auth hasn't run, all auth state is nil.
   ;; ghub's own auth-source lookup fails (different host/user patterns).
-  ;; remoto--api should try remoto--find-github-token as a last resort.
+  ;; remoto--api should try remoto--find-token as a last resort.
 
-  (it "falls back to remoto--find-github-token when ghub auth fails"
-    (let ((remoto--auth-failed nil)
-          (remoto--effective-auth nil)
-          (remoto--authenticated-user nil)
+  (it "falls back to remoto--find-token when ghub auth fails"
+    (let ((remoto--logins (remoto-test--logins :failed nil :token nil :user nil))
           (remoto-github-auth nil)
           (call-count 0))
       ;; ghub fails with nil auth, succeeds with a real token
@@ -5417,17 +5790,15 @@ Returns the full path after completion, or INPUT if no completion."
                   (if (stringp auth)
                       '((default_branch . "main"))
                     (error "Required Github token does not exist")))))
-      (spy-on 'remoto--find-github-token :and-return-value "ghp_fallback_token")
-      (let ((data (remoto--api "repos/acme/widgets")))
+      (spy-on 'remoto--find-token :and-return-value "ghp_fallback_token")
+      (let ((data (remoto--api remoto--github "repos/acme/widgets")))
         (expect data :to-be-truthy)
         (expect (alist-get 'default_branch data) :to-equal "main")
         ;; Should have cached the token for subsequent calls
-        (expect remoto--effective-auth :to-equal "ghp_fallback_token"))))
+        (expect (remoto--login-token (remoto-test--github-login)) :to-equal "ghp_fallback_token"))))
 
   (it "does not set auth-failed when fallback token works"
-    (let ((remoto--auth-failed nil)
-          (remoto--effective-auth nil)
-          (remoto--authenticated-user nil)
+    (let ((remoto--logins (remoto-test--logins :failed nil :token nil :user nil))
           (remoto-github-auth nil))
       (spy-on 'ghub-get :and-call-fake
               (lambda (_resource &optional _params &rest args)
@@ -5435,66 +5806,58 @@ Returns the full path after completion, or INPUT if no completion."
                   (if (stringp auth)
                       '((full_name . "acme/widgets"))
                     (error "Required Github token does not exist")))))
-      (spy-on 'remoto--find-github-token :and-return-value "ghp_found")
-      (remoto--api "repos/acme/widgets")
-      (expect remoto--auth-failed :to-be nil))))
+      (spy-on 'remoto--find-token :and-return-value "ghp_found")
+      (remoto--api remoto--github "repos/acme/widgets")
+      (expect (remoto--login-failed (remoto-test--github-login)) :to-be nil))))
 
 (describe "pipeline: no auth token anywhere - fail loudly"
-  ;; No token exists: ghub fails, remoto--find-github-token returns
+  ;; No token exists: ghub fails, remoto--find-token returns
   ;; nil.  Every avenue exhausted.  The user must see a clear error,
   ;; not silent empty results.
 
   (it "remoto--api signals user-error when all auth avenues fail"
-    (let ((remoto--auth-failed nil)
-          (remoto--effective-auth nil)
-          (remoto--authenticated-user nil)
+    (let ((remoto--logins (remoto-test--logins :failed nil :token nil :user nil))
           (remoto-github-auth nil))
       (spy-on 'ghub-get :and-call-fake
               (lambda (_resource &optional _params &rest _args)
                 (error "Required Github token does not exist")))
-      (spy-on 'remoto--find-github-token :and-return-value nil)
-      (expect (remoto--api "repos/acme/private-repo")
+      (spy-on 'remoto--find-token :and-return-value nil)
+      (expect (remoto--api remoto--github "repos/acme/private-repo")
               :to-throw 'user-error)))
 
   (it "directory-files signals rather than returning silent empty list"
     (let ((remoto--tree-cache (make-hash-table :test 'equal))
           (remoto--default-branch-cache (make-hash-table :test 'equal))
-          (remoto--auth-failed nil)
-          (remoto--effective-auth nil)
-          (remoto--authenticated-user nil)
+          (remoto--logins (remoto-test--logins :failed nil :token nil :user nil))
           (remoto-github-auth nil))
       (spy-on 'ghub-get :and-call-fake
               (lambda (_resource &optional _params &rest _args)
                 (error "Required Github token does not exist")))
-      (spy-on 'remoto--find-github-token :and-return-value nil)
+      (spy-on 'remoto--find-token :and-return-value nil)
       (expect (directory-files "/github:acme/private@main:/")
               :to-throw 'user-error)))
 
   (it "file-exists-p signals rather than returning nil for auth failure"
     (let ((remoto--tree-cache (make-hash-table :test 'equal))
           (remoto--default-branch-cache (make-hash-table :test 'equal))
-          (remoto--auth-failed nil)
-          (remoto--effective-auth nil)
-          (remoto--authenticated-user nil)
+          (remoto--logins (remoto-test--logins :failed nil :token nil :user nil))
           (remoto-github-auth nil))
       (spy-on 'ghub-get :and-call-fake
               (lambda (_resource &optional _params &rest _args)
                 (error "Required Github token does not exist")))
-      (spy-on 'remoto--find-github-token :and-return-value nil)
+      (spy-on 'remoto--find-token :and-return-value nil)
       (expect (file-exists-p "/github:acme/private@main:/README.md")
               :to-throw 'user-error)))
 
   (it "insert-directory signals rather than inserting nothing"
     (let ((remoto--tree-cache (make-hash-table :test 'equal))
           (remoto--default-branch-cache (make-hash-table :test 'equal))
-          (remoto--auth-failed nil)
-          (remoto--effective-auth nil)
-          (remoto--authenticated-user nil)
+          (remoto--logins (remoto-test--logins :failed nil :token nil :user nil))
           (remoto-github-auth nil))
       (spy-on 'ghub-get :and-call-fake
               (lambda (_resource &optional _params &rest _args)
                 (error "Required Github token does not exist")))
-      (spy-on 'remoto--find-github-token :and-return-value nil)
+      (spy-on 'remoto--find-token :and-return-value nil)
       (expect (with-temp-buffer
                 (insert-directory "/github:acme/private@main:/" "-la"))
               :to-throw 'user-error))))
@@ -5509,69 +5872,63 @@ Returns the full path after completion, or INPUT if no completion."
 
   (it "increments while a request is pending"
     (let ((remoto--inflight-count 0)
-          (remoto--auth-failed nil)
-          (remoto--effective-auth 'token))
+          (remoto--logins (remoto-test--logins :failed nil :token 'token)))
       (spy-on 'ghub-get)
-      (remoto--api-async "search/x" #'ignore)
+      (remoto--api-async remoto--github "search/x" #'ignore)
       (expect remoto--inflight-count :to-equal 1)))
 
   (it "decrements once and forwards the value on success"
     (let ((remoto--inflight-count 0)
-          (remoto--auth-failed nil)
-          (remoto--effective-auth 'token)
+          (remoto--logins (remoto-test--logins :failed nil :token 'token))
           (got 'none))
       ;; ghub calls the callback as (value headers status req); the wrapper
       ;; must absorb the extra args and forward only the value, once.
       (spy-on 'ghub-get :and-call-fake
               (lambda (_resource &optional _params &rest args)
                 (funcall (plist-get args :callback) 'VALUE 'h 's 'r)))
-      (remoto--api-async "search/x" (lambda (d) (setq got d)))
+      (remoto--api-async remoto--github "search/x" (lambda (d) (setq got d)))
       (expect remoto--inflight-count :to-equal 0)
       (expect got :to-be 'VALUE)))
 
   (it "decrements once on error"
     (let ((remoto--inflight-count 0)
-          (remoto--auth-failed nil)
-          (remoto--effective-auth 'token))
+          (remoto--logins (remoto-test--logins :failed nil :token 'token)))
       (spy-on 'ghub-get :and-call-fake
               (lambda (_resource &optional _params &rest args)
                 (funcall (plist-get args :errorback) 'err 'h 's 'r)))
-      (remoto--api-async "search/y" #'ignore)
+      (remoto--api-async remoto--github "search/y" #'ignore)
       (expect remoto--inflight-count :to-equal 0)))
 
   (it "does not leak when ghub-get throws synchronously"
     (let ((remoto--inflight-count 0)
-          (remoto--auth-failed nil)
-          (remoto--effective-auth 'token))
+          (remoto--logins (remoto-test--logins :failed nil :token 'token)))
       (spy-on 'ghub-get :and-call-fake (lambda (&rest _) (error "boom")))
-      (remoto--api-async "search/z" #'ignore)
+      (remoto--api-async remoto--github "search/z" #'ignore)
       (expect remoto--inflight-count :to-equal 0)))
 
   (it "calls ERRBACK for a failed request and for one that never started"
     (let ((remoto--inflight-count 0)
-          (remoto--auth-failed nil)
-          (remoto--effective-auth 'token)
+          (remoto--logins (remoto-test--logins :failed nil :token 'token))
           (failed nil))
       (spy-on 'ghub-get :and-call-fake
               (lambda (resource &optional _params &rest args)
                 (if (equal resource "/late")
                     (funcall (plist-get args :errorback) 'err 'h 's 'r)
                   (error "boom"))))
-      (remoto--api-async "late" #'ignore (lambda () (push 'late failed)))
-      (remoto--api-async "never" #'ignore (lambda () (push 'never failed)))
+      (remoto--api-async remoto--github "late" #'ignore (lambda () (push 'late failed)))
+      (remoto--api-async remoto--github "never" #'ignore (lambda () (push 'never failed)))
       (expect failed :to-equal '(never late))
       (expect remoto--inflight-count :to-equal 0)))
 
   (it "stays positive when one of two overlapping fetches finishes"
     (let ((remoto--inflight-count 0)
-          (remoto--auth-failed nil)
-          (remoto--effective-auth 'token)
+          (remoto--logins (remoto-test--logins :failed nil :token 'token))
           (callbacks '()))
       (spy-on 'ghub-get :and-call-fake
               (lambda (_resource &optional _params &rest args)
                 (push (plist-get args :callback) callbacks)))
-      (remoto--api-async "a" #'ignore)
-      (remoto--api-async "b" #'ignore)
+      (remoto--api-async remoto--github "a" #'ignore)
+      (remoto--api-async remoto--github "b" #'ignore)
       (expect remoto--inflight-count :to-equal 2)
       (funcall (car callbacks) 'V 'h 's 'r)
       (expect remoto--inflight-count :to-equal 1))))
@@ -5917,7 +6274,7 @@ three functions the indicator asks are answered by a temp buffer."
                 (setq seen (overlayp remoto--status-overlay))
                 '((name . "main"))))
       (remoto-test-with-minibuffer-contents "/gh:agzam/remoto.el@"
-        (expect (remoto--ghub-get "/repos/o/r/branches" 'none "repos/o/r/branches")
+        (expect (remoto--ghub-get remoto--github "/repos/o/r/branches" 'none "repos/o/r/branches")
                 :to-equal '((name . "main")))
         (expect seen :to-be t)
         (expect 'redisplay :to-have-been-called)
@@ -5930,7 +6287,7 @@ three functions the indicator asks are answered by a temp buffer."
       (spy-on 'message)
       (spy-on 'ghub-get :and-return-value '((default_branch . "main")))
       (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil)))
-        (remoto--ghub-get "/repos/o/r" 'none "repos/o/r"))
+        (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r"))
       (expect 'message :to-have-been-called-with
               "Remoto %s" remoto--fetch-indicator-text)))
 
@@ -5944,7 +6301,7 @@ three functions the indicator asks are answered by a temp buffer."
       (spy-on 'ghub-get :and-call-fake
               (lambda (&rest _) (signal 'ghub-http-error '(404 "Not found" "u" nil))))
       (remoto-test-with-minibuffer-contents "/gh:agzam/nope/"
-        (expect (remoto--ghub-get "/repos/agzam/nope" 'none "repos/agzam/nope")
+        (expect (remoto--ghub-get remoto--github "/repos/agzam/nope" 'none "repos/agzam/nope")
                 :to-throw 'user-error)
         (expect remoto--inflight-count :to-equal 0)
         (expect remoto--status-overlay :to-be nil)))))
@@ -6661,7 +7018,7 @@ of `completion-all-completions'; Vertico inserts a candidate as
               :to-equal '("remoto.el/"))))
 
   (it "matches accounts by login or description"
-    (let ((remoto--authenticated-user "me"))
+    (let ((remoto--logins (remoto-test--logins :user "me")))
       (spy-on 'remoto--fetch-user-orgs :and-return-value
               (list (propertize "acme" 'remoto-acct-type "Organization"
                                 'remoto-acct-desc "Rockets")))
@@ -6701,7 +7058,7 @@ of `completion-all-completions'; Vertico inserts a candidate as
     (spy-on 'remoto--search-users)
     (spy-on 'remoto--search-owner-repos)
     (spy-on 'remoto--recent-owner-repos :and-return-value '("repo"))
-    (let ((remoto--authenticated-user nil))
+    (let ((remoto--logins (remoto-test--logins :user nil)))
       (expect (remoto--handle-file-name-all-completions "" "/github:") :to-be nil))
     (expect (remoto--handle-file-name-all-completions "" "/github:kn66/")
             :to-equal '("repo/"))
@@ -6742,7 +7099,7 @@ of `completion-all-completions'; Vertico inserts a candidate as
     (spy-on 'remoto--search-users :and-return-value '("torvalds"))
     (expect (remoto--handle-file-name-all-completions "" "/github:")
             :to-equal '("torvalds/"))
-    (expect 'remoto--search-users :to-have-been-called-with "tor"))
+    (expect 'remoto--search-users :to-have-been-called-with remoto--github "tor"))
 
   (it "searches issues with the minibuffer text"
     (spy-on 'remoto--minibuffer-input :and-return-value "/github:o/r#bug")
@@ -6750,7 +7107,7 @@ of `completion-all-completions'; Vertico inserts a candidate as
             '(((number . 7) (title . "a bug") (state . "open"))))
     (expect (remoto--handle-file-name-all-completions "" "/github:o/r#")
             :to-equal '("7"))
-    (expect 'remoto--search-issues :to-have-been-called-with "o" "r" "bug"))
+    (expect 'remoto--search-issues :to-have-been-called-with remoto--github "o" "r" "bug"))
 
   (it "fetches an issue by number from the minibuffer text"
     (spy-on 'remoto--minibuffer-input :and-return-value "/github:o/r#42")
@@ -6759,7 +7116,7 @@ of `completion-all-completions'; Vertico inserts a candidate as
             '((number . 42) (title . "x") (state . "open")))
     (expect (remoto--handle-file-name-all-completions "" "/github:o/r#")
             :to-equal '("42"))
-    (expect 'remoto--fetch-issue :to-have-been-called-with "o" "r" "42")))
+    (expect 'remoto--fetch-issue :to-have-been-called-with remoto--github "o" "r" "42")))
 
 (describe "remoto--repo-completion-table under regexp-filtering styles"
   (it "takes the query from the minibuffer when STRING is empty"
@@ -6811,7 +7168,7 @@ of `completion-all-completions'; Vertico inserts a candidate as
       (spy-on 'remoto--search-owner-repos :and-return-value '("linux" "libdc-for-dirk"))
       (expect (remoto-test--all-completions input '(orderless))
               :to-equal '(("linux/") . 17))
-      (expect 'remoto--search-owner-repos :to-have-been-called-with "torvalds" "lin")))
+      (expect 'remoto--search-owner-repos :to-have-been-called-with remoto--github "torvalds" "lin")))
 
   (it "runs the user search with the typed text at the root"
     (let ((input "/github:tor"))
@@ -6819,7 +7176,7 @@ of `completion-all-completions'; Vertico inserts a candidate as
       (spy-on 'remoto--search-users :and-return-value '("torvalds"))
       (expect (remoto-test--all-completions input '(orderless))
               :to-equal '(("torvalds/") . 8))
-      (expect 'remoto--search-users :to-have-been-called-with "tor")))
+      (expect 'remoto--search-users :to-have-been-called-with remoto--github "tor")))
 
   (it "finds issues by title"
     (let ((input "/github:o/r#forty"))
@@ -6828,7 +7185,7 @@ of `completion-all-completions'; Vertico inserts a candidate as
               '(((number . 42) (title . "forty-two") (state . "open"))))
       (expect (remoto-test--all-completions input '(orderless))
               :to-equal '(("42") . 12))
-      (expect 'remoto--search-issues :to-have-been-called-with "o" "r" "forty")))
+      (expect 'remoto--search-issues :to-have-been-called-with remoto--github "o" "r" "forty")))
 
   (it "filters branches and tags"
     (let ((input "/github:o/r@dev"))
@@ -7138,17 +7495,23 @@ every source older than an existing output file, so it must not exist."
         (end-of-file (nreverse forms))))))
 
 (describe "the autoloads bootstrap"
-  (it "registers the handler for remoto paths with the regexp the mode uses"
+  (it "registers the handler for every prefix of the built-in forges"
     (remoto-test-with-autoloads file
       (let* ((forms (remoto-test--autoload-forms file))
-             (registration (seq-find (lambda (f)
-                                       (and (eq (car-safe f) 'add-to-list)
-                                            (equal (nth 1 f) ''file-name-handler-alist)))
-                                     forms))
-             (entry (cadr (nth 2 registration))))
-        (expect registration :to-be-truthy)
-        (expect (car entry) :to-equal remoto--handler-regexp)
-        (expect (cdr entry) :to-be 'remoto-autoload-file-name-handler)
+             (entries (mapcar (lambda (f) (cadr (nth 2 f)))
+                              (seq-filter (lambda (f)
+                                            (and (eq (car-safe f) 'add-to-list)
+                                                 (equal (nth 1 f) ''file-name-handler-alist)))
+                                          forms))))
+        ;; One cookie per forge file, GitHub's and Forgejo's.
+        (expect (length entries) :to-equal 2)
+        (dolist (entry entries)
+          (expect (cdr entry) :to-be 'remoto-autoload-file-name-handler))
+        (dolist (prefix (mapcar #'car remoto--forges))
+          (expect (seq-some (lambda (entry)
+                              (string-match-p (car entry) (format "/%s:o/r" prefix)))
+                            entries)
+                  :to-be-truthy))
         (expect (seq-find (lambda (f)
                             (and (eq (car-safe f) 'autoload)
                                  (equal (nth 1 f) ''remoto-autoload-file-name-handler)))
@@ -7206,7 +7569,7 @@ fails yields (:error ...), an unreadable child (:unreadable OUT ERR)."
      ;; before its first request: the autoload fires on the operation below.
      (with-eval-after-load 'remoto
        (advice-add 'remoto--api :override
-                   (lambda (endpoint)
+                   (lambda (_forge endpoint)
                      (pcase endpoint
                        ("repos/o/r" '((default_branch . "main")))
                        ("repos/o/r/git/trees/main?recursive=1"
@@ -7238,11 +7601,13 @@ fails yields (:error ...), an unreadable child (:unreadable OUT ERR)."
 (defconst remoto-test--fresh-api-stub
   '(with-eval-after-load 'remoto
      (advice-add 'remoto--api :override
-                 (lambda (endpoint)
+                 (lambda (_forge endpoint)
                    (pcase endpoint
                      ("repos/o/r" '((default_branch . "main")))
-                     ("repos/o/r/git/trees/main?recursive=1"
-                      '((tree . (((path . "README.md") (type . "blob")
+                     ((or "repos/o/r/git/trees/main?recursive=1"
+                          "repos/o/r/git/trees/main?recursive=1&per_page=1000&page=1")
+                      '((total_count . 1)
+                        (tree . (((path . "README.md") (type . "blob")
                                   (size . 6) (sha . "aaa") (mode . "100644"))))))
                      ("repos/o/r/contents/README.md?ref=main"
                       (list (cons 'sha "aaa")
@@ -7291,6 +7656,17 @@ with what the same call does once the mode is on."
                       '(find-file-noselect "/github:o/r/README.md")))))
         (expect (plist-get result :file) :to-equal "/github:o/r@main:/README.md")
         (expect (plist-get result :mode) :not :to-be 'dired-mode))))
+
+  (it "serves a Codeberg path first, from the cookie of its own file"
+    (remoto-test-with-autoloads file
+      (dolist (name '("/codeberg:o/r" "/cb:o/r/"))
+        (let ((result (remoto-test--fresh-session
+                       file
+                       (remoto-test--fresh-first-call-form
+                        `(find-file-noselect ,name)))))
+          (expect (plist-get result :dir) :to-equal "/codeberg:o/r@main:/")
+          (expect (plist-get result :mode) :to-be 'dired-mode)
+          (expect (plist-get result :listed) :to-be t)))))
 
   (it "lists the tree from every Dired entry point"
     (remoto-test-with-autoloads file
@@ -7392,7 +7768,7 @@ with what the same call does once the mode is on."
   (it "turns global-remoto-mode off and empties the caches"
     (unwind-protect
         (progn
-          (puthash "o/r" "main" remoto--default-branch-cache)
+          (puthash "/github:o/r" "main" remoto--default-branch-cache)
           (remoto-unload-function)
           (expect global-remoto-mode :to-be nil)
           (expect (assoc remoto--handler-regexp file-name-handler-alist)
@@ -7410,13 +7786,19 @@ with what the same call does once the mode is on."
 ;; The rows come from the delimiter registry, so a delimiter registered
 ;; later gets its rows without anyone listing them by hand.
 
+(defconst remoto-test--grammar-roots '("/github:" "/codeberg:")
+  "The canonical prefixes the grammar rows are spelled with: one per forge.")
+
 (defun remoto-test--grammar-rows ()
-  "Return every shape of a remoto name as (NAME . PARENT).
+  "Return every shape of a remoto name as (NAME . PARENT), for every forge.
 PARENT is what .. names from NAME, nil where .. has no meaning: a
 query, a ref or a topic.  Above a short-form directory it is the bare
 repository name, as `remoto--normalize-name' resolves it."
-  (let* ((root "/github:")
-         (owner (concat root "testowner/"))
+  (mapcan #'remoto-test--grammar-rows-of remoto-test--grammar-roots))
+
+(defun remoto-test--grammar-rows-of (root)
+  "Return the grammar rows of the forge whose canonical prefix is ROOT."
+  (let* ((owner (concat root "testowner/"))
          (repo (concat owner "testrepo"))
          (rows (list (cons root root)
                      (cons (concat root "testowner") nil)
@@ -7428,8 +7810,9 @@ repository name, as `remoto--normalize-name' resolves it."
                      (cons (concat repo ":/") owner)
                      (cons (concat repo ":/src/") (concat repo ":/"))
                      (cons (concat repo ":/src/main.el") nil))))
-    (dolist (delimiter (mapcar #'cdr remoto--delimiters))
-      (let* ((c (char-to-string (remoto-delimiter-char delimiter)))
+    (dolist (char (remoto-forge-delimiters (remoto--canonical-forge root)))
+      (let* ((delimiter (alist-get char remoto--delimiters))
+             (c (char-to-string char))
              (ref-p (eq (remoto-delimiter-kind delimiter) 'ref))
              (pick (if ref-p "main" "42")))
         (push (cons (concat repo c) nil) rows)
@@ -7450,8 +7833,8 @@ repository name, as `remoto--normalize-name' resolves it."
   "Run BODY with every fetcher answering for testowner/testrepo from stubs."
   (declare (indent 0))
   `(remoto-test-with-cache
-     (let ((remoto--authenticated-user "me"))
-       (spy-on 'remoto--fetch-user-orgs :and-return-value
+     (let ((remoto--logins (remoto-test--logins :user "me")))
+       (spy-on 'remoto-forge-user-orgs :and-return-value
                (list (propertize "testowner" 'remoto-acct-type "Organization")))
        (spy-on 'remoto--recent-owner-repos :and-return-value '("testrepo" "other"))
        (spy-on 'remoto--fetch-branches :and-return-value '("main" "rel/1"))
@@ -7462,15 +7845,18 @@ repository name, as `remoto--normalize-name' resolves it."
                   (pull_request . ((url . "x"))))))
        (spy-on 'remoto--default-branch :and-return-value "main")
        (spy-on 'remoto--fetch-dir-children-light :and-call-fake
-               (lambda (_owner _repo _ref dir-path)
+               (lambda (forge _owner _repo _ref dir-path)
                  (remoto--tree-children
                   (remoto--parse-path
-                   (concat "/github:testowner/testrepo@main:/" dir-path)))))
+                   (format "%stestowner/testrepo@main:/%s" (remoto--prefix forge)
+                           dir-path)))))
        (spy-on 'remoto--fetch-file-commits :and-return-value nil)
-       (dolist (ref '("main" "rel/1"))
-         (puthash (concat "testowner/testrepo@" ref)
-                  (gethash "testowner/testrepo@main" remoto--tree-cache)
-                  remoto--tree-cache))
+       (dolist (root remoto-test--grammar-roots)
+         (puthash (concat root "testowner/testrepo") "main" remoto--default-branch-cache)
+         (dolist (ref '("main" "rel/1"))
+           (puthash (concat root "testowner/testrepo@" ref)
+                    (gethash "/github:testowner/testrepo@main" remoto--tree-cache)
+                    remoto--tree-cache)))
        ,@body)))
 
 (describe "grammar invariants on every row"
@@ -7569,18 +7955,21 @@ repository name, as `remoto--normalize-name' resolves it."
 ;; asserts the level table at every row.  GitHub's kit replays the
 ;; answers of test/e2e/fixtures.jsonl at `remoto--api'.
 
-(defvar remoto-test--fixtures nil
-  "GitHub's recorded answers by resource, each (STATUS BODY), arrays as lists.")
+(defvar remoto-test--fixtures (make-hash-table :test 'equal)
+  "Recorded answers by file, each a table of resource -> (STATUS BODY).
+Arrays come as lists, as `remoto--json-reader' parses them.")
 
-(defconst remoto-test--fixtures-file
-  (expand-file-name "e2e/fixtures.jsonl"
-                    (file-name-directory (or load-file-name buffer-file-name)))
-  "GitHub's recorded answers, the ones `make test-e2e' replays.")
+(defconst remoto-test--directory
+  (file-name-directory (or load-file-name buffer-file-name))
+  "The directory of this file, where the fixtures live.")
 
-(defun remoto-test--load-fixtures ()
-  "Read the recorded answers plus the ones about the fake account."
-  (let ((table (make-hash-table :test 'equal))
-        (file remoto-test--fixtures-file))
+(defun remoto-test--fixtures-file (name)
+  "Return the path of the fixtures file NAME under test/."
+  (expand-file-name name remoto-test--directory))
+
+(defun remoto-test--load-fixtures (file hand)
+  "Read the recorded answers of FILE plus HAND, the ones about the fake account."
+  (let ((table (make-hash-table :test 'equal)))
     (with-temp-buffer
       (let ((coding-system-for-read 'utf-8))
         (insert-file-contents file))
@@ -7591,17 +7980,25 @@ repository name, as `remoto--normalize-name' resolves it."
           (puthash (alist-get 'resource entry)
                    (list (alist-get 'status entry) (alist-get 'body entry))
                    table))))
-    (puthash "/user" '(200 ((login . "remoto-e2e") (type . "User"))) table)
-    (puthash "/user/orgs?per_page=100&page=1"
-             '(200 (((login . "emacs-mirror")
-                     (description . "Mirrors of the GNU Emacs repositories"))))
-             table)
+    (pcase-dolist (`(,resource . ,answer) hand)
+      (puthash resource answer table))
     table))
 
-(defun remoto-test--fixture-api (endpoint)
-  "Answer ENDPOINT from the fixtures, as `remoto--api' would from GitHub."
+(defun remoto-test--fixtures-of (kit)
+  "Return the table of recorded answers of KIT, read on first use."
+  (let ((file (remoto-test--fixtures-file (plist-get kit :fixtures))))
+    (or (gethash file remoto-test--fixtures)
+        (puthash file (remoto-test--load-fixtures file (plist-get kit :hand))
+                 remoto-test--fixtures))))
+
+(defun remoto-test--fixture-api (forge endpoint)
+  "Answer ENDPOINT from the fixtures of FORGE, as `remoto--api' would."
   (pcase-let ((`(,status ,body)
-               (gethash (concat "/" endpoint) remoto-test--fixtures
+               (gethash (concat "/" endpoint)
+                        (remoto-test--fixtures-of
+                         (if (eq (remoto-forge-name forge) 'codeberg)
+                             remoto-test--codeberg-kit
+                           remoto-test--github-kit))
                         '(404 ((message . "Not Found"))))))
     (if (eql status 200)
         body
@@ -7613,22 +8010,42 @@ repository name, as `remoto--normalize-name' resolves it."
         :owner "agzam" :repo "remoto.el" :ref "main" :tag "2.2.0"
         :dir "test" :file "README.org" :topic "47"
         :api #'remoto-test--fixture-api
+        :fixtures "e2e/fixtures.jsonl"
+        :hand '(("/user" 200 ((login . "remoto-e2e") (type . "User")))
+                ("/user/orgs?per_page=100&page=1" 200
+                 (((login . "emacs-mirror")
+                   (description . "Mirrors of the GNU Emacs repositories")))))
         :url "https://github.com/agzam/remoto.el"
         :topic-url "https://github.com/agzam/remoto.el/pull/47")
-  "What the conformance suite needs to know about GitHub.")
+  "What the conformance suite needs to know about GitHub.
+The fixtures are the ones `make test-e2e' replays.")
+
+(defconst remoto-test--codeberg-kit
+  (list :forge 'codeberg
+        :root "/codeberg:" :account "remoto-e2e" :org "forgejo"
+        :owner "forgejo" :repo "docs" :ref "next" :tag "v13.0.0-dev"
+        :dir "docs" :file "README.md" :topic "2249"
+        :api #'remoto-test--fixture-api
+        :fixtures "fixtures/codeberg.jsonl"
+        :hand '(("/user" 200 ((login . "remoto-e2e")))
+                ("/user/orgs?limit=50&page=1" 200
+                 (((username . "forgejo") (name . "forgejo")
+                   (description . "Beyond coding. We forge.")))))
+        :url "https://codeberg.org/forgejo/docs"
+        :topic-url "https://codeberg.org/forgejo/docs/pulls/2249")
+  "What the conformance suite needs to know about Codeberg.
+The fixtures come from test/record-codeberg-fixtures.el.")
 
 (defmacro remoto-test-with-kit (kit &rest body)
   "Run BODY with the forge of KIT answering from its fixtures."
   (declare (indent 1))
   `(remoto-test-with-cache
-     (let ((remoto--authenticated-user (plist-get ,kit :account)))
-       (unless remoto-test--fixtures
-         (setq remoto-test--fixtures (remoto-test--load-fixtures)))
+     (let ((remoto--logins (remoto-test--logins :user (plist-get ,kit :account))))
        (spy-on 'remoto--api :and-call-fake (plist-get ,kit :api))
        (spy-on 'remoto--api-async :and-call-fake
-               (lambda (endpoint callback &optional errback)
+               (lambda (forge endpoint callback &optional errback)
                  (condition-case nil
-                     (funcall callback (funcall (plist-get ,kit :api) endpoint))
+                     (funcall callback (funcall (plist-get ,kit :api) forge endpoint))
                    (user-error (when errback (funcall errback))))))
        ;; Loading remoto-topic would define the function over the spy.
        (spy-on 'remoto--require-topic)
@@ -7735,6 +8152,9 @@ repository name, as `remoto--normalize-name' resolves it."
 
 (describe "the GitHub forge, against the level table"
   (remoto-test--conformance remoto-test--github-kit))
+
+(describe "the Codeberg forge, against the level table"
+  (remoto-test--conformance remoto-test--codeberg-kit))
 
 (provide 'remoto-tests)
 

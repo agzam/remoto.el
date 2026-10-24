@@ -73,8 +73,7 @@
          (remoto--content-cache (make-hash-table :test 'equal))
          (remoto--dir-contents-cache (make-hash-table :test 'equal))
          (remoto--file-commits-cache (make-hash-table :test 'equal))
-         (remoto--auth-failed nil)
-         (remoto--authenticated-user nil))
+         (remoto--logins (make-hash-table :test 'equal)))
      ,@body))
 
 ;;; Low-level API
@@ -82,13 +81,13 @@
 (describe "integration: remoto--api"
   (it "fetches repo metadata"
     (let ((data (remoto--api
-                 (format "repos/%s/%s" remoto-itest-owner remoto-itest-repo))))
+                 remoto--github (format "repos/%s/%s" remoto-itest-owner remoto-itest-repo))))
       (expect (alist-get 'full_name data)
               :to-equal "emacs-mirror/emacs")))
 
   (it "returns alists for objects and lists for arrays"
     (let* ((data (remoto--api
-                  (format "repos/%s/%s/git/trees/%s?recursive=1"
+                  remoto--github (format "repos/%s/%s/git/trees/%s?recursive=1"
                           remoto-itest-owner remoto-itest-repo remoto-itest-ref)))
            (entries (alist-get 'tree data)))
       ;; tree should be a list, not a vector
@@ -98,7 +97,7 @@
       (expect (alist-get 'path (car entries)) :to-be-truthy)))
 
   (it "signals user-error on 404"
-    (expect (remoto--api "repos/nonexistent-owner-xyz/nonexistent-repo-xyz")
+    (expect (remoto--api remoto--github "repos/nonexistent-owner-xyz/nonexistent-repo-xyz")
             :to-throw 'user-error)))
 
 ;;; Default branch resolution
@@ -106,7 +105,7 @@
 (describe "integration: default branch"
   (it "resolves the default branch for emacs-mirror/emacs"
     (remoto-itest-with-clean-cache
-      (expect (remoto--default-branch remoto-itest-owner remoto-itest-repo)
+      (expect (remoto--default-branch remoto--github remoto-itest-owner remoto-itest-repo)
               :to-equal "master"))))
 
 ;;; Tree fetching
@@ -120,7 +119,7 @@
           (remoto--content-cache (make-hash-table :test 'equal)))
       (setq remoto-itest--tree
             (remoto--fetch-tree
-             remoto-itest-owner remoto-itest-repo remoto-itest-ref))))
+             remoto--github remoto-itest-owner remoto-itest-repo remoto-itest-ref))))
 
   (after-all
     (makunbound 'remoto-itest--tree)
@@ -245,7 +244,7 @@
   (it "fetches file content with correct first line"
     (remoto-itest-with-clean-cache
       (let ((content (remoto--fetch-file-content
-                      remoto-itest-owner remoto-itest-repo
+                      remoto--github remoto-itest-owner remoto-itest-repo
                       "README" remoto-itest-ref)))
         (expect (length content) :to-be-greater-than 100)
         (expect content :to-match "\\`Copyright"))))
@@ -254,7 +253,7 @@
     (remoto-itest-with-clean-cache
       ;; Fetch once
       (remoto--fetch-file-content
-       remoto-itest-owner remoto-itest-repo "README" remoto-itest-ref)
+       remoto--github remoto-itest-owner remoto-itest-repo "README" remoto-itest-ref)
       (expect (hash-table-count remoto--content-cache) :to-be-greater-than 0)
       ;; Second fetch should use cache (we can't easily count API calls,
       ;; but we can verify the cache has the entry)
@@ -336,7 +335,7 @@
               (expect (buffer-string) :to-match
                       (rx bol "  drwxr-xr-x  1 github github " (+ (in " 0-9"))
                           (= 12 nonl) " emacs" (>= 4 " ") "Mirror of GNU Emacs" eol))
-              (expect (gethash "emacs-mirror/emacs" remoto--default-branch-cache)
+              (expect (gethash "/github:emacs-mirror/emacs" remoto--default-branch-cache)
                       :to-equal "master")
               (expect (file-exists-p "/github:emacs-mirror/emacs") :to-be t))
           (kill-buffer buf))))))

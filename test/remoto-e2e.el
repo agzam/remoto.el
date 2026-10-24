@@ -525,8 +525,10 @@ fires otherwise, remoto's debounced searches among them."
         (set-buffer-modified-p nil))
       (let ((kill-buffer-query-functions nil))
         (kill-buffer buffer))))
+  ;; The login state is no cache: the token stays known, as after the warm-up.
   (mapatoms (lambda (symbol)
               (when (and (string-prefix-p "remoto--" (symbol-name symbol))
+                         (not (eq symbol 'remoto--logins))
                          (boundp symbol)
                          (hash-table-p (symbol-value symbol)))
                 (clrhash (symbol-value symbol)))))
