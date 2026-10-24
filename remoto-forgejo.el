@@ -98,9 +98,10 @@ The tree of a larger repository stays partial, and the Contents API
 fills its directories on demand, as for a truncated GitHub tree.")
 
 (defun remoto-forgejo--tree-page (owner repo ref page)
-  "Return the endpoint of PAGE of the recursive tree of OWNER/REPO at REF."
+  "Return the endpoint of PAGE of the recursive tree of OWNER/REPO at REF.
+Forgejo answers 404 to a slash of the ref in the path, so it is escaped."
   (format "repos/%s/%s/git/trees/%s?recursive=1&per_page=1000&page=%d"
-          owner repo ref page))
+          owner repo (url-hexify-string ref) page))
 
 (cl-defmethod remoto-forge-tree ((forge remoto-forgejo) owner repo ref)
   "Forgejo's `tree' for OWNER, REPO and REF on FORGE, 1000 entries a page.
@@ -143,7 +144,7 @@ They are listed at git/refs."
 (cl-defmethod remoto-forge-commit-sha ((forge remoto-forgejo) owner repo ref)
   "Forgejo's `commit-sha' for OWNER, REPO and REF on FORGE, from git/commits."
   (or (alist-get 'sha (remoto--api forge (format "repos/%s/%s/git/commits/%s"
-                                                 owner repo ref)))
+                                                 owner repo (url-hexify-string ref))))
       (user-error "Remoto: could not resolve commit SHA for %s/%s@%s"
                   owner repo ref)))
 

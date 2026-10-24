@@ -2772,6 +2772,29 @@ using unauthenticated access until M-x remoto-reset-auth")
             :to-equal '("v12.0/forgejo"))
     (expect (remoto-forge-commit-sha remoto--codeberg "o" "r" "main") :to-equal "abc"))
 
+  (it "escapes the slash of a ref in the endpoints that take the ref in their path"
+    ;; Codeberg answers 404 to git/trees/v15.0/forgejo, 200 to v15.0%2Fforgejo.
+    (remoto-test-with-cache
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_forge endpoint)
+                (pcase endpoint
+                  ("repos/o/r/git/trees/v15.0%2Fforgejo?recursive=1&per_page=1000&page=1"
+                   '((total_count . 1)
+                     (tree . (((path . "go.mod") (type . "blob") (size . 1) (sha . "1")
+                               (mode . "100644"))))))
+                  ("repos/o/r/git/commits/v15.0%2Fforgejo" '((sha . "115c575")))
+                  (_ (error "Unexpected %s" endpoint)))))
+      (expect (file-exists-p "/codeberg:o/r@v15.0/forgejo:/go.mod") :to-be t)
+      (expect (remoto-forge-commit-sha remoto--codeberg "o" "r" "v15.0/forgejo")
+              :to-equal "115c575")))
+
+  (it "leaves the slash of a ref as it is in GitHub's tree endpoint"
+    (remoto-test-with-cache
+      (spy-on 'remoto--api :and-return-value '((tree)))
+      (remoto-forge-tree remoto--github "o" "r" "release/2026.5.0")
+      (expect 'remoto--api :to-have-been-called-with
+              remoto--github "repos/o/r/git/trees/release/2026.5.0?recursive=1")))
+
   (it "spells review states GitHub's way and drops review requests"
     (spy-on 'remoto--api :and-return-value
             '(((state . "APPROVED") (user . ((login . "a"))))
