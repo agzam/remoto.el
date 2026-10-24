@@ -39,7 +39,7 @@ C-x C-f https://codeberg.org/forgejo/forgejo/src/branch/forgejo/go.mod RET
 
 Public repositories need no token. For private ones, and for ~/cb:~ alone, which lists your account and organizations, set up a token the way ~ghub~ wants it for Forgejo: name your account in ~git config --global forgejo.user USER~ and store the token in ~auth-source~ under the host ~codeberg.org/api/v1~ with the login ~USER^ghub~ (a ~USER^forge~ token from the Forge package works as well). Without a ~forgejo.user~, remoto reads Codeberg anonymously and says so once.
 
-Other Forgejo or Gitea servers get a prefix each through ~remoto-forgejo-instances~, a list of ~(PREFIX HOST)~ pairs; the token goes under ~HOST/api/v1~:
+Other Forgejo or Gitea servers get a prefix each through ~remoto-forgejo-instances~, a list of ~(PREFIX HOST)~ pairs. The token goes under ~HOST/api/v1~, and the account name under ~forgejo.HOST.user~, since ~ghub~ reads ~forgejo.user~ for Codeberg only:
 
 #+begin_src emacs-lisp
 (setopt remoto-forgejo-instances '(("gitea" "gitea.com")))

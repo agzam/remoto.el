@@ -3036,6 +3036,16 @@ nothing opens a Dired of the names that match it."
 
 ;;;; Eager auth warm-up
 
+(defun remoto--git-user-key (forge)
+  "Return the git config key ghub reads the account name for FORGE from.
+KIND.user serves only the default host of ghub's kind of forge; any
+other host needs KIND.HOST.user."
+  (let ((kind (or (remoto--ghub-forge forge) 'github))
+        (host (remoto-forge-host forge)))
+    (if (equal host (alist-get kind ghub-default-host-alist))
+        (format "%s.user" kind)
+      (format "%s.%s.user" kind host))))
+
 (defun remoto--find-token (forge)
   "Search auth-source for a token of the API host of FORGE.
 Follow ghub's conventions for the kind of forge: the user name from
@@ -3051,8 +3061,8 @@ found, by ghub either, so the login goes unauthenticated for good."
     (if (null username)
         (progn
           (setf (remoto--login-failed login) t)
-          (message "Remoto: no %s.user in git config, reading %s anonymously"
-                   (or (remoto--ghub-forge forge) 'github) web-host)
+          (message "Remoto: no %s in git config, reading %s anonymously"
+                   (remoto--git-user-key forge) web-host)
           nil)
       (catch 'found
         (dolist (host (delete-dups (list api-host web-host)))

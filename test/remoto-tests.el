@@ -2707,8 +2707,19 @@ using unauthenticated access until M-x remoto-reset-auth")
       (expect (remoto--login-failed (remoto--login "codeberg.org/api/v1")) :to-be t)
       (expect (remoto--login-failed (remoto-test--github-login)) :to-be nil)
       (expect 'message :to-have-been-called-with
-              "Remoto: no %s.user in git config, reading %s anonymously"
-              'forgejo "codeberg.org"))))
+              "Remoto: no %s in git config, reading %s anonymously"
+              "forgejo.user" "codeberg.org")))
+
+  (it "names the git config key ghub reads for the host of the forge"
+    ;; ghub takes KIND.user for its default host of the kind only.
+    (unwind-protect
+        (progn
+          (remoto-forgejo--register-instances '(("gitea" "gitea.com")))
+          (expect (remoto--git-user-key remoto--github) :to-equal "github.user")
+          (expect (remoto--git-user-key remoto--codeberg) :to-equal "forgejo.user")
+          (expect (remoto--git-user-key (cdr (remoto--prefix-of "/gitea:o/r")))
+                  :to-equal "forgejo.gitea.com.user"))
+      (remoto-forgejo--register-instances nil))))
 
 (describe "caches keyed by forge"
   (it "keeps the trees and default branches of two forges apart"
