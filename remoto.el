@@ -972,12 +972,14 @@ bounds latency and request count on very large repositories."
 
 (defun remoto-reset-auth (&optional host)
   "Forget the login state of every API host, retrying the token lookup next.
-With HOST, one of them, interactively with a prefix argument.  Use after
-adding a token to auth-source."
+With HOST, one of them, interactively with a prefix argument; an empty
+HOST is every host.  Use after adding a token to auth-source."
   (interactive
    (list (and current-prefix-arg
-              (completing-read "Remoto: reset the login of host: "
+              (completing-read "Remoto: reset the login of host (empty for all): "
                                (hash-table-keys remoto--logins) nil t))))
+  (when (equal host "")
+    (setq host nil))
   (if host
       (remhash host remoto--logins)
     (clrhash remoto--logins))

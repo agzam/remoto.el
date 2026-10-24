@@ -3570,7 +3570,18 @@ organizations, which needs a token for %s" dir host)))
       (setf (remoto--login-user (remoto--login "codeberg.org/api/v1")) "ag")
       (remoto-reset-auth "codeberg.org/api/v1")
       (expect (remoto--login-user (remoto--login "codeberg.org/api/v1")) :to-be nil)
-      (expect (remoto--login-user (remoto-test--github-login)) :to-equal "agzam"))))
+      (expect (remoto--login-user (remoto-test--github-login)) :to-equal "agzam")))
+
+  (it "clears every host when the prompt for one is left empty"
+    ;; completing-read answers "" to an empty RET even when it requires a match.
+    (let ((remoto--logins (remoto-test--logins :failed t :user "agzam"))
+          (current-prefix-arg '(4)))
+      (spy-on 'completing-read :and-return-value "")
+      (spy-on 'message)
+      (call-interactively #'remoto-reset-auth)
+      (expect (hash-table-count remoto--logins) :to-equal 0)
+      (expect (apply #'format (spy-calls-args-for 'message 0))
+              :to-match "cleared for every host"))))
 
 ;;; Partial path file operations - repo@ level
 
