@@ -3039,7 +3039,7 @@ nothing opens a Dired of the names that match it."
 ;;;; Eager auth warm-up
 
 (defun remoto--git-user-key (forge)
-  "Return the git config key ghub reads the account name for FORGE from.
+  "Return the git config key, in ghub's spelling, of the account name for FORGE.
 KIND.user serves only the default host of ghub's kind of forge; any
 other host needs KIND.HOST.user."
   (let ((kind (or (remoto--ghub-forge forge) 'github))
