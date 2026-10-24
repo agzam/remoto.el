@@ -849,6 +849,14 @@ auth-source search.  A failed search marks the login (see
              (setf (remoto--login-token login) token)))
           ((remoto--login-failed login) 'none))))
 
+(defun remoto--anonymous-get (forge endpoint)
+  "GET ENDPOINT of the API of FORGE without a token.
+The endpoints of the token's account, user and below, are not asked:
+they answer 401, which url.el takes for a cue to prompt for a password."
+  (if (string-match-p (rx bos "user" (or eos (in "/?"))) endpoint)
+      (user-error "Remoto: %s needs a token for %s" endpoint (remoto--api-host forge))
+    (remoto--ghub-get forge (concat "/" endpoint) 'none endpoint)))
+
 (defun remoto--api (forge endpoint)
   "Call ENDPOINT of the REST API of FORGE via ghub, return parsed JSON.
 ENDPOINT should not have a leading slash - one is prepended
@@ -860,7 +868,7 @@ without any setup via unauthenticated fallback."
          (login (remoto--forge-login forge))
          (auth (remoto--auth forge)))
     (if (eq auth 'none)
-        (remoto--ghub-get forge resource 'none endpoint)
+        (remoto--anonymous-get forge endpoint)
       (condition-case err
           ;; Only apply the auth timeout on the first call (before we
           ;; know whether auth works).  Once the authenticated user is
@@ -872,7 +880,7 @@ without any setup via unauthenticated fallback."
                             (remoto--ghub-get forge resource auth endpoint))))
               (when (eq result 'remoto--timed-out)
                 (message "Remoto: auth lookup timed out; retrying next call (see `remoto-auth-timeout')")
-                (setq result (remoto--ghub-get forge resource 'none endpoint)))
+                (setq result (remoto--anonymous-get forge endpoint)))
               result))
         ;; Re-raise API errors (404, 403, etc.) from remoto--ghub-get;
         ;; these are not auth failures.

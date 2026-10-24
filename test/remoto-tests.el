@@ -1895,6 +1895,20 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
       (expect (remoto--api remoto--github "repos/owner/repo") :to-equal '((name . "test-repo")))
       (expect (remoto--login-failed (remoto-test--github-login)) :to-be nil)))
 
+  (it "asks no endpoint of the token's account anonymously after a timed-out lookup"
+    (let ((remoto--logins (remoto-test--logins :failed nil))
+          (remoto-github-auth nil)
+          (remoto-auth-timeout 0.3)
+          (auths nil))
+      (spy-on 'remoto--find-token :and-return-value nil)
+      (spy-on 'message)
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (push (plist-get args :auth) auths)
+                (sleep-for 5)))
+      (expect (remoto--api remoto--github "user") :to-throw 'user-error)
+      (expect auths :to-equal '(nil))))
+
     (it "signals user-error on auth error instead of silent fallback"
       (let ((remoto--logins (remoto-test--logins :failed nil :token nil))
             (remoto-github-auth nil)
@@ -3307,7 +3321,41 @@ using unauthenticated access until M-x remoto-reset-auth")
     (let ((remoto--logins (remoto-test--logins :user nil :failed nil)))
       (spy-on 'remoto--api :and-call-fake
               (lambda (_forge _) (user-error "auth failed")))
-      (expect (remoto--get-authenticated-user remoto--github) :to-be nil))))
+      (expect (remoto--get-authenticated-user remoto--github) :to-be nil)))
+
+  (it "sends no /user when the token lookup marks the login failed on the way"
+    ;; An anonymous /user answers 401, and url.el answers that with a
+    ;; password prompt.
+    (let ((remoto--logins (remoto-test--logins))
+          (remoto-github-auth nil))
+      (spy-on 'remoto--find-token :and-call-fake
+              (lambda (forge)
+                (setf (remoto--login-failed (remoto--forge-login forge)) t)
+                nil))
+      (spy-on 'ghub-get)
+      (expect (remoto--get-authenticated-user remoto--github) :to-be nil)
+      (expect (remoto--get-authenticated-user remoto--codeberg) :to-be nil)
+      (expect 'ghub-get :not :to-have-been-called))))
+
+(describe "the root listing without a user name in git config"
+  (it "says it needs a token and sends no request, on either forge"
+    (remoto-test-with-cache
+      (let ((remoto-github-auth nil)
+            (before (buffer-list)))
+        (spy-on 'ghub--username :and-call-fake
+                (lambda (&rest _) (error "Cannot determine username")))
+        (spy-on 'ghub-get)
+        (spy-on 'message)
+        (unwind-protect
+            (pcase-dolist (`(,dir . ,host) '(("/github:" . "api.github.com")
+                                             ("/codeberg:" . "codeberg.org/api/v1")))
+              (expect (condition-case err (dired-noselect dir)
+                        (user-error (error-message-string err)))
+                      :to-equal (format "Remoto: %s lists your account and \
+organizations, which needs a token for %s" dir host)))
+          (dolist (buf (buffer-list))
+            (unless (memq buf before) (kill-buffer buf))))
+        (expect 'ghub-get :not :to-have-been-called)))))
 
 (describe "remoto-reset-auth clears authenticated user"
   (it "clears cached authenticated user"
