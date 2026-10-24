@@ -142,8 +142,9 @@
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el/git/trees/ceaf310?recursive=1"))
 
-("ff /gh:agzam/remoto.el#47" :buffer "*remoto: agzam/remoto.el#47*"
- :mode remoto-topic-mode :requests
+("ff /gh:agzam/remoto.el#47" :buffer
+ "*remoto: /github:agzam/remoto.el#47*" :mode remoto-topic-mode
+ :requests
  ("/repos/agzam/remoto.el/issues/47" "/repos/agzam/remoto.el/pulls/47"
   "/repos/agzam/remoto.el/pulls/47/reviews"
   "/repos/agzam/remoto.el/issues/47/comments"))

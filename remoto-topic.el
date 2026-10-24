@@ -271,7 +271,8 @@ Detects whether NUMBER is a PR and renders accordingly."
                         (remoto-forge-reviews forge owner repo number)))
              (comments (remoto-forge-topic-comments forge owner repo number))
              (display-data (or pr-data issue))
-             (buf-name (format "*remoto: %s/%s#%s*" owner repo number))
+             (buf-name (format "*remoto: %s%s/%s#%s*"
+                               (remoto--prefix forge) owner repo number))
              (buf (get-buffer-create buf-name)))
         (with-current-buffer buf
           (let ((inhibit-read-only t))

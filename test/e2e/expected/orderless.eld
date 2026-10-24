@@ -295,8 +295,9 @@
   "async /repos/agzam/remoto.el/commits?sha=ceaf310&path=remoto.el&per_page=1"
   "async /repos/agzam/remoto.el/commits?sha=ceaf310&path=test&per_page=1"))
 
-("ff /gh:agzam/remoto.el#47" :buffer "*remoto: agzam/remoto.el#47*"
- :mode remoto-topic-mode :requests
+("ff /gh:agzam/remoto.el#47" :buffer
+ "*remoto: /github:agzam/remoto.el#47*" :mode remoto-topic-mode
+ :requests
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
   "async /repos/agzam/remoto.el/issues?state=open&sort=updated&per_page=30"

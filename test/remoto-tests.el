@@ -3048,6 +3048,27 @@ using unauthenticated access until M-x remoto-reset-auth")
       (remoto-topic-browse)
       (expect 'browse-url :to-have-been-called-with "https://github.com/o/r/issues/7"))))
 
+(describe "remoto-topic-display on two forges"
+  (it "keeps the same OWNER/REPO#N of two forges in two buffers named by the forge"
+    (require 'remoto-topic)
+    (spy-on 'remoto-forge-topic :and-call-fake
+            (lambda (forge _owner _repo number)
+              `((number . ,(string-to-number number)) (state . "open")
+                (title . ,(format "on %s" (remoto-forge-name forge)))
+                (user . ((login . "a"))) (body . "text"))))
+    (spy-on 'remoto-forge-topic-comments)
+    (spy-on 'pop-to-buffer)
+    (let ((github (remoto-topic-display "7" "/github:o/r"))
+          (codeberg (remoto-topic-display "7" "/codeberg:o/r")))
+      (unwind-protect
+          (progn
+            (expect (buffer-name github) :to-equal "*remoto: /github:o/r#7*")
+            (expect (buffer-name codeberg) :to-equal "*remoto: /codeberg:o/r#7*")
+            (expect (with-current-buffer github (buffer-string)) :to-match "on github")
+            (expect (with-current-buffer codeberg (buffer-string)) :to-match "on codeberg"))
+        (kill-buffer github)
+        (kill-buffer codeberg)))))
+
 (describe "remoto-forgejo-instances"
   (after-each
     (remoto-forgejo--register-instances nil))

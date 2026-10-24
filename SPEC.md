@@ -405,7 +405,7 @@ For PRs: fetches full PR data (`repos/OWNER/REPO/pulls/NUM`) for diff stats, bra
 
 For both: fetches comments (`repos/OWNER/REPO/issues/NUM/comments`).
 
-Buffer name: `*remoto: owner/repo#NUM*`. Mode: `remoto-topic-mode` (derived from `special-mode`). Keybindings: `b` (browse URL), `g` (refresh). Carriage returns stripped from body/comments.
+Buffer name: `*remoto: /PREFIX:owner/repo#NUM*`, the canonical prefix of the forge (`/github:`, `/codeberg:`). Mode: `remoto-topic-mode` (derived from `special-mode`). Keybindings: `b` (browse URL), `g` (refresh). Carriage returns stripped from body/comments.
 
 Faces: `remoto-topic-title`, `remoto-topic-state-open`, `remoto-topic-state-closed`, `remoto-topic-state-merged`, `remoto-topic-meta`, `remoto-topic-comment-header`, `remoto-topic-additions`, `remoto-topic-deletions`.
 
