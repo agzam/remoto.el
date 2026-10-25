@@ -3981,6 +3981,21 @@ Buffers BODY creates are killed afterwards."
       (with-current-buffer (remoto-test--visit-entry "/github:" "..")
         (expect dired-directory :to-equal "/github:")))))
 
+(describe "remoto--add-listing-page"
+  (it "lists only the owner's repositories, and pages by what the page held"
+    ;; Forgejo's user/repos ignores affiliation=owner: the organizations' come too.
+    (remoto-test-with-cache
+      (let* ((item (lambda (owner name)
+                     `((name . ,name) (full_name . ,(concat owner "/" name))
+                       (owner (login . ,owner)))))
+             (page (cons (funcall item "testy-shmeisty" "testy-besty")
+                         (cl-loop for i below 49 collect (funcall item "Ag" (format "r%d" i)))))
+             (listing (remoto--listing-create)))
+        (remoto--add-listing-page listing "/codeberg:ag/" "ag" page)
+        (expect (length (remoto--listing-entries listing)) :to-equal 49)
+        (expect (assoc "testy-besty" (remoto--listing-entries listing)) :to-be nil)
+        (expect (remoto--listing-state listing) :to-be 'fetching)))))
+
 (describe "Dired listing of /github:OWNER/"
   (it "shows each repository's size, last push, mode and note"
     (remoto-test-with-listings
@@ -5487,6 +5502,55 @@ Returns the full path after completion, or INPUT if no completion."
     (expect (remoto--maybe-rewrite "/github:foo/bar#999")
             :to-equal "/github:foo/bar#999")))
 
+;;; ---- The tree of a repository without a commit ----
+
+(describe "remoto--forge-tree"
+  ;; The repository is asked only about its default branch, "main" here.
+  (it "gives an empty tree for an empty Forgejo repository, which answers 404"
+    (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (puthash "/codeberg:o/r" "main" remoto--default-branch-cache)
+      (spy-on 'remoto-forge-tree :and-call-fake
+              (lambda (&rest _) (user-error "Remoto: not found: repos/o/r/git/trees/main")))
+      (spy-on 'remoto--api :and-return-value '((empty . t)))
+      (spy-on 'message)
+      (let ((tree (remoto--forge-tree remoto--codeberg "o" "r" "main")))
+        (expect (sort (hash-table-keys tree) #'string<) :to-equal '("" "/"))
+        (expect 'message :to-have-been-called-with "Remoto: %s/%s is empty" "o" "r"))))
+  (it "gives an empty tree for GitHub's 409, without another request"
+    (spy-on 'remoto-forge-tree :and-call-fake
+            (lambda (&rest _)
+              (user-error "%s" "Remoto: api.github.com answered 409 Conflict for repos/o/r/git/trees/main?recursive=1: Git Repository is empty.")))
+    (spy-on 'remoto--api)
+    (spy-on 'message)
+    (expect (hash-table-count (remoto--forge-tree remoto--github "o" "r" "main")) :to-equal 2)
+    (expect 'remoto--api :not :to-have-been-called))
+  (it "signals the failure of a repository that has commits"
+    (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (puthash "/codeberg:o/r" "main" remoto--default-branch-cache)
+      (spy-on 'remoto-forge-tree :and-call-fake
+              (lambda (&rest _) (user-error "Remoto: not found: repos/o/r/git/trees/main")))
+      (spy-on 'remoto--api :and-return-value '((empty . :false)))
+      (expect (remoto--forge-tree remoto--codeberg "o" "r" "main")
+              :to-throw 'user-error '("Remoto: not found: repos/o/r/git/trees/main"))))
+  (it "asks nothing more when a ref other than the default branch is missing"
+    (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (puthash "/codeberg:o/r" "main" remoto--default-branch-cache)
+      (spy-on 'remoto-forge-tree :and-call-fake
+              (lambda (&rest _) (user-error "Remoto: not found: repos/o/r/git/trees/ma")))
+      (spy-on 'remoto--api)
+      (expect (remoto--forge-tree remoto--codeberg "o" "r" "ma")
+              :to-throw 'user-error '("Remoto: not found: repos/o/r/git/trees/ma"))
+      (expect 'remoto--api :not :to-have-been-called)))
+  (it "asks nothing more after a failure other than not found"
+    (let ((remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (puthash "/codeberg:o/r" "main" remoto--default-branch-cache)
+      (spy-on 'remoto-forge-tree :and-call-fake
+              (lambda (&rest _) (user-error "Remoto: access denied (rate limit or permissions): repos/o/r/git/trees/main")))
+      (spy-on 'remoto--api)
+      (expect (remoto--forge-tree remoto--codeberg "o" "r" "main")
+              :to-throw 'user-error)
+      (expect 'remoto--api :not :to-have-been-called))))
+
 ;;; ---- Completion annotations (affixation-function) ----
 
 (describe "completion annotations"
@@ -5646,6 +5710,18 @@ Returns the full path after completion, or INPUT if no completion."
                 :to-equal "Initial commit")
         (expect (alist-get "src/" result nil nil #'equal)
                 :to-equal "Add source directory"))))
+
+  (it "asks for the commits of a subdirectory's files under one slash"
+    (let ((dirs nil)
+          (remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (spy-on 'remoto-forge-file-commits
+              :and-call-fake (lambda (_forge _owner _repo _ref dir _names) (push dir dirs) nil))
+      (puthash "/github:testowner/testrepo" "main" remoto--default-branch-cache)
+      (remoto-test--install-mock-tree)
+      (remoto--file-name-completions "" "/github:testowner/testrepo@main:/src/")
+      (remoto--file-name-completions "" "/github:testowner/testrepo@main:/")
+      (expect dirs :to-equal '("" "src"))))
 
   (it "provides file commit metadata for canonical paths"
     (let* ((meta (remoto--completion-metadata "/github:foo/bar@main:/"))

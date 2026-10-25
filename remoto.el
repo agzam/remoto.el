@@ -1037,12 +1037,37 @@ Returns a new `remoto-path' with ref filled in."
        :forge forge :owner owner :repo repo :ref branch
        :path (remoto-path-path parsed)))))
 
+(defun remoto--repo-empty-p (forge owner repo ref failure)
+  "Non-nil if OWNER/REPO on FORGE has no commit; FAILURE is how REF's tree failed.
+GitHub says so in its 409.  Forgejo answers 404 and marks the repository,
+which is asked only when REF is the default branch, the one ref an empty
+repository names."
+  (or (string-match-p "Git Repository is empty" failure)
+      (and (string-prefix-p remoto--not-found failure)
+           (equal ref (gethash (remoto--repo-id forge owner repo)
+                               remoto--default-branch-cache))
+           (eq t (alist-get 'empty (ignore-errors
+                                     (remoto--api forge (format "repos/%s/%s" owner repo))))))))
+
+(defun remoto--forge-tree (forge owner repo ref)
+  "Return the tree of OWNER/REPO at REF on FORGE, an empty one without a commit."
+  (condition-case err
+      (remoto-forge-tree forge owner repo ref)
+    (user-error
+     (if (not (remoto--repo-empty-p forge owner repo ref (error-message-string err)))
+         (signal (car err) (cdr err))
+       (message "Remoto: %s/%s is empty" owner repo)
+       (let ((table (make-hash-table :test 'equal)))
+         (puthash "" remoto--dir-entry table)
+         (puthash "/" remoto--dir-entry table)
+         table)))))
+
 (defun remoto--ensure-tree (parsed)
   "Ensure tree is cached for PARSED path, return the tree hash table."
   (let* ((resolved (remoto--resolve-ref parsed))
          (key (remoto--repo-key resolved)))
     (or (gethash key remoto--tree-cache)
-        (let* ((tree (remoto-forge-tree
+        (let* ((tree (remoto--forge-tree
                       (remoto-path-forge resolved)
                       (remoto-path-owner resolved)
                       (remoto-path-repo resolved)
@@ -1638,8 +1663,8 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
          ;; Canonical path: entries of the tree at the ref
          (let* ((ref (remoto-path-ref parsed))
                 (path (remoto-path-path parsed))
-                (dir-path (if (equal path "/") ""
-                            (string-trim-left path "/")))
+                ;; A directory's files join it with one slash: test/x, not test//x.
+                (dir-path (string-trim path "/+" "/+"))
                 (children (remoto--tree-children parsed))
                 (names (thread-last children
                                     (mapcar (lambda (child)

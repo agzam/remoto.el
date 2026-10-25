@@ -155,6 +155,8 @@ Path lookup is normalized via `remoto--tree-lookup-key`, which strips leading/tr
 
 Cache invalidation: manual only. A command `remoto-refresh` clears the cache for a given repo@ref, forcing re-fetch on next access.
 
+A repository without a commit has no tree: GitHub answers 409 "Git Repository is empty.", Forgejo 404. `remoto--forge-tree` gives it a tree of the root alone and says the repository is empty. After a 404 it asks the repository for `empty`, and only when the ref is the cached default branch, the one ref an empty repository names, so a missing ref costs no extra request.
+
 ### Large repos
 
 The Trees API truncates at 100,000 entries / 7 MB response. When `truncated` is true in the response, fall back to per-directory fetching via the Contents API:
@@ -515,6 +517,8 @@ Forgejo (and Gitea, and Codeberg, which runs Forgejo) cloned GitHub's REST API, 
 |---|---|---|
 | Page size and its name | `per_page=100&page=N`, 100 max | `limit=50&page=N`, 50 max |
 | Recursive tree | one answer, `truncated` past 100k entries | 1000 entries a page, `total_count`; the pages after the first are asked for at once |
+| Tree of an empty repository | 409 `Git Repository is empty.` | 404; `repos/O/R` says `empty: true` |
+| The token's own repositories | `user/repos?affiliation=owner` | `user/repos` ignores `affiliation` and adds its organizations' repositories; a listing keeps those whose owner is OWNER |
 | Account search | `search/users?q=` -> `items` | `users/search?q=` -> `data` |
 | Repository search | `search/repositories?q=Q in:name user:O` | `repos/search?q=Q&uid=ID&exclusive=true`, the owner's id from `users/O` once |
 | Topic search | `search/issues?q=Q repo:O/R` | `repos/O/R/issues?q=Q&state=all&type=all` |

@@ -192,11 +192,11 @@
   "async /repos/agzam/remoto.el/commits?sha=main&path=remoto-topic.el&per_page=1"
   "async /repos/agzam/remoto.el/commits?sha=main&path=remoto.el&per_page=1"
   "async /repos/agzam/remoto.el/commits?sha=main&path=test&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fdemo.gif&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fel-remoto-logo.png&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-embark-tests.el&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-integration-tests.el&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-tests.el&per_page=1"))
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fdemo.gif&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fel-remoto-logo.png&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fremoto-embark-tests.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fremoto-integration-tests.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fremoto-tests.el&per_page=1"))
 
 ("ff /gh:agzam/remoto.el@main:/test" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/test/" :names
@@ -243,11 +243,11 @@
   "async /repos/agzam/remoto.el/commits?sha=main&path=remoto-topic.el&per_page=1"
   "async /repos/agzam/remoto.el/commits?sha=main&path=remoto.el&per_page=1"
   "async /repos/agzam/remoto.el/commits?sha=main&path=test&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fdemo.gif&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fel-remoto-logo.png&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-embark-tests.el&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-integration-tests.el&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-tests.el&per_page=1"))
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fdemo.gif&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fel-remoto-logo.png&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fremoto-embark-tests.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fremoto-integration-tests.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fremoto-tests.el&per_page=1"))
 
 ("ff /gh:agzam/remoto.el@2.2.0:/" :mode dired-mode :dired
  "/github:agzam/remoto.el@2.2.0:/" :names
@@ -365,11 +365,11 @@
   "async /repos/agzam/remoto.el/commits?sha=main&path=remoto-topic.el&per_page=1"
   "async /repos/agzam/remoto.el/commits?sha=main&path=remoto.el&per_page=1"
   "async /repos/agzam/remoto.el/commits?sha=main&path=test&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fdemo.gif&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fel-remoto-logo.png&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-embark-tests.el&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-integration-tests.el&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-tests.el&per_page=1"))
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fdemo.gif&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fel-remoto-logo.png&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fremoto-embark-tests.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fremoto-integration-tests.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fremoto-tests.el&per_page=1"))
 
 ("ff /gh:agzam/.emacs.d" :mode dired-mode :dired
  "/github:agzam/.emacs.d@main:/" :names
@@ -671,11 +671,11 @@
   "async /repos/agzam/remoto.el/commits?sha=main&path=remoto-topic.el&per_page=1"
   "async /repos/agzam/remoto.el/commits?sha=main&path=remoto.el&per_page=1"
   "async /repos/agzam/remoto.el/commits?sha=main&path=test&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fdemo.gif&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fel-remoto-logo.png&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-embark-tests.el&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-integration-tests.el&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-tests.el&per_page=1"))
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fdemo.gif&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fel-remoto-logo.png&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fremoto-embark-tests.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fremoto-integration-tests.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fremoto-tests.el&per_page=1"))
 
 ("dired /gh:agzam/remoto.el@main:/test" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/test/" :names
@@ -722,11 +722,11 @@
   "async /repos/agzam/remoto.el/commits?sha=main&path=remoto-topic.el&per_page=1"
   "async /repos/agzam/remoto.el/commits?sha=main&path=remoto.el&per_page=1"
   "async /repos/agzam/remoto.el/commits?sha=main&path=test&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fdemo.gif&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fel-remoto-logo.png&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-embark-tests.el&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-integration-tests.el&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-tests.el&per_page=1"))
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fdemo.gif&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fel-remoto-logo.png&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fremoto-embark-tests.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fremoto-integration-tests.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fremoto-tests.el&per_page=1"))
 
 ("dired /gh:agzam/remoto.el@2.2.0:/" :mode dired-mode :dired
  "/github:agzam/remoto.el@2.2.0:/" :names
@@ -842,11 +842,11 @@
   "async /repos/agzam/remoto.el/commits?sha=main&path=remoto-topic.el&per_page=1"
   "async /repos/agzam/remoto.el/commits?sha=main&path=remoto.el&per_page=1"
   "async /repos/agzam/remoto.el/commits?sha=main&path=test&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fdemo.gif&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fel-remoto-logo.png&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-embark-tests.el&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-integration-tests.el&per_page=1"
-  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-tests.el&per_page=1"))
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fdemo.gif&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fel-remoto-logo.png&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fremoto-embark-tests.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fremoto-integration-tests.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2Fremoto-tests.el&per_page=1"))
 
 ("dired /gh:agzam/.emacs.d" :mode dired-mode :dired
  "/github:agzam/.emacs.d@main:/" :names

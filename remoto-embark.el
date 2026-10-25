@@ -128,6 +128,16 @@ per-type keymaps.  Falls back to TYPE."
 
 ;;;; Target classification and URL resolution
 
+(defun remoto--embark-file-name (target)
+  "Return TARGET with a // in it starting the name anew, as in a file prompt.
+Embark gets a file prompt's candidate joined to the default directory,
+~/dir//gh:o/r#5 for /gh:o/r#5, unless the completion UI tidied it.
+A URL keeps its //, and a $ stays a $."
+  (if (or (not (string-search "//" target))
+          (string-match-p "\\`[[:alpha:]][[:alnum:]+.-]*://" target))
+      target
+    (substitute-in-file-name (string-replace "$" "$$" target))))
+
 (defun remoto--embark-canonicalize (target)
   "Normalize a raw Embark TARGET string to a canonical remoto path.
 Resolves the `/gh:' shorthand and the file-name forms `/github:OWNER/REPO',
@@ -139,7 +149,7 @@ already-canonical targets pass through unchanged after shorthand expansion;
 non-strings and unrecognized strings are returned as-is."
   (if (not (stringp target))
       target
-    (let* ((path (remoto--normalize-shorthand target))
+    (let* ((path (remoto--normalize-shorthand (remoto--embark-file-name target)))
            (parsed (remoto--parse path)))
       (cond
        ((null parsed) path)

@@ -449,12 +449,18 @@ drwx------, an archived one dr-xr-xr-x, and a fork says so in its note."
   "Add ITEMS, one page of OWNER's repositories, to LISTING, the one of DIR.
 Each repository is remembered on the way, so opening a listed one asks
 for nothing but its tree."
-  (let ((forge (remoto--canonical-forge dir)))
-    (dolist (item items)
+  (let* ((forge (remoto--canonical-forge dir))
+         ;; Forgejo's user/repos ignores affiliation=owner and lists the
+         ;; repositories of the token's organizations too.
+         (owned (seq-filter (lambda (item)
+                              (let ((login (alist-get 'login (alist-get 'owner item))))
+                                (or (null login) (string-equal-ignore-case login owner))))
+                            items)))
+    (dolist (item owned)
       (remoto--remember-repo (remoto--prefix forge)
                              (format "%s/%s" owner (alist-get 'name item)) item))
     (let ((entries (append (remoto--listing-entries listing)
-                           (mapcar #'remoto--repo-entry items))))
+                           (mapcar #'remoto--repo-entry owned))))
       (setf (remoto--listing-entries listing) (seq-take entries remoto-listing-cap)
             (remoto--listing-state listing)
             (cond ((< remoto-listing-cap (length entries)) 'capped)
