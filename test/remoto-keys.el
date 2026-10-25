@@ -3,10 +3,10 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;
 ;;; Commentary:
-;;  Types the cases of remoto-e2e-cases.el into one terminal Emacs per profile
-;;  under a private tmux server, so no window ever takes focus, and reads each
-;;  Emacs through its server.  REMOTO_KEYS_MAIN runs origin/main's remoto
-;;  beside the checkout's and prints where they differ.
+;;  Types the cases of remoto-e2e-cases.el, and scenarios of auth and of other
+;;  servers, into terminal Emacsen under a private tmux server, so no window
+;;  takes focus, and reads each through its server.  REMOTO_KEYS_MAIN runs
+;;  origin/main's remoto beside the checkout's and prints where they differ.
 ;;
 ;;; Code:
 
@@ -32,7 +32,7 @@
   "Where a run keeps its packages, sockets and results.")
 
 (defconst remoto-keys--profiles
-  (split-string (or (getenv "REMOTO_KEYS_PROFILES") (string-join remoto-e2e-profiles " "))
+  (split-string (or (getenv "REMOTO_KEYS_PROFILES") (string-join remoto-e2e-live-profiles " "))
                 "[ ,]+" t)
   "The profiles of this run.")
 
@@ -183,10 +183,31 @@ The dependencies come from the .elpa of the checkout, linked in."
     (delete-file tar)
     dir))
 
+(defun remoto-keys--install-checkout (elpa)
+  "Install the remoto of the checkout into ELPA and print its commit."
+  (princ (format "checkout %s%s: remoto %s\n"
+                 (string-trim (remoto-keys--sh "git" "-C" remoto-keys--root
+                                               "log" "-1" "--format=%h %s"))
+                 (if (string-empty-p (remoto-keys--sh "git" "-C" remoto-keys--root
+                                                      "status" "--porcelain"))
+                     ""
+                   " (with uncommitted changes)")
+                 (remoto-keys--install remoto-keys--root elpa))))
+
 ;;; Profiles
 
-(defun remoto-keys--env (name profile elpa)
-  "Return the whole environment of the profile NAME: PROFILE, remoto from ELPA."
+(defun remoto-keys--fixture (name kind text)
+  "Write TEXT, or nothing, to the KIND file of the profile NAME; return the file."
+  (let ((file (expand-file-name (format "fixtures/%s.%s" name kind) remoto-keys--dir)))
+    (make-directory (file-name-directory file) t)
+    (with-file-modes #o600
+      (with-temp-file file (insert (or text ""))))
+    file))
+
+(defun remoto-keys--env (name profile elpa &optional setup)
+  "Return the whole environment of the profile NAME: PROFILE, remoto from ELPA.
+SETUP is the plist of a scenario of `remoto-keys--scenarios'.  Git config
+never comes from the person running it, so no account name either."
   (append
    (mapcar (lambda (var) (concat var "=" (or (getenv var) "")))
            '("HOME" "USER" "LOGNAME" "SHELL" "TMPDIR" "PATH"))
@@ -194,19 +215,26 @@ The dependencies come from the .elpa of the checkout, linked in."
          ;; A screen TERM keeps Emacs from querying the terminal at startup.
          "TERM=screen-256color"
          "GIT_CONFIG_NOSYSTEM=1"
+         (concat "GIT_CONFIG_GLOBAL="
+                 (remoto-keys--fixture name "gitconfig" (plist-get setup :gitconfig)))
          (concat "REMOTO_KEYS_ELPA=" elpa)
          (concat "REMOTO_KEYS_PROFILE=" profile)
          (concat "REMOTO_KEYS_SOCKET_DIR=" (expand-file-name "sock/" remoto-keys--dir))
          (concat "REMOTO_KEYS_SERVER=" name))
-   (when remoto-keys--token
+   (when-let* ((text (plist-get setup :authinfo)))
+     (list (concat "REMOTO_KEYS_AUTHINFO=" (remoto-keys--fixture name "authinfo" text))))
+   (when-let* ((form (plist-get setup :init)))
+     (list (concat "REMOTO_KEYS_INIT=" (prin1-to-string form))))
+   (when (and remoto-keys--token (or (null setup) (plist-get setup :token)))
      (let ((file (expand-file-name (concat "token-" name) remoto-keys--dir)))
        (with-file-modes #o600
          (with-temp-file file (insert remoto-keys--token)))
        (list (concat "REMOTO_KEYS_TOKEN_FILE=" file))))))
 
-(defun remoto-keys--start (name profile elpa)
+(defun remoto-keys--start (name profile elpa &optional setup)
   "Start the profile NAME, a terminal Emacs of PROFILE with remoto from ELPA.
-Return what it reports about itself."
+SETUP is a scenario's, as in `remoto-keys--env'.  Return what the Emacs
+reports about itself."
   (let ((sockets (expand-file-name "sock/" remoto-keys--dir))
         (home (expand-file-name "home/" remoto-keys--dir))
         (init-dir (expand-file-name (concat "profiles/" name "/") remoto-keys--dir)))
@@ -220,7 +248,7 @@ Return what it reports about itself."
     (ignore-errors (remoto-keys--tmux "kill-session" "-t" (concat "=rk-" name)))
     (apply #'remoto-keys--tmux "new-session" "-d" "-s" (concat "rk-" name)
            "-x" (car remoto-keys--size) "-y" (cadr remoto-keys--size) "-c" home
-           "env" "-i" (append (remoto-keys--env name profile elpa)
+           "env" "-i" (append (remoto-keys--env name profile elpa setup)
                               (list (expand-file-name invocation-name invocation-directory)
                                     "-nw" "-q" "--init-directory" init-dir
                                     "-l" (expand-file-name "remoto-keys-init.el"
@@ -301,16 +329,19 @@ part may hold keys too: `kbd' gives one when every key is a character."
       ('(pause) (sleep-for remoto-keys--pause)
        (remoto-keys--wait-idle name 20)))))
 
-(defun remoto-keys--run (name case profile)
+(defun remoto-keys--run (name case profile &optional continue)
   "Run CASE, (LABEL BINDINGS . PARTS), in the profile NAME of PROFILE.
+CONTINUE types into what the last case left, instead of after a reset.
 Return a plist of the label, seconds, a note, the line and the state."
   (pcase-let ((`(,label ,_bindings . ,parts) case))
-    ;; One C-g at a time: two into a busy Emacs make an emergency escape.
-    (dotimes (_ 3)
-      (when (ignore-errors (remoto-keys--eval name '(and (active-minibuffer-window) t)))
-        (remoto-keys--tmux "send-keys" "-t" (remoto-keys--target name) "C-g")
-        (remoto-keys--wait-idle name 5)))
-    (remoto-keys--eval name '(remoto-keys-reset))
+    (if continue
+        (remoto-keys--eval name '(remoto-keys-mark))
+      ;; One C-g at a time: two into a busy Emacs make an emergency escape.
+      (dotimes (_ 3)
+        (when (ignore-errors (remoto-keys--eval name '(and (active-minibuffer-window) t)))
+          (remoto-keys--tmux "send-keys" "-t" (remoto-keys--target name) "C-g")
+          (remoto-keys--wait-idle name 5)))
+      (remoto-keys--eval name '(remoto-keys-reset)))
     (remoto-keys--wait-for-search)
     (let ((start (float-time)))
       (remoto-keys--type name (remoto-keys--steps parts profile))
@@ -338,44 +369,116 @@ Return a plist of the label, seconds, a note, the line and the state."
         (insert "\n")
         (pp (cons (plist-get result :label) (plist-get result :state)) (current-buffer))))))
 
+;;; Fixed checks
+
+(defconst remoto-keys--max-requests 20
+  "The requests one case may make before a check calls it too many.")
+
+(defvar remoto-keys--golden nil
+  "The replay's expected states read so far, an alist by profile.")
+
+(defun remoto-keys--expected-state (profile label)
+  "Return the replay's expected state of the case LABEL under PROFILE, or nil.
+A profile without golden files takes vanilla's, and evil's for ex cases."
+  (let ((reference (cond ((member profile remoto-e2e-profiles) profile)
+                         ((string-prefix-p "ex " label) "evil")
+                         (t "vanilla"))))
+    (unless (assoc reference remoto-keys--golden)
+      (push (cons reference
+                  (remoto-e2e--read-states
+                   (expand-file-name (format "e2e/expected/%s.eld" reference)
+                                     remoto-keys--test-dir)))
+            remoto-keys--golden))
+    (cdr (assoc label (cdr (assoc reference remoto-keys--golden))))))
+
+(defun remoto-keys--landing (state)
+  "Return where STATE ended: (:dired DIRECTORY), (:file FILE), or nil."
+  (cond ((plist-get state :dired) (list :dired (plist-get state :dired)))
+        ((plist-get state :file) (list :file (plist-get state :file)))))
+
+(defun remoto-keys--checks (label state expected note)
+  "Return the failures of STATE, where the case LABEL ended, as strings.
+EXPECTED is the replay's state of the case or nil; NOTE the runner's note.
+The checks hold whatever the forge's data: the replay's landing, the typed
+name first among matches, no raw HTTP text, a bounded number of requests."
+  (let* ((typed (substring label (1+ (or (string-search " " label) -1))))
+         ;; Without remoto here, TRAMP would claim a typed name with two colons.
+         (leaf (let ((file-name-handler-alist nil))
+                 (file-name-nondirectory (directory-file-name typed))))
+         (want (remoto-keys--landing expected))
+         (got (remoto-keys--landing state))
+         (names (plist-get state :names))
+         (requests (length (plist-get state :requests)))
+         failures)
+    (when note
+      (push note failures))
+    (when (and want (not (equal want got)))
+      (push (format "the replay ends in %S, this run in %S" want got) failures))
+    (when (and (plist-get state :matches) (member leaf names) (not (equal leaf (car names))))
+      (push (format "the typed name %s is not the first line" leaf) failures))
+    (when-let* ((raw (car (plist-get state :raw))))
+      (push (format "raw HTTP text in the messages: %s" (truncate-string-to-width raw 60))
+            failures))
+    (when (< remoto-keys--max-requests requests)
+      (push (format "%d requests, more than %d" requests remoto-keys--max-requests) failures))
+    (nreverse failures)))
+
+(defun remoto-keys--check (name result expected)
+  "Print the failures of RESULT, a case of the profile NAME, and return them.
+EXPECTED is the replay's state of the case, or nil."
+  (let ((failures (remoto-keys--checks (plist-get result :label) (plist-get result :state)
+                                       expected (plist-get result :note))))
+    (dolist (failure failures)
+      (princ (format "FAIL %s | %s: %s\n" name (plist-get result :label) failure)))
+    failures))
+
 (defun remoto-keys--profile (profile elpa-branch elpa-main)
   "Run the cases of PROFILE under the remoto in ELPA-BRANCH.
-With ELPA-MAIN, run each also under origin/main's remoto there, and
-return the number of cases whose two states differ."
+With ELPA-MAIN, run each GitHub case also under origin/main's remoto
+there; Codeberg cases run on the branch only, main has no Codeberg.
+Return a plist of the cases run, the checks failed, the DIFFs with main."
   (let ((names (cons profile (and elpa-main (list (concat profile "-main")))))
-        branch main (differ 0))
+        (cases 0) (failed 0) (differ 0)
+        branch main)
     (unwind-protect
         (progn
           (princ (format "start %s: %S\n" profile (remoto-keys--start profile profile elpa-branch)))
           (when elpa-main
             (princ (format "start %s-main: %S\n" profile
                            (remoto-keys--start (concat profile "-main") profile elpa-main))))
-          (dolist (case (remoto-e2e--cases profile))
-            (if (nth 1 case)
-                (princ (format "%-16s %-58s skip: needs the replay's fake answers\n"
-                               profile (car case)))
-              (let ((result (remoto-keys--run profile case profile)))
-                (remoto-keys--print profile result)
-                (push result branch)
-                (when elpa-main
-                  (let* ((other (remoto-keys--run (cadr names) case profile))
-                         (diff (remoto-e2e--diff (plist-get other :state)
-                                                 (plist-get result :state))))
-                    (remoto-keys--print (cadr names) other)
-                    (push other main)
-                    (when diff
-                      (cl-incf differ)
-                      (princ (format "DIFF %s | %s\n%s" profile (car case)
-                                     (pp-to-string diff))))))))))
+          (dolist (case (append (mapcar (lambda (c) (cons 'github c)) (remoto-e2e--cases profile))
+                                (mapcar (lambda (c) (cons 'codeberg c))
+                                        (remoto-e2e--codeberg-cases profile))))
+            (let ((forge (car case)) (case (cdr case)))
+              (if (nth 1 case)
+                  (princ (format "%-16s %-58s skip: needs the replay's fake answers\n"
+                                 profile (car case)))
+                (let ((result (remoto-keys--run profile case profile)))
+                  (cl-incf cases)
+                  (remoto-keys--print profile result)
+                  (push result branch)
+                  (when (remoto-keys--check profile result
+                                            (remoto-keys--expected-state profile (car case)))
+                    (cl-incf failed))
+                  (when (and elpa-main (eq forge 'github))
+                    (let* ((other (remoto-keys--run (cadr names) case profile))
+                           (diff (remoto-e2e--diff (plist-get other :state)
+                                                   (plist-get result :state))))
+                      (remoto-keys--print (cadr names) other)
+                      (push other main)
+                      (when diff
+                        (cl-incf differ)
+                        (princ (format "DIFF %s | %s\n%s" profile (car case)
+                                       (pp-to-string diff)))))))))))
       (unless remoto-keys--keep
         (mapc #'remoto-keys--stop names)))
     (remoto-keys--write (expand-file-name (concat "results/" profile ".eld") remoto-keys--dir)
-                        (nreverse branch))
+                        (reverse branch))
     (when main
       (remoto-keys--write (expand-file-name (concat "results/" profile "-main.eld")
                                             remoto-keys--dir)
-                          (nreverse main)))
-    differ))
+                          (reverse main)))
+    (list :cases cases :failed failed :differ differ)))
 
 (defun remoto-keys-main ()
   "Run the profiles of REMOTO_KEYS_PROFILES and exit."
@@ -385,11 +488,8 @@ return the number of cases whose two states differ."
   (let* ((start (float-time))
          (elpa-branch (expand-file-name "elpa-branch/" remoto-keys--dir))
          (elpa-main (and remoto-keys--main (expand-file-name "elpa-main/" remoto-keys--dir)))
-         (differ 0))
-    (princ (format "checkout %s: remoto %s\n"
-                   (string-trim (remoto-keys--sh "git" "-C" remoto-keys--root
-                                                 "log" "-1" "--format=%h %s"))
-                   (remoto-keys--install remoto-keys--root elpa-branch)))
+         (cases 0) (failed 0) (differ 0))
+    (remoto-keys--install-checkout elpa-branch)
     (when elpa-main
       (princ (format "origin/main %s: remoto %s\n"
                      (string-trim (remoto-keys--sh "git" "-C" remoto-keys--root
@@ -397,12 +497,16 @@ return the number of cases whose two states differ."
                      (remoto-keys--install (remoto-keys--main-source) elpa-main))))
     (unwind-protect
         (dolist (profile remoto-keys--profiles)
-          (cl-incf differ (remoto-keys--profile profile elpa-branch elpa-main)))
+          (let ((counts (remoto-keys--profile profile elpa-branch elpa-main)))
+            (cl-incf cases (plist-get counts :cases))
+            (cl-incf failed (plist-get counts :failed))
+            (cl-incf differ (plist-get counts :differ))))
       (unless remoto-keys--keep
         (ignore-errors (remoto-keys--tmux "kill-server"))))
-    (princ (format "remoto-keys %s: %.0f s%s, results in %s\n"
-                   (string-join remoto-keys--profiles " ") (- (float-time) start)
-                   (if elpa-main (format ", %d cases differ from origin/main" differ) "")
+    (princ (format "remoto-keys %s: %d cases, %d failed%s, %.0f s, results in %s\n"
+                   (string-join remoto-keys--profiles " ") cases failed
+                   (if elpa-main (format ", %d differ from origin/main" differ) "")
+                   (- (float-time) start)
                    (abbreviate-file-name (expand-file-name "results/" remoto-keys--dir))))
     (when remoto-keys--keep
       (let ((tmux (format "tmux -S %s" (abbreviate-file-name
@@ -415,7 +519,234 @@ return the number of cases whose two states differ."
                        (abbreviate-file-name (expand-file-name (concat "sock/" name)
                                                                remoto-keys--dir))
                        tmux))))
-    (kill-emacs 0)))
+    (kill-emacs (if (< 0 failed) 1 0))))
+
+;;; Mock Forgejo
+
+(defvar remoto-keys--fault "none"
+  "What the mock Forgejo answers: \"none\" passes codeberg.org's answer on.")
+
+(defconst remoto-keys--faults
+  '(("429" 429 "text/plain" "Too Many Requests\n" ("Retry-After" . "60"))
+    ("500" 500 "application/json" "{\"message\":\"internal error\"}")
+    ("502" 502 "text/html" "<html><body><h1>502 Bad Gateway</h1></body></html>")
+    ("503" 503 "application/json" "{\"message\":\"internal error\"}" ("Retry-After" . "30")))
+  "The canned answers of the mock Forgejo, each (FAULT STATUS TYPE BODY . HEADERS).")
+
+(defun remoto-keys--answer (status type body &rest headers)
+  "Return the bytes of an HTTP answer of STATUS with BODY of TYPE and HEADERS."
+  (let ((body (if (multibyte-string-p body) (encode-coding-string body 'utf-8) body)))
+    (concat (format "HTTP/1.1 %d Mock\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
+                    status type (length body))
+            (mapconcat (lambda (header) (format "%s: %s\r\n" (car header) (cdr header)))
+                       headers "")
+            "Connection: close\r\n\r\n" body)))
+
+(defun remoto-keys--relay ()
+  "Return the answer in the current url.el buffer as the mock Forgejo passes it on.
+The pages of a listing link to codeberg.org itself, as they did upstream."
+  (goto-char (point-min))
+  (let* ((status (if (looking-at "HTTP/[0-9.]+ \\([0-9]+\\)")
+                     (string-to-number (match-string 1))
+                   502))
+         (end (if (re-search-forward "\r?\n\r?\n" nil t) (point) (point-max)))
+         (head (buffer-substring-no-properties (point-min) end))
+         (field (lambda (name)
+                  (and (string-match (format "^%s: *\\([^\r\n]*\\)" name) head)
+                       (match-string 1 head)))))
+    (apply #'remoto-keys--answer status
+           (or (funcall field "Content-Type") "application/json")
+           (buffer-substring-no-properties end (point-max))
+           (cl-loop for name in '("Link" "X-Total-Count")
+                    for value = (funcall field name)
+                    when value collect (cons name value)))))
+
+(defun remoto-keys--mock-send (process answer)
+  "Send ANSWER on PROCESS, a connection to the mock Forgejo, and close it."
+  (when (process-live-p process)
+    (process-send-string process answer)
+    (delete-process process)))
+
+(defun remoto-keys--mock-filter (process chunk)
+  "Answer the request that CHUNK completes on PROCESS with `remoto-keys--fault'."
+  (let ((head (concat (process-get process :head) chunk)))
+    (process-put process :head head)
+    (when (and (string-search "\r\n\r\n" head)
+               (string-match "\\`[A-Z]+ \\([^ ]+\\)" head))
+      (let ((path (match-string 1 head)))
+        (princ (format "  [mock Forgejo, fault %s: %s]\n" remoto-keys--fault path))
+        (if-let* ((canned (assoc remoto-keys--fault remoto-keys--faults)))
+            (remoto-keys--mock-send process (apply #'remoto-keys--answer (cdr canned)))
+          (let ((url-request-extra-headers '(("Accept" . "application/json"))))
+            (url-retrieve (concat "https://codeberg.org" path)
+                          (lambda (_status)
+                            (let ((answer (remoto-keys--relay)))
+                              (kill-buffer)
+                              (remoto-keys--mock-send process answer)))
+                          nil t t)))))))
+
+(defun remoto-keys--mock-start ()
+  "Start the mock Forgejo on a free port of 127.0.0.1 and return its process."
+  (make-network-process :name "remoto-keys-mock" :server t
+                        :host 'local :family 'ipv4 :service t
+                        :coding 'binary :noquery t
+                        :filter #'remoto-keys--mock-filter))
+
+;;; Scenarios
+
+(defun remoto-keys--ff (name)
+  "Return the step that opens NAME with `find-file' after a reset."
+  `(case ,(concat "ff " name) ,(kbd "C-x C-f") ,name submit))
+
+(defun remoto-keys--setopt (instances &optional continue)
+  "Return a setopt of `remoto-forgejo-instances' to INSTANCES for a scenario.
+It types the form at `eval-expression', after a reset unless CONTINUE,
+then shows the forges and the warnings."
+  `((,(if continue 'step 'case) ,(format "setopt %S" instances)
+     ,(kbd "M-:") ,(format "(setopt remoto-forgejo-instances '%S)" instances) ,(kbd "RET"))
+    (probe "forges" (remoto-keys-forges))))
+
+(defun remoto-keys--scenarios (port)
+  "Return the scenarios that run with the mock Forgejo on PORT.
+Each is (NAME SETUP . STEPS).  SETUP has :gitconfig and :authinfo texts,
+an :init form, and :token t to need REMOTO_E2E_TOKEN.  A step is (case
+LABEL . PARTS), (step LABEL . PARTS), (probe LABEL FORM) or (fault F)."
+  (let* ((mock (format "127.0.0.1:%d" port))
+         (insecure `(progn (require 'ghub)
+                           (setq ghub-insecure-hosts (list ,(concat mock "/api/v1")))))
+         (both "[github]\n\tuser = agzam\n[forgejo]\n\tuser = agzam\n"))
+    `(("none" (:gitconfig "" :authinfo "")
+       ,(remoto-keys--ff "/gh:") (probe "prompt" (remoto-keys-prompt))
+       ,(remoto-keys--ff "/gh:agzam/remoto.el")
+       ,(remoto-keys--ff "/cb:") (probe "prompt" (remoto-keys-prompt))
+       ,(remoto-keys--ff "/cb:forgejo/docs")
+       (probe "logins" (remoto-keys-logins))
+       (probe "basic auth" (bound-and-true-p url-http-real-basic-auth-storage))
+       (probe "auth" (remoto-keys-auth)))
+      ("cbbad" (:gitconfig "[forgejo]\n\tuser = agzam\n"
+                :authinfo "machine codeberg.org/api/v1 login agzam^ghub password not-a-token\n")
+       ,(remoto-keys--ff "/cb:forgejo/docs")
+       ,(remoto-keys--ff "/cb:forgejo/docs/README.md")
+       ,(remoto-keys--ff "/cb:") (probe "prompt" (remoto-keys-prompt))
+       ,(remoto-keys--ff "/gh:agzam/remoto.el")
+       (probe "logins" (remoto-keys-logins))
+       (case "C-u M-x remoto-reset-auth" ,(kbd "C-u M-x") "remoto-reset-auth"
+             ,(kbd "RET") ,(kbd "RET"))
+       (probe "logins" (remoto-keys-logins))
+       (probe "auth" (remoto-keys-auth)))
+      ("lit" (:gitconfig ,both :authinfo "" :token t
+              :init (progn (global-remoto-mode 1)
+                           (setopt remoto-forgejo-instances '(("gitea" "gitea.com")))))
+       ,(remoto-keys--ff "/gh:agzam/remoto.el")
+       ,(remoto-keys--ff "/cb:forgejo/docs")
+       ,(remoto-keys--ff "/cb:forgejo/docs/README.md")
+       ,(remoto-keys--ff "/gitea:gitea/tea")
+       (probe "auth" (remoto-keys-auth))
+       (probe "logins" (remoto-keys-logins)))
+      ("mock" (:gitconfig "" :authinfo ""
+               :init (progn ,insecure (global-remoto-mode 1)
+                            (setopt remoto-forgejo-instances '(("mock" ,mock)))))
+       ,@(mapcan (lambda (fault)
+                   `((fault ,fault)
+                     (case ,(format "ff /mock:forgejo/docs, fault %s" fault)
+                           ,(kbd "C-x C-f") "/mock:forgejo/docs" submit)))
+                 '("429" "503" "502" "500" "none")))
+      ("instances" (:gitconfig "" :authinfo "")
+       ,(remoto-keys--ff "/cb:forgejo/docs")
+       ,(remoto-keys--ff "/gitea:gitea/tea")
+       ,@(remoto-keys--setopt '(("gitea" "gitea.com")))
+       ,(remoto-keys--ff "/gitea:gitea/tea")
+       (case "dired /gitea:gitea/" ,(kbd "C-x d") "/gitea:gitea/" submit)
+       ,(remoto-keys--ff "/gitea:gitea/tea@main:/README.md")
+       (step "M-x remoto-copy-url" ,(kbd "M-x") "remoto-copy-url" ,(kbd "RET"))
+       (probe "kill" (car kill-ring))
+       ,(remoto-keys--ff "https://gitea.com/gitea/tea")
+       (case "dired /gitea:gitea/tea" ,(kbd "C-x d") "/gitea:gitea/tea" submit)
+       ,@(remoto-keys--setopt nil t)
+       (step "g in the /gitea: Dired" "g")
+       ,(remoto-keys--ff "/gitea:gitea/tea")
+       ,@(remoto-keys--setopt '(("gh" "gitea.com") ("cb" "example.org") ("gitea" "gitea.com")))
+       ,(remoto-keys--ff "/gh:agzam/remoto.el")
+       ,(remoto-keys--ff "/cb:forgejo/docs")
+       ,@(remoto-keys--setopt '(("gs" "https://gitea.com")))
+       ,(remoto-keys--ff "/gs:gitea/tea")
+       ,@(remoto-keys--setopt '(("gt" "gitea.com/")))
+       ,(remoto-keys--ff "/gt:gitea/tea")
+       ,@(remoto-keys--setopt '(("gitea:" "gitea.com")))
+       ,(remoto-keys--ff "/gitea::gitea/tea")
+       (probe "insecure" ,insecure)
+       ,@(remoto-keys--setopt `(("mock" ,mock)))
+       ,(remoto-keys--ff "/mock:forgejo/forgejo#14989")
+       (step "ff /cb:forgejo/forgejo#14989"
+             ,(kbd "C-x C-f") "/cb:forgejo/forgejo#14989" submit)
+       (probe "topics" (remoto-keys-topics))))))
+
+(defun remoto-keys--probe (name label form)
+  "Print LABEL and the value of FORM in the profile NAME, or its error."
+  (princ (format "  %s=%s\n" label
+                 (truncate-string-to-width
+                  (condition-case err (prin1-to-string (remoto-keys--eval name form))
+                    (error (format "error: %s" (error-message-string err))))
+                  400))))
+
+(defun remoto-keys--scenario (scenario elpa)
+  "Run SCENARIO in a vanilla profile with remoto from ELPA.
+A (step ...) types where the last one ended, a (case ...) after a reset.
+Return a plist of the cases run and of those that failed a check."
+  (pcase-let* ((`(,name ,setup . ,steps) scenario)
+               (profile (concat "sc-" name))
+               (cases 0) (failed 0) (results nil))
+    (if (and (plist-get setup :token) (not remoto-keys--token))
+        (princ (format "=== %s: skip, needs REMOTO_E2E_TOKEN\n" name))
+      (setq remoto-keys--fault "none")
+      (unwind-protect
+          (progn
+            (princ (format "=== %s\nstart %s: %S\n" name profile
+                           (remoto-keys--start profile "vanilla" elpa setup)))
+            (dolist (step steps)
+              (pcase step
+                (`(fault ,fault) (setq remoto-keys--fault fault))
+                (`(probe ,label ,form) (remoto-keys--probe profile label form))
+                (`(,(and kind (or 'case 'step)) ,label . ,parts)
+                 (let ((result (remoto-keys--run profile `(,label nil ,@parts) "vanilla"
+                                                 (eq kind 'step))))
+                   (cl-incf cases)
+                   (push result results)
+                   (remoto-keys--print profile result)
+                   (when (remoto-keys--check profile result nil)
+                     (cl-incf failed))))
+                (_ (error "Unknown step %S" step)))))
+        (setq remoto-keys--fault "none")
+        (unless remoto-keys--keep
+          (remoto-keys--stop profile)))
+      (remoto-keys--write (expand-file-name (concat "results/" profile ".eld") remoto-keys--dir)
+                          (nreverse results)))
+    (list :cases cases :failed failed)))
+
+(defun remoto-keys-scenarios-main ()
+  "Run the scenarios of REMOTO_KEYS_SCENARIOS, all by default, and exit."
+  (unless (executable-find "tmux")
+    (error "The test-keys targets need tmux"))
+  (make-directory remoto-keys--dir t)
+  (let* ((start (float-time))
+         (elpa (expand-file-name "elpa-branch/" remoto-keys--dir))
+         (port (process-contact (remoto-keys--mock-start) :service))
+         (only (split-string (or (getenv "REMOTO_KEYS_SCENARIOS") "") "[ ,]+" t))
+         (cases 0) (failed 0))
+    (remoto-keys--install-checkout elpa)
+    (princ (format "mock Forgejo on 127.0.0.1:%d\n" port))
+    (unwind-protect
+        (dolist (scenario (remoto-keys--scenarios port))
+          (when (or (null only) (member (car scenario) only))
+            (let ((counts (remoto-keys--scenario scenario elpa)))
+              (cl-incf cases (plist-get counts :cases))
+              (cl-incf failed (plist-get counts :failed)))))
+      (unless remoto-keys--keep
+        (ignore-errors (remoto-keys--tmux "kill-server"))))
+    (princ (format "remoto-keys scenarios %s: %d cases, %d failed, %.0f s, results in %s\n"
+                   (if only (string-join only " ") "all") cases failed (- (float-time) start)
+                   (abbreviate-file-name (expand-file-name "results/" remoto-keys--dir))))
+    (kill-emacs (if (< 0 failed) 1 0))))
 
 ;;; The running Emacs
 
@@ -581,11 +912,7 @@ return the number of cases whose two states differ."
 (defun remoto-keys-live-main ()
   "Type the file and Dired cases into the running Emacs, restore it, and exit."
   (let* ((start (float-time))
-         (cases (remoto-e2e--matrix "vanilla"))
-         (cases (seq-filter (lambda (case)
-                              (or (not remoto-e2e--only)
-                                  (string-match-p remoto-e2e--only (car case))))
-                            cases))
+         (cases (remoto-e2e--selected (remoto-e2e--matrix "vanilla")))
          results)
     (let ((setup (remoto-keys--live remoto-keys--live-save)))
       (princ (format "running Emacs: %S\nhands off the keyboard: %d cases start in 3 s\n"

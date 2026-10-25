@@ -206,6 +206,10 @@ We can only imagine a world where git's transport layer gives you a browsable fi
 - Per-file commit annotations make up to 20 API calls on first directory listing (cached after).
 - Forgejo serves a repository's tree 1,000 entries a page; a large repository takes a few seconds to open the first time, and one with more than 20,000 files falls back to per-directory fetching.
 
+* Testing
+
+=make test= runs the unit specs, =make test-e2e= replays typed cases against recorded answers, and =make test-keys= types the same cases into terminal Emacsen against the real forges.  [[file:test/README.org][test/README.org]] describes every target.
+
 * Changelog
 
 See [[file:changelog.org][changelog.org]] for a detailed list of changes and version history.

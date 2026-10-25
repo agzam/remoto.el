@@ -472,17 +472,6 @@ there from those of Emacs 30 and later."
   (and (< emacs-major-version 30) emacs-major-version)
   "The Emacs major version whose states differ, or nil from Emacs 30 on.")
 
-(defun remoto-e2e--read-states (file)
-  "Return the states in FILE, an alist by case name."
-  (when (file-exists-p file)
-    (with-temp-buffer
-      (insert-file-contents file)
-      (let (states)
-        (condition-case nil
-            (while t (push (read (current-buffer)) states))
-          (end-of-file nil))
-        (nreverse states)))))
-
 (defun remoto-e2e--read-expected ()
   "Return the expected states of the profile on this Emacs."
   (append (and remoto-e2e--version

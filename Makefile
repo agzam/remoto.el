@@ -15,10 +15,11 @@ EMACS_SANDBOX = emacs -Q --init-directory $(SANDBOX) \
 	--eval "(package-initialize)"
 
 E2E_PROFILES = vanilla fido vertico orderless evil embark
+KEYS_PROFILES = $(E2E_PROFILES) ido evil-vertico full
 E2E = $(EMACS_BATCH) --directory . -l test/remoto-e2e.el
 KEYS = $(EMACS_BATCH) --directory . -l test/remoto-keys.el -f remoto-keys-main
 
-.PHONY: help test test-embark test-integration test-all deps lint check-autoloads check-compile compile clean sandbox test-e2e test-e2e-update test-e2e-record test-fixtures-codeberg test-keys test-keys-live
+.PHONY: help test test-embark test-integration test-all deps lint check-autoloads check-compile compile clean sandbox test-e2e test-e2e-update test-e2e-record test-fixtures-codeberg test-keys test-keys-scenarios test-keys-live
 
 help:
 	@echo "Available commands:"
@@ -30,7 +31,8 @@ help:
 	@echo "  make test-e2e-update   Rewrite test/e2e/expected from a run (-j6 too)"
 	@echo "  make test-e2e-record   Record the GitHub answers test/e2e/fixtures.jsonl lacks (needs REMOTO_E2E_TOKEN and network)"
 	@echo "  make test-keys         Type the E2E cases into emacs -nw -q under tmux, against GitHub (needs tmux and network)"
-	@echo "  make test-keys-PROFILE The same in one profile; REMOTO_KEYS_MAIN=1 adds origin/main beside it"
+	@echo "  make test-keys-PROFILE The same in one profile: $(KEYS_PROFILES); REMOTO_KEYS_MAIN=1 adds origin/main"
+	@echo "  make test-keys-scenarios  Auth setups, gitea.com and a mock Forgejo with faults, under tmux (needs network)"
 	@echo "  make test-keys-live    Type the C-x C-f and C-x d cases into the running Emacs, through its server"
 	@echo "  make test-fixtures-codeberg  Record test/fixtures/codeberg.jsonl from codeberg.org (needs network)"
 	@echo "  make test-integration  Run integration tests (needs network)"
@@ -52,6 +54,8 @@ $(ELPA_DIR):
 	--eval "(package-install 'vertico)" \
 	--eval "(package-install 'marginalia)" \
 	--eval "(package-install 'evil)" \
+	--eval "(package-install 'consult)" \
+	--eval "(package-install 'embark-consult)" \
 	--eval "(package-install 'package-lint)"
 
 deps: $(ELPA_DIR)
@@ -108,10 +112,14 @@ test-e2e-record: $(ELPA_DIR)
 
 # Each profile in .keys/PROFILE, so -j runs them side by side; they share
 # GitHub's rate limits.
-test-keys: $(addprefix test-keys-,$(E2E_PROFILES))
+test-keys: $(addprefix test-keys-,$(KEYS_PROFILES))
 
 test-keys-%: $(ELPA_DIR)
 	REMOTO_KEYS_PROFILES=$* REMOTO_KEYS_DIR=.keys/$* $(KEYS)
+
+# Auth setups and other servers, a profile each; REMOTO_KEYS_SCENARIOS picks some.
+test-keys-scenarios: $(ELPA_DIR)
+	REMOTO_KEYS_DIR=.keys/scenarios $(EMACS_BATCH) --directory . -l test/remoto-keys.el -f remoto-keys-scenarios-main
 
 # The running Emacs, through its server: keep off the keyboard while it types.
 test-keys-live: $(ELPA_DIR)

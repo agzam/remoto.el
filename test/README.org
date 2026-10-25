@@ -1,36 +1,56 @@
 #+title: Testing remoto
 
-| Target                | Types into                                | Answers from                                                 | Needs                  |
-|-----------------------+-------------------------------------------+--------------------------------------------------------------+------------------------|
-| =make test=           | nothing: unit specs                       | fakes                                                        | Emacs                  |
-| =make test-e2e=       | batch Emacs, through =execute-kbd-macro=  | =test/e2e/fixtures.jsonl=, compared with =test/e2e/expected= | Emacs                  |
-| =make test-keys=      | =emacs -nw -q=, one per profile, in tmux  | GitHub                                                       | Emacs, tmux, network   |
-| =make test-keys-live= | the Emacs you work in, through its server | GitHub                                                       | a running Emacs server |
+| Target                     | Types into                                | Answers from                                                 | Fails on                        | Needs                  |
+|----------------------------+-------------------------------------------+--------------------------------------------------------------+---------------------------------+------------------------|
+| =make test=                | nothing: unit specs                       | fakes                                                        | a spec                          | Emacs                  |
+| =make test-e2e=            | batch Emacs, through =execute-kbd-macro=  | =test/e2e/fixtures.jsonl=, compared with =test/e2e/expected= | a state unlike the expected one | Emacs                  |
+| =make test-keys=           | =emacs -nw -q=, one per profile, in tmux  | GitHub and Codeberg                                          | a fixed check                   | Emacs, tmux, network   |
+| =make test-keys-scenarios= | =emacs -nw -q=, one per scenario, in tmux | GitHub, Codeberg, gitea.com and a mock Forgejo               | a fixed check                   | Emacs, tmux, network   |
+| =make test-keys-live=      | the Emacs you work in, through its server | GitHub                                                       | nothing: it reports             | a running Emacs server |
 
 Run =make deps= once: it installs the packages of every profile into =.elpa=.
 
 * The cases
 
-=test/remoto-e2e-cases.el= holds what a person types and the six completion profiles: vanilla, fido, vertico, orderless, evil, embark.  Both E2E targets run these cases.  =REMOTO_E2E_ONLY=, a regexp matched against the case name, runs some of them.
+=test/remoto-e2e-cases.el= holds what a person types and the completion profiles.  The replay suite runs six: vanilla, fido, vertico, orderless, evil, embark.  The terminal runs add three that have no golden files: ido, evil-vertico (evil with vertico and orderless) and full (evil, vertico, orderless, marginalia, consult, embark).  The Codeberg names run in the terminal only, since no recorded answers replay them.  =REMOTO_E2E_ONLY=, a regexp matched against the case name with letter case counting, runs some of the cases.
 
 * make test-keys
 
 Each profile is an =emacs -nw -q= with remoto installed by package.el from a tar of the checkout, under a private tmux server.  Everything lives in =.keys/PROFILE/=.  No window opens and nothing takes focus, on macOS or Linux.
 
-The answers come from the real GitHub, so no golden file holds them.  Read the results, or compare them with origin/main:
+The answers come from the real forges, so no golden file holds them.  Read the results, or compare them with origin/main:
 
 #+begin_src sh
 make test-keys-vertico                                    # one profile
-make -j6 test-keys                                        # all six side by side; they share GitHub's rate limits
+make -j9 test-keys                                        # all nine side by side; they share GitHub's rate limits
 REMOTO_KEYS_MAIN=1 make test-keys-vanilla                 # origin/main's remoto too, with a DIFF wherever the two end apart
-REMOTO_E2E_TOKEN=$(gh auth token) make test-keys-vanilla  # signed in
+REMOTO_E2E_TOKEN=$(gh auth token) make test-keys-vanilla  # signed in to GitHub
 REMOTO_E2E_ONLY='^ff /gh:agzam' make test-keys-vanilla    # some cases
 #+end_src
 
 - Each case prints one line: profile, case, seconds, then ~BUFFER | DIRECTORY, FILE or MODE | n=NAMES | calls=REQUESTS | MESSAGES~.  The whole states go to =.keys/PROFILE/results/=.
-- A token reaches each profile through a file only you can read, which the profile deletes on start.  Without a token remoto reads anonymously; a =github.user= in your git config then makes it ask for one, as it would ask you.
+- Four fixed checks hold whatever the forge's data, and each failure prints a =FAIL= line and makes the run exit 1: a case ends where the replay of it ends, Dired or file (a profile without golden files takes vanilla's, and evil's for ex cases); the typed name is the first line of a Dired of matches; no message holds raw HTTP text; a case makes at most 20 requests.  A case still busy after 60 s fails too.
+- With =REMOTO_KEYS_MAIN=, the Codeberg cases run on the checkout only: origin/main has no Codeberg.
+- Each profile has a git config and an auth-source of its own, empty unless a scenario fills them, so nothing of yours reaches it but the token you pass.  The token reaches it through a file only you can read, which the profile deletes on start.  Without a token remoto reads anonymously.
 - The run waits whenever GitHub has fewer than 8 searches left.
 - ~REMOTO_KEYS_SIZE=COLSxLINES~ sets the terminal, 100x40 by default.
+
+* make test-keys-scenarios
+
+Each scenario is a vanilla profile with a git config, an auth-source and an init of its own, in =.keys/scenarios/=.  Its cases print the lines and run the checks of =make test-keys=; its probes print lines of their own, such as =logins=, =auth= (per host: requests, those with a token, those with GitHub's token) and =forges=.
+
+| Scenario    | Setup                                                            | What it shows                                                            |
+|-------------+------------------------------------------------------------------+--------------------------------------------------------------------------|
+| =none=      | no account name, no token                                        | anonymous reads, no password prompt, no token sent                       |
+| =cbbad=     | =forgejo.user= and a Codeberg token that Codeberg refuses        | the fallback to anonymous reads, then =C-u M-x remoto-reset-auth=        |
+| =lit=       | GitHub's token in =remoto-github-auth=, needs =REMOTO_E2E_TOKEN= | GitHub's token never goes to Codeberg or gitea.com                       |
+| =mock=      | a Forgejo instance in the runner, answering 429, 503, 502, 500   | the message of each fault, then the repository once it relays Codeberg   |
+| =instances= | =remoto-forgejo-instances= set at run time with =M-:=            | gitea.com, refused prefixes and hosts, removal, two hosts with one topic |
+
+#+begin_src sh
+make test-keys-scenarios                                    # all; lit skips without a token
+REMOTO_KEYS_SCENARIOS='none mock' make test-keys-scenarios  # some
+#+end_src
 
 ** Watching and exploring by hand
 
@@ -55,7 +75,7 @@ tmux -S .keys/vertico/tmux.sock kill-server                            # stop
 
 Types the =C-x C-f= and =C-x d= cases into the Emacs you work in, through its server (=M-x server-start=; =REMOTO_KEYS_SERVER= names another one).  It tests remoto in your configuration, so results differ from person to person.  It tests the remoto your Emacs has loaded: reload it after a change.
 
-Keep off the keyboard while it runs: what you type joins the case.  The cases run in a =*remoto-keys*= buffer.  At the end the run puts back your windows, the minibuffer histories, =recentf-list= and =save-place-alist=, removes its advice, and kills only the buffers the cases opened.
+Keep off the keyboard while it runs: what you type joins the case.  The cases run in a =*remoto-keys*= buffer.  At the end the run puts back your windows, the minibuffer histories, =recentf-list= and =save-place-alist=, removes its advice, and kills only the buffers the cases opened.  It runs no checks and exits 0: your configuration decides where a case ends.
 
 * Looking further
 

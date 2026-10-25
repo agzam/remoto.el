@@ -18,7 +18,7 @@
                                              (file-name-directory load-file-name)))
 
 ;; A sandbox never reaches the auth-source files of the person running it.
-(setq auth-sources nil)
+(setq auth-sources (when-let* ((file (getenv "REMOTO_KEYS_AUTHINFO"))) (list file)))
 (when-let* ((file (getenv "REMOTO_KEYS_TOKEN_FILE"))
             ((file-exists-p file)))
   (setq remoto-github-auth (with-temp-buffer
@@ -68,6 +68,21 @@ ENDPOINT); GitHub's go unprefixed, so the two compare."
                 (push (concat "async " (remoto-keys--call-name args)) remoto-keys--calls))
               '((name . remoto-keys-log))))
 
+(defvar remoto-keys--auth-log nil
+  "Per request, newest first: its host, whether it had a token, whether GitHub's.")
+
+(defun remoto-keys--auth-record (url &rest _)
+  "Note the host of URL and which token the request to it carries."
+  (let ((auth (cdr (assoc "Authorization" url-request-extra-headers)))
+        (url (if (stringp url) (url-generic-parse-url url) url)))
+    (push (list (url-host url) (and auth t)
+                (and auth (stringp (bound-and-true-p remoto-github-auth))
+                     (string-search remoto-github-auth auth) t))
+          remoto-keys--auth-log)))
+
+(with-eval-after-load 'url
+  (advice-add 'url-retrieve-internal :before #'remoto-keys--auth-record))
+
 ;;; What the runner calls
 
 (defun remoto-keys-busy-p ()
@@ -106,12 +121,17 @@ ENDPOINT); GitHub's go unprefixed, so the two compare."
         (kill-buffer buffer))))
   (delete-other-windows)
   (switch-to-buffer "*scratch*")
-  (setq default-directory remoto-keys--home
-        remoto-keys--calls nil
+  (setq default-directory remoto-keys--home)
+  (remoto-keys-mark)
+  'reset)
+
+(defun remoto-keys-mark ()
+  "Begin a case where the last one ended: no requests and no messages yet."
+  (setq remoto-keys--calls nil
         remoto-keys--browsed nil)
   (message "")
   (setq remoto-keys--mark (with-current-buffer (messages-buffer) (point-max)))
-  'reset)
+  'mark)
 
 (defun remoto-keys--messages ()
   "Return the lines *Messages* got since the case began."
@@ -119,6 +139,10 @@ ENDPOINT); GitHub's go unprefixed, so the two compare."
     (split-string (buffer-substring-no-properties
                    (min remoto-keys--mark (point-max)) (point-max))
                   "\n" t)))
+
+(defconst remoto-keys--raw-http
+  "HTTP/[0-9.]+ [0-9]\\{3\\}\\|<!DOCTYPE\\|<html\\|{\"message\":"
+  "Text of a raw HTTP answer, which a message to a person never holds.")
 
 (defun remoto-keys-state ()
   "Return where the case ended, without the parts that are nil."
@@ -145,6 +169,9 @@ ENDPOINT); GitHub's go unprefixed, so the two compare."
                                                (string-match-p
                                                 "\\`\\(?:[Rr]emoto\\|Error\\)" line))
                                              (remoto-keys--messages))
+                       :raw (seq-filter (lambda (line)
+                                          (string-match-p remoto-keys--raw-http line))
+                                        (remoto-keys--messages))
                        :kill (car kill-ring)
                        :browsed (reverse remoto-keys--browsed)
                        :requests (reverse remoto-keys--calls))
@@ -166,6 +193,54 @@ ENDPOINT); GitHub's go unprefixed, so the two compare."
               (length (and (derived-mode-p 'dired-mode) (remoto-e2e--dired-names)))
               (length remoto-keys--calls)
               (truncate-string-to-width messages 200)))))
+
+;;; What the scenarios probe
+
+(defun remoto-keys-auth ()
+  "Return per host the requests, those with a token, and those with GitHub's."
+  (mapcar (lambda (host)
+            (let ((rows (seq-filter (lambda (row) (equal (car row) host))
+                                    remoto-keys--auth-log)))
+              (list host :requests (length rows) :token (seq-count #'cadr rows)
+                    :github-token (seq-count #'caddr rows))))
+          (delete-dups (reverse (mapcar #'car remoto-keys--auth-log)))))
+
+(defun remoto-keys-logins ()
+  "Return the logins of remoto by host, without their tokens."
+  (when (boundp 'remoto--logins)
+    (let (logins)
+      (maphash (lambda (host login)
+                 (push (list host :failed (remoto--login-failed login)
+                             :token (and (remoto--login-token login) t)
+                             :user (remoto--login-user login))
+                       logins))
+               remoto--logins)
+      (nreverse logins))))
+
+(defun remoto-keys-prompt ()
+  "Return the prompt and the input of the minibuffer, or nil."
+  (when-let* ((window (active-minibuffer-window)))
+    (with-current-buffer (window-buffer window)
+      (concat (minibuffer-prompt) (minibuffer-contents-no-properties)))))
+
+(defun remoto-keys-forges ()
+  "Return the prefixes of remoto's forges and the text of *Warnings*."
+  (list :forges (and (boundp 'remoto--forges) (mapcar #'car remoto--forges))
+        :warnings (when-let* ((buffer (get-buffer "*Warnings*")))
+                    (with-current-buffer buffer
+                      (string-trim (buffer-substring-no-properties (point-min) (point-max)))))))
+
+(defun remoto-keys-topics ()
+  "Return the topic buffers, each with the path of its repository."
+  (cl-loop for buffer in (buffer-list)
+           when (local-variable-p 'remoto-topic--repo-path buffer)
+           collect (list (buffer-name buffer)
+                         (buffer-local-value 'remoto-topic--repo-path buffer))))
+
+;; A scenario's own setup, such as its servers and the mode.
+(when-let* ((form (getenv "REMOTO_KEYS_INIT")))
+  (with-demoted-errors "REMOTO_KEYS_INIT: %S"
+    (eval (car (read-from-string form)) t)))
 
 (setq server-socket-dir (getenv "REMOTO_KEYS_SOCKET_DIR")
       server-name (getenv "REMOTO_KEYS_SERVER"))

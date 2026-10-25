@@ -17,16 +17,29 @@
 (defconst remoto-e2e-profiles '("vanilla" "fido" "vertico" "orderless" "evil" "embark")
   "The completion setups the cases run under.")
 
+(defconst remoto-e2e-live-profiles
+  (append remoto-e2e-profiles '("ido" "evil-vertico" "full"))
+  "The setups of the terminal runs: the replay suite's and three without golden files.")
+
 (defconst remoto-e2e--only (getenv "REMOTO_E2E_ONLY")
   "A regexp: when set, only the cases whose name matches it run.")
 
+(defun remoto-e2e--selected (cases)
+  "Return the CASES whose name `remoto-e2e--only' matches, letter case counting."
+  (let ((case-fold-search nil))
+    (seq-filter (lambda (case)
+                  (or (not remoto-e2e--only)
+                      (string-match-p remoto-e2e--only (car case))))
+                cases)))
+
 (defconst remoto-e2e--submit
   '(("vanilla" . "RET") ("fido" . "M-j") ("vertico" . "M-RET")
-    ("orderless" . "M-RET") ("evil" . "RET") ("embark" . "M-RET"))
+    ("orderless" . "M-RET") ("evil" . "RET") ("embark" . "M-RET")
+    ("ido" . "C-j") ("evil-vertico" . "M-RET") ("full" . "M-RET"))
   "Per profile, the key that submits a file prompt as typed.")
 
 (defun remoto-e2e-setup (profile)
-  "Turn on the completion setup of PROFILE, one of `remoto-e2e-profiles'."
+  "Turn on the completion setup of PROFILE, one of `remoto-e2e-live-profiles'."
   (pcase profile
     ("vanilla")
     ("fido"
@@ -45,6 +58,23 @@
      (require 'embark) (require 'remoto-embark)
      (vertico-mode 1) (marginalia-mode 1)
      (setq completion-styles '(orderless basic))
+     (remoto-embark-register)
+     (keymap-global-set "C-c a" #'embark-act)
+     (keymap-set minibuffer-local-map "C-c a" #'embark-act))
+    ("ido" (ido-mode 1) (setq ido-enable-flex-matching t))
+    ("evil-vertico"
+     (require 'evil) (evil-mode 1)
+     (require 'vertico) (require 'orderless) (vertico-mode 1)
+     (setq completion-styles '(orderless basic)))
+    ("full"
+     (require 'evil) (evil-mode 1)
+     (require 'vertico) (require 'vertico-directory) (require 'orderless)
+     (require 'marginalia) (require 'consult)
+     (require 'embark) (require 'embark-consult) (require 'remoto-embark)
+     (vertico-mode 1) (marginalia-mode 1)
+     (add-hook 'rfn-eshadow-update-overlay-hook #'vertico-directory-tidy)
+     (setq completion-styles '(orderless partial-completion basic)
+           completion-category-overrides '((file (styles partial-completion))))
      (remoto-embark-register)
      (keymap-global-set "C-c a" #'embark-act)
      (keymap-set minibuffer-local-map "C-c a" #'embark-act))
@@ -86,6 +116,17 @@
   (when (eobp)
     (user-error "No line %s" name)))
 
+(defun remoto-e2e--read-states (file)
+  "Return the states in FILE, an alist by case name."
+  (when (file-exists-p file)
+    (with-temp-buffer
+      (insert-file-contents file)
+      (let (states)
+        (condition-case nil
+            (while t (push (read (current-buffer)) states))
+          (end-of-file nil))
+        (nreverse states)))))
+
 (defun remoto-e2e--diff (expected actual)
   "Return the keys whose values differ between plists EXPECTED and ACTUAL."
   (cl-loop for key in (delete-dups (append (cl-loop for (k) on expected by #'cddr
@@ -121,14 +162,54 @@
     "/gh:agzam/remoto.el@main:/te" "/gh:agzam/remoto.el#")
   "Names completed with TAB after a pause, one or two per level.")
 
+(defconst remoto-e2e--codeberg-names
+  '("/cb:forgejo/docs" "/cb:" "/codeberg:" "/cb:forgejo" "/cb:forg" "/cb:forgejo/" "/cb:dnkl/"
+    "/cb:forgejo/do" "/cb:forgejo/docs/"
+    "/cb:forgejo/docs/README.md" "/cb:forgejo/docs/READ" "/cb:forgejo/docs/nope.txt"
+    "/cb:forgejo/docs@" "/cb:forgejo/docs@v1" "/cb:forgejo/docs@next"
+    "/cb:forgejo/docs@next:" "/cb:forgejo/docs@next:/docs/" "/cb:forgejo/docs@next:/docs"
+    "/cb:forgejo/docs@next:/docs/adm" "/cb:forgejo/docs@v15.0:/" "/cb:forgejo/docs@65faeb1:/"
+    "/cb:forgejo/forgejo@v15.0/forgejo:/" "/cb:forgejo/forgejo@v15.0/forgejo"
+    "/cb:forgejo/forgejo@v17.0.0:/" "/cb:forgejo/forgejo#14989" "/cb:forgejo/forgejo#14991"
+    "/cb:forgejo/.." "/cb:forgejo/docs/.." "/cb:forgejo/docs@next:/docs/.."
+    "/cb:Forgejo/Docs" "/cb:forgejo/ru" "/cb:no-such-owner-zz9q/" "/cb:no-such-owner-zz9q"
+    "/cb:no-such-owner-zz9q/repo" "/cb:forgejo/zzqqxx" "/cb:forgejo/docs@zzqq"
+    "https://codeberg.org/forgejo/docs"
+    "https://codeberg.org/forgejo/docs/src/branch/next/README.md"
+    "https://codeberg.org/forgejo/forgejo/src/branch/v15.0/forgejo/go.mod"
+    "https://codeberg.org/forgejo/forgejo/src/tag/v17.0.0/README.md"
+    "https://codeberg.org/forgejo/docs/src/commit/65faeb1c07bbc43cbc3ac32aef19a7671500dd78/README.md"
+    "https://codeberg.org/forgejo/forgejo/pulls/14989"
+    "https://codeberg.org/forgejo/forgejo/issues/14991"
+    "git@codeberg.org:forgejo/docs.git" "codeberg.org/forgejo/docs"
+    "/cb:Freeyourgadget/Gadgetbridge" "/gh:Freeyourgadget/Gadgetbridge")
+  "Names typed against Codeberg, live only: no recorded answers replay them.
+The account root comes after a repository: as the first Codeberg request
+of a session it asks /user anonymously and url.el prompts for a password.")
+
+(defun remoto-e2e--commands (profile)
+  "Return the commands of PROFILE that open a name, each (LABEL . KEYS)."
+  (pcase profile
+    ("evil" '(("ex" . ": e SPC")))
+    ((or "evil-vertico" "full") '(("ff" . "C-x C-f") ("dired" . "C-x d") ("ex" . ": e SPC")))
+    (_ '(("ff" . "C-x C-f") ("dired" . "C-x d")))))
+
+(defun remoto-e2e--open-cases (profile names)
+  "Return the cases that open each of NAMES with each command of PROFILE.
+An ex command line ends with RET whatever completes the file prompts."
+  (cl-loop for (command . keys) in (remoto-e2e--commands profile)
+           nconc (cl-loop for name in names
+                          collect `(,(concat command " " name) nil
+                                    ,(kbd keys) ,name
+                                    ,(if (equal command "ex") (kbd "RET") 'submit)))))
+
 (defun remoto-e2e--matrix (profile)
   "Return the cases that open each name with each command of PROFILE."
-  (cl-loop for (command . keys) in (if (equal profile "evil")
-                                       '(("ex" . ": e SPC"))
-                                     '(("ff" . "C-x C-f") ("dired" . "C-x d")))
-           nconc (cl-loop for name in remoto-e2e--names
-                          collect `(,(concat command " " name) nil
-                                    ,(kbd keys) ,name submit))))
+  (remoto-e2e--open-cases profile remoto-e2e--names))
+
+(defun remoto-e2e--codeberg-cases (profile)
+  "Return the Codeberg cases of PROFILE, with `remoto-e2e--only' applied."
+  (remoto-e2e--selected (remoto-e2e--open-cases profile remoto-e2e--codeberg-names)))
 
 (defun remoto-e2e--tab-cases ()
   "Return the cases that complete a name with TAB."
@@ -198,14 +279,12 @@
 
 (defun remoto-e2e--cases (profile)
   "Return the cases of PROFILE, each (NAME BINDINGS . KEYS)."
-  (seq-filter (lambda (case)
-                (or (not remoto-e2e--only)
-                    (string-match-p remoto-e2e--only (car case))))
-              (append (remoto-e2e--matrix profile)
-                      (pcase profile
-                        ("vanilla" (append (remoto-e2e--tab-cases)
-                                           (remoto-e2e--dired-cases)))
-                        ("embark" (remoto-e2e--embark-cases))))))
+  (remoto-e2e--selected
+   (append (remoto-e2e--matrix profile)
+           (pcase profile
+             ("vanilla" (append (remoto-e2e--tab-cases)
+                                (remoto-e2e--dired-cases)))
+             ((or "embark" "full") (remoto-e2e--embark-cases))))))
 
 (provide 'remoto-e2e-cases)
 ;;; remoto-e2e-cases.el ends here
