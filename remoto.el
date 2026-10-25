@@ -1929,6 +1929,13 @@ English month names, as in the fixed date, keep the columns aligned."
            (format-time-string "%b %e %H:%M" time))
           (t (format-time-string "%b %e  %Y" time)))))
 
+(defun remoto--one-line (text)
+  "Return TEXT with each line break, and the blanks around it, as one space.
+A forge's description may span lines; a Dired line or an annotation cannot."
+  (if (string-match-p "[\n\r\f\v]" text)
+      (mapconcat #'identity (split-string text "[\n\r\f\v]+" t "[ \t]+") " ")
+    text))
+
 (defun remoto--format-dired-entry (name plist &optional classify widths)
   "Format a single Dired line for NAME with PLIST attributes.
 CLASSIFY appends the ls -F type indicator.  WIDTHS, the size and name
@@ -1936,7 +1943,7 @@ column widths, line up a listing; a note in PLIST starts 4 columns past
 the names, where `dired-hide-details-mode' hides it with symlink targets."
   (let* ((dir? (equal "tree" (alist-get 'type plist)))
          (indicator (remoto--ls-indicator plist classify))
-         (note (alist-get 'note plist)))
+         (note (and (alist-get 'note plist) (remoto--one-line (alist-get 'note plist)))))
     (concat (or (alist-get 'perms plist)
                 (remoto--mode-to-string (alist-get 'mode plist) dir?))
             "  1 github github "
@@ -3215,7 +3222,7 @@ Uses display property for alignment (works in any completion UI)."
     (mapcar (lambda (x)
               (let* ((c (nth 0 x))
                      (prefix (nth 1 x))
-                     (suffix (nth 2 x)))
+                     (suffix (remoto--one-line (nth 2 x))))
                 (list c prefix
                       (if (string-empty-p suffix) ""
                         (concat (propertize " " 'display

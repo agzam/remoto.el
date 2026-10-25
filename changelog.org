@@ -33,6 +33,7 @@ Changes to the project, following Keep a Changelog conventions.
 - An API error other than 404, 422, 403 and 401 printed the raw condition, such as "Remoto: API error: HTTP Error: 502, nil, "https://...", nil". It names the host and the status now, with the message of the body when it has one; a 429 says rate limited, and both say how long the Retry-After of the answer asks to wait.
 - Topic completion under Vertico failed with ~(wrong-type-argument listp t)~ when a key arrived while it fetched the topic whose number was typed, at ~/github:OWNER/REPO#~ and at ~remoto-browse~. It lists the topics it has instead.
 - A GitHub URL whose branch or tag holds a slash, such as ~https://github.com/OWNER/REPO/tree/release/2026.5.0~, opened the ref ~release~ at the path ~2026.5.0~, since a URL does not mark where the ref ends. remoto asks GitHub for the branches, then the tags, that start with the first segment and takes the longest one the URL starts with: one request, two for a tag, none for a full commit SHA or a URL that ends at the ref. A query string or a fragment, such as the ~?tab=readme-ov-file~ a browser adds to a repository URL, ended up in the repository name or the path, and percent escapes stayed encoded.
+- A description over several lines, which Forgejo allows, split its Dired line in two and showed a ~^M~ in completion annotations. Its line breaks read as spaces now.
 
 * [2.3.0] - 2026-10-20
 

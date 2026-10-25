@@ -953,6 +953,12 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
       (expect (substring line beg end) :to-equal "r")
       (expect (substring line end) :to-equal "/    desc\n")))
 
+  (it "keeps a note that spans lines, as a Forgejo description may, on its one line"
+    (expect (remoto--format-dired-entry
+             "sokobelt" '((type . "tree")
+                          (note . "Entry for the Lisp Game Jam 2022 \r\n\r\n https://itch.io\r\n")))
+            :to-match (rx " sokobelt    Entry for the Lisp Game Jam 2022 https://itch.io\n" eos)))
+
   (it "lines up notes and sizes across a listing"
     (let* ((entries '(("a" (type . "tree") (size . 7) (note . "N1"))
                       ("abcdef" (type . "tree") (size . 1234567890) (note . "N2"))))
@@ -5492,6 +5498,11 @@ Returns the full path after completion, or INPUT if no completion."
       (let ((result (funcall affix-fn (list candidate))))
         ;; Should have non-empty suffix
         (expect (string-match-p "A cool repo" (nth 2 (car result))) :to-be-truthy))))
+
+  (it "puts a description that spans lines on the candidate's one line"
+    (expect (substring-no-properties
+             (nth 2 (car (remoto--affixate '(("sokobelt" "" "Lisp Game Jam\r\n\r\nhttps://itch.io"))))))
+            :to-equal " Lisp Game Jam https://itch.io"))
 
   (it "provides issue/PR titles at issues level"
     (let* ((meta (remoto--completion-metadata "/github:foo/bar#"))
