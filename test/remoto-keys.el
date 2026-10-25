@@ -500,13 +500,35 @@ Return a plist of the label, seconds, a note, the line and the state."
 ;;; Fixed checks
 
 (defconst remoto-keys--max-requests 20
-  "The requests one case may make before a check calls it too many.
-The commit annotations of a directory's files count apart, as many again:
-remoto asks for up to 20, one per file.")
+  "The distinct requests one case may make before a check calls it too many.
+The commit annotations count apart, as many again per directory: remoto
+asks for up to 20, one per file of the directory it lists.")
 
 (defun remoto-keys--annotation-p (request)
   "Non-nil when REQUEST asks for the last commit of one file, an annotation."
   (string-match-p "/commits\\?sha=[^&]*&path=" request))
+
+(defun remoto-keys--annotation-dir (request)
+  "Return the repository, ref and directory of the file annotation REQUEST, or nil."
+  (when (string-match "\\`\\(?:async \\)?\\(.*/commits\\?sha=[^&]*\\)&path=\\([^&]*\\)"
+                      request)
+    (let ((path (url-unhex-string (match-string 2 request))))
+      (concat (match-string 1 request) " " (or (file-name-directory path) "")))))
+
+(defun remoto-keys--request-counts (requests)
+  "Return (DISTINCT . ANNOTATIONS) for REQUESTS, the calls of one case.
+DISTINCT counts each endpoint once, the commit annotations aside, so a
+call that a pending request answers again is no new request; ANNOTATIONS
+is the most distinct annotations of one directory."
+  (let ((endpoints (delete-dups (mapcar (lambda (request)
+                                          (string-remove-prefix "async " request))
+                                        requests))))
+    (cons (seq-count (lambda (endpoint) (not (remoto-keys--annotation-p endpoint)))
+                     endpoints)
+          (apply #'max 0 (mapcar (lambda (group) (length (cdr group)))
+                                 (seq-group-by #'remoto-keys--annotation-dir
+                                               (seq-filter #'remoto-keys--annotation-p
+                                                           endpoints)))))))
 
 (defconst remoto-keys--ido-landings
   '(("ff /gh:agzam/remoto.el/") ("ff /gh:agzam/remoto.el@2.2.0:/")
@@ -568,8 +590,9 @@ clean Dired and Embark lines, no raw HTTP text, few requests, live URLs."
          (want (remoto-keys--landing expected))
          (got (remoto-keys--landing state))
          (names (plist-get state :names))
-         (annotations (seq-count #'remoto-keys--annotation-p (plist-get state :requests)))
-         (requests (- (length (plist-get state :requests)) annotations))
+         (counts (remoto-keys--request-counts (plist-get state :requests)))
+         (requests (car counts))
+         (annotations (cdr counts))
          failures)
     (when note
       (push note failures))
@@ -593,7 +616,7 @@ clean Dired and Embark lines, no raw HTTP text, few requests, live URLs."
     (when (< remoto-keys--max-requests requests)
       (push (format "%d requests, more than %d" requests remoto-keys--max-requests) failures))
     (when (< remoto-keys--max-requests annotations)
-      (push (format "%d commit annotations, more than %d" annotations
+      (push (format "%d commit annotations in one directory, more than %d" annotations
                     remoto-keys--max-requests)
             failures))
     (nreverse failures)))

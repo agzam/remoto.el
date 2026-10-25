@@ -108,28 +108,42 @@
               :to-equal '("https://codeberg.org/x answers 404" "https://y answers nothing")))
     (it "fails raw HTTP text, too many requests, and a runner's note"
       (expect (remoto-keys--checks "ff /gh:" `(:raw ("HTTP/1.1 502 Bad Gateway")
-                                               :requests ,(make-list 21 "r"))
+                                               :requests ,(mapcar (lambda (n) (format "r%d" n))
+                                                                  (number-sequence 1 21)))
                                    nil "still busy after 60s")
               :to-equal '("still busy after 60s"
                           "raw HTTP text in the messages: HTTP/1.1 502 Bad Gateway"
                           "21 requests, more than 20")))
-    (it "counts the commit annotations of a directory's files apart, with a cap of their own"
-      ;; remoto documents up to 20 of them, one per file, on top of the tree.
-      (let ((annotation (lambda (forge)
-                          (format "%srepos/o/r/commits?sha=main&path=f&%s" forge
-                                  (if (string-empty-p forge) "per_page=1" "limit=1")))))
+    (it "counts a request asked again, synchronously or not, once"
+      ;; A keystroke that interrupts a Codeberg tree has its pages asked again (CB28).
+      (let ((pages (mapcar (lambda (n) (format "/codeberg:repos/o/r/git/trees/x?page=%d" n))
+                           (number-sequence 1 11))))
+        (expect (remoto-keys--checks "ff /cb:forgejo/forgejo@v17.0.0:/"
+                                     `(:requests ,(append pages
+                                                          (mapcar (lambda (p) (concat "async " p))
+                                                                  pages)))
+                                     nil nil)
+                :to-be nil)))
+    (it "counts the commit annotations apart, with a cap of 20 for each directory"
+      ;; remoto documents up to 20 of them, one per file of the directory it lists.
+      (let ((annotations (lambda (prefix dir n)
+                           (mapcar (lambda (i)
+                                     (format "%srepos/o/r/commits?sha=main&path=%s&limit=1"
+                                             prefix (url-hexify-string (format "%sf%d" dir i))))
+                                   (number-sequence 1 n)))))
         (expect (remoto-keys--checks
-                 "ff /cb:forgejo/forgejo@v17.0.0:/"
+                 "ff /cb:forgejo/forgejo@v17.0.0:/public/assets/img/emoji/gitea.png"
                  `(:requests ,(append (make-list 11 "/codeberg:repos/o/r/git/trees/x")
-                                      (make-list 20 (funcall annotation "/codeberg:"))))
+                                      (funcall annotations "/codeberg:" "" 20)
+                                      (funcall annotations "/codeberg:" "public/" 11)))
                  nil nil)
                 :to-be nil)
         (expect (remoto-keys--checks
                  "ff /gh:agzam/remoto.el@main:/test/"
                  `(:requests ,(cons "repos/o/r/git/trees/main"
-                                    (make-list 21 (funcall annotation ""))))
+                                    (funcall annotations "" "test/" 21)))
                  nil nil)
-                :to-equal '("21 commit annotations, more than 20"))
+                :to-equal '("21 commit annotations in one directory, more than 20"))
         (expect (remoto-keys--annotation-p "async repos/o/r/commits/main") :to-be nil)))))
 
 (describe "remoto-keys--expected-state"
