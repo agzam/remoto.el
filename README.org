@@ -5,7 +5,7 @@
 [[https://github.com/agzam/remoto.el/actions/workflows/run-tests.yml][https://github.com/agzam/remoto.el/actions/workflows/run-tests.yml/badge.svg]]
 
 #+begin_quote
-El Remoto - browse any GitHub repository in Emacs just like any local - without cloning.
+El Remoto - browse any GitHub or Codeberg repository in Emacs just like any local - without cloning.
 #+end_quote
 
 * What
@@ -13,7 +13,7 @@ Wouldn't it be nice to be able to ~C-x C-f~ and just browse any GitHub repo?
 
 [[./test/demo.gif]]
 
-remoto.el registers a virtual filesystem via ~file-name-handler-alist~ that translates standard Emacs file operations into GitHub API calls via the ~ghub~ library. The result: ~find-file~, ~dired~, tab-completion, ~dired-subtree~ - all standard Emacs file tooling works against a remote GitHub repo. Read-only.
+remoto.el registers a virtual filesystem via ~file-name-handler-alist~ that translates standard Emacs file operations into calls to the forge's API via the ~ghub~ library. The result: ~find-file~, ~dired~, tab-completion, ~dired-subtree~ - all standard Emacs file tooling works against a remote repository. Read-only.
 
 It was demoed at [[https://www.meetup.com/emacsatx/][Emacs ATX Meetup]] of July 2026. Here's the [[https://youtu.be/YV1kyVE6SvU][video]]. Link to the complete video of that meetup (~2 hrs) is in the description.
 

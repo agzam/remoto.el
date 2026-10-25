@@ -1,4 +1,4 @@
-;;; remoto.el --- Browse GitHub repos without cloning -*- lexical-binding: t; -*-
+;;; remoto.el --- Browse GitHub and Codeberg repos without cloning -*- lexical-binding: t; -*-
 ;;
 ;; Copyright (C) 2026 Ag Ibragimov
 ;;
@@ -17,12 +17,12 @@
 
 ;;; Commentary:
 
-;; remoto.el lets you browse any GitHub repository in Emacs as if it were
-;; cloned locally - without cloning it.  It registers a virtual filesystem
-;; via `file-name-handler-alist' that translates Emacs file operations into
-;; requests to a forge.  A forge is a `remoto-forge' that answers the
-;; generic functions of the forge contract with plain data; GitHub's
-;; answers live in remoto-github.el and use the `ghub' library.
+;; remoto.el lets you browse any GitHub or Codeberg repository in Emacs as
+;; if it were cloned locally - without cloning it.  It registers a virtual
+;; filesystem via `file-name-handler-alist' that translates Emacs file
+;; operations into requests to a forge.  A forge is a `remoto-forge' that
+;; answers the generic functions of the forge contract with plain data;
+;; GitHub's answers live in remoto-github.el and use the `ghub' library.
 ;;
 ;; Loading this file defines things and changes nothing.  `global-remoto-mode'
 ;; is the switch: it installs the file-name handler, the `find-file' and
@@ -31,14 +31,16 @@
 ;;
 ;; Usage:
 ;;   C-x C-f /github:torvalds/linux RET
+;;   C-x C-f /cb:forgejo/forgejo RET
 ;;   M-x remoto-browse RET https://github.com/torvalds/linux RET
 ;;
-;; Both turn the mode on when it is off: `remoto-browse' itself, and the
+;; Each turns the mode on when it is off: `remoto-browse' itself, and the
 ;; path through `remoto-autoload-file-name-handler', which the package
-;; autoloads register for `/github:' and `/gh:' paths the way TRAMP
-;; autoloads on a remote path.  `(global-remoto-mode 1)' in the init file
-;; turns it on ahead of time.  `remoto-browse' supports pasting any GitHub
-;; URL, git remote URL, or owner/repo shorthand.
+;; autoloads register for the prefixes of the forges that come with
+;; remoto, the way TRAMP autoloads on a remote path.
+;; `(global-remoto-mode 1)' in the init file turns it on ahead of time.
+;; `remoto-browse' supports pasting any GitHub URL, git remote URL, or
+;; owner/repo shorthand.
 
 ;;; Code:
 
@@ -475,7 +477,7 @@ Two forges may host an OWNER/REPO each, so the prefix is part of the key."
 (declare-function dired-goto-file "dired" (file))
 
 (defgroup remoto nil
-  "Browse GitHub repos without cloning."
+  "Browse the repositories of GitHub, Codeberg and other forges without cloning."
   :group 'tools
   :prefix "remoto-")
 
@@ -566,7 +568,7 @@ across different ghub and url.el versions."
 ;;;; Fetch indicator
 
 (defcustom remoto-show-fetch-indicator t
-  "When non-nil, show a \"fetching\" indicator during GitHub requests.
+  "When non-nil, show a \"fetching\" indicator during forge requests.
 While completing a remoto path (e.g. with \\[find-file]) or at the
 `remoto-browse' prompt, it is drawn as minibuffer text, so it works with
 any completion UI (vertico, icomplete, default, ...).  A fetch that
@@ -720,7 +722,7 @@ A message that something else put up meanwhile is left alone."
     (setq remoto--sync-fetch-overlay nil)))
 
 (defmacro remoto--with-fetch-indicator (&rest body)
-  "Run BODY, a blocking GitHub round-trip, with the fetch indicator up.
+  "Run BODY, a blocking forge round-trip, with the fetch indicator up.
 Every synchronous API call goes through this, so `remoto-browse' and a
 path at `find-file' or `dired' show the same thing: the minibuffer
 overlay while completing, the echo area once the prompt is gone.
@@ -735,7 +737,7 @@ there is no display.  Returns BODY's value."
        (remoto--sync-fetch-end))))
 
 (cl-defstruct (remoto--request (:constructor remoto--request-create))
-  "A GitHub request started under `while-no-input'."
+  "A forge request started under `while-no-input'."
   (status 'pending)
   buffer
   value
@@ -1761,8 +1763,8 @@ ignored since remoto paths always qualify."
 (defun remoto--reached-p (filename)
   "Return non-nil when FILENAME's repository was already reached this session.
 A cached default branch or tree is as close as remoto comes to an open
-connection: it means GitHub answered for that repository without a new
-request."
+connection: it means the forge answered for that repository without a
+new request."
   (when-let* ((parsed (remoto--parse-path filename)))
     (or (gethash (remoto--repo-id (remoto-path-forge parsed)
                                   (remoto-path-owner parsed)
@@ -2178,7 +2180,7 @@ or /github:OWNER/REPO@/REF."
     directory))
 
 (defun remoto--handle-file-name-case-insensitive-p (_filename)
-  "GitHub repos are case-sensitive."
+  "Forge repositories are case-sensitive."
   nil)
 
 (defun remoto--handle-vc-registered (_filename)
@@ -2834,7 +2836,7 @@ after %d; M-x remoto-refresh retries" owner count))
 ;;;; Matches of a name that names nothing
 
 (defun remoto--if-found (fn &rest args)
-  "Call FN with ARGS, or return nil when GitHub answers 404 to it.
+  "Call FN with ARGS, or return nil when the forge answers 404 to it.
 Any other failure signals."
   (condition-case err
       (apply fn args)
@@ -3239,8 +3241,8 @@ binding the variable `remoto-command-map' to a prefix key.")
 
 Offers forge-agnostic commands to copy or open the web URL of the file
 or directory shown in the current buffer.  The commands work the same in
-file buffers and in Dired, and adapt to the forge behind the path (only
-GitHub today, but designed for more).
+file buffers and in Dired, and adapt to the forge behind the path:
+GitHub, Codeberg, or a server of `remoto-forgejo-instances'.
 
 While `global-remoto-mode' is on, `remoto-mode' is enabled automatically
 when visiting a remoto path.  Its keymap is empty by default; the
@@ -3478,18 +3480,20 @@ Each step is idempotent, so a second call while on is a no-op."
 
 ;;;###autoload
 (define-minor-mode global-remoto-mode
-  "Toggle remoto's virtual filesystem for GitHub repositories.
+  "Toggle remoto's virtual filesystem for the repositories of forges.
 
-When on, `/github:OWNER/REPO...' and `/gh:...' paths work in `find-file',
-`dired', and every other file operation, GitHub URLs typed at those
-prompts are rewritten to remoto paths, `find-file' completion inside a
-remoto path shows remoto's annotations, `remoto-mode' turns on in remoto
-buffers, and a GitHub token is looked up once Emacs is idle.  When off,
-all of that is removed again.
+When on, the paths of every forge, such as `/github:OWNER/REPO...',
+`/gh:...' and `/cb:...', work in `find-file', `dired', and every other
+file operation, forge URLs typed at those prompts are rewritten to
+remoto paths, `find-file' completion inside a remoto path shows remoto's
+annotations, `remoto-mode' turns on in remoto buffers, and a GitHub
+token is looked up once Emacs is idle.  When off, all of that is
+removed again.
 
 Loading remoto does not turn this mode on.  Enable it in your init file,
 or let the first use do it: `remoto-browse', the Embark open actions,
-and a `/github:' or `/gh:' path at any file prompt all turn it on."
+and a path of a forge that comes with remoto at any file prompt all turn
+it on."
   :global t
   :group 'remoto
   (if global-remoto-mode
@@ -3508,10 +3512,11 @@ file-name handler for as long as they live, so the mode has to stay on."
 (defun remoto-autoload-file-name-handler (operation &rest args)
   "Turn on `global-remoto-mode' for the first remoto path, then run OPERATION.
 ARGS are the arguments of OPERATION.  The package autoloads register
-this handler in `file-name-handler-alist', so a `/github:' or `/gh:'
-path typed at a file prompt works before remoto is loaded, the way a
-remote path loads TRAMP.  Calling it loads remoto; it then leaves the
-alist for good, and `remoto--install' puts the real handler in front.
+this handler in `file-name-handler-alist', so a path of a forge that
+comes with remoto, such as `/github:' or `/cb:', typed at a file prompt
+works before remoto is loaded, the way a remote path loads TRAMP.
+Calling it loads remoto; it then leaves the alist for good, and
+`remoto--install' puts the real handler in front.
 
 The call that brings remoto in runs without the advice `remoto--install'
 adds, because the advice arrives while that call is already under way.
