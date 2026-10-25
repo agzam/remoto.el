@@ -51,6 +51,12 @@
 (defvar remoto-keys--codeberg-login nil
   "The Codeberg account of `remoto-keys--codeberg-token', as Codeberg names it.")
 
+(defvar remoto-keys--codeberg-org nil
+  "An organization of `remoto-keys--codeberg-login', which the run finds, or nil.")
+
+(defvar remoto-keys--codeberg-private nil
+  "A private OWNER/REPO that `remoto-keys--codeberg-token' reads, or nil.")
+
 (defconst remoto-keys--keep (getenv "REMOTO_KEYS_KEEP")
   "Non-nil to leave the profiles running after the cases, to explore by hand.")
 
@@ -113,7 +119,7 @@ Return nil, or a note when it still worked after SECONDS."
     (and (<= end (float-time)) (format "still busy after %ss" seconds))))
 
 (defun remoto-keys--json (address token)
-  "Return the JSON object that ADDRESS answers, asked with TOKEN if any, or nil."
+  "Return the JSON that ADDRESS answers, asked with TOKEN if any, or nil."
   (ignore-errors
     (let ((url-request-extra-headers
            (and token `(("Authorization" . ,(concat "token " token)))))
@@ -138,6 +144,28 @@ Return nil, or a note when it still worked after SECONDS."
   (let ((data (remoto-keys--json address token)))
     (and (listp data) (alist-get 'login data))))
 
+(defvar remoto-keys--url-statuses (make-hash-table :test #'equal)
+  "The status each web URL a case copied or browsed answered, by URL.")
+
+(defun remoto-keys--url-status (url)
+  "Return the HTTP status that URL answers curl after redirects, or nil for none.
+Codeberg answers any other client its bot check, a 200, whatever the path."
+  (with-memoization (gethash url remoto-keys--url-statuses)
+    (with-temp-buffer
+      (and (eql 0 (ignore-errors
+                    (call-process "curl" nil t nil "-s" "-L" "-o" "/dev/null" "--max-time" "15"
+                                  "-w" "%{http_code}" url)))
+           (let ((code (string-to-number (buffer-string))))
+             (and (< 0 code) code))))))
+
+(defun remoto-keys--dead-urls (state)
+  "Return (URL . STATUS) for the web URLs STATE copied or browsed that fail to load."
+  (seq-keep (lambda (url)
+              (when (and (stringp url) (string-match-p "\\`https?://" url))
+                (let ((status (remoto-keys--url-status url)))
+                  (unless (and status (< status 400)) (cons url status)))))
+            (delete-dups (cons (plist-get state :kill) (copy-sequence (plist-get state :browsed))))))
+
 (defun remoto-keys--learn-logins ()
   "Ask each forge whose token the run has for the account of that token."
   (when remoto-keys--token
@@ -148,7 +176,22 @@ Return nil, or a note when it still worked after SECONDS."
     (setq remoto-keys--codeberg-login
           (remoto-keys--login "https://codeberg.org/api/v1/user" remoto-keys--codeberg-token))
     (princ (format "Codeberg token of %s\n"
-                   (or remoto-keys--codeberg-login "no account Codeberg names")))))
+                   (or remoto-keys--codeberg-login "no account Codeberg names")))
+    (when remoto-keys--codeberg-login
+      (let ((orgs (remoto-keys--json "https://codeberg.org/api/v1/user/orgs"
+                                     remoto-keys--codeberg-token))
+            (repos (remoto-keys--json "https://codeberg.org/api/v1/user/repos?limit=50"
+                                      remoto-keys--codeberg-token)))
+        (setq remoto-keys--codeberg-org
+              (and (vectorp orgs) (< 0 (length orgs)) (alist-get 'username (aref orgs 0)))
+              remoto-keys--codeberg-private
+              (and (vectorp repos)
+                   (seq-some (lambda (repo)
+                               (and (eq t (alist-get 'private repo)) (alist-get 'full_name repo)))
+                             repos)))
+        (princ (format "Codeberg organization %s, private repository %s\n"
+                       (or remoto-keys--codeberg-org "none")
+                       (or remoto-keys--codeberg-private "none")))))))
 
 (defun remoto-keys--wait-for-search ()
   "Wait while GitHub has fewer than 8 search requests left for the run."
@@ -354,27 +397,36 @@ reports about itself."
     (unless (remoto-keys--plain-p event)
       (concat mods base))))
 
+(defconst remoto-keys--settle-keys (list (kbd "C-c a") (kbd "C-c c") (kbd "C-c e"))
+  "The Embark keys, which act on what a live forge may still be fetching.")
+
 (defun remoto-keys--steps (parts profile)
   "Return what typing PARTS of a case under PROFILE takes.
-A step is (text STRING), (key NAME) for tmux, or (pause).  A string
-part may hold keys too: `kbd' gives one when every key is a character."
+A step is (text STRING), (key NAME) for tmux, or (pause).  A string part
+may hold keys: `kbd' gives one when all are characters.  Pending input
+cancels remoto's fetch, so a pause precedes Embark and keys after a submit."
   (let (steps)
-    (dolist (part parts)
-      (pcase part
-        ('submit (setq part (kbd (cdr (assoc profile remoto-e2e--submit)))))
-        ('goto (setq part [f12])))
-      (if (eq part 'pause)
-          (push '(pause) steps)
-        (let (text)
-          (seq-doseq (event part)
-            (if (remoto-keys--plain-p event)
-                (push event text)
-              (when text
-                (push `(text ,(concat (nreverse text))) steps)
-                (setq text nil))
-              (push `(key ,(remoto-keys--tmux-key event)) steps)))
-          (when text
-            (push `(text ,(concat (nreverse text))) steps)))))
+    (while parts
+      (let ((part (pop parts)))
+        (when (and (member part remoto-keys--settle-keys) (not (equal (car steps) '(pause))))
+          (push '(pause) steps))
+        (pcase part
+          ('submit (setq part (kbd (cdr (assoc profile remoto-e2e--submit))))
+                   (when (and parts (not (eq (car parts) 'pause)))
+                     (push 'pause parts)))
+          ('goto (setq part [f12])))
+        (if (eq part 'pause)
+            (push '(pause) steps)
+          (let (text)
+            (seq-doseq (event part)
+              (if (remoto-keys--plain-p event)
+                  (push event text)
+                (when text
+                  (push `(text ,(concat (nreverse text))) steps)
+                  (setq text nil))
+                (push `(key ,(remoto-keys--tmux-key event)) steps)))
+            (when text
+              (push `(text ,(concat (nreverse text))) steps))))))
     (nreverse steps)))
 
 (defun remoto-keys--type (name script)
@@ -403,10 +455,13 @@ Return a plist of the label, seconds, a note, the line and the state."
     (remoto-keys--wait-for-search)
     (let ((start (float-time)))
       (remoto-keys--type name (remoto-keys--steps parts profile))
-      (let ((note (remoto-keys--wait-idle name remoto-keys--case-seconds)))
-        (list :label label :seconds (round (- (float-time) start)) :note note
+      (let* ((note (remoto-keys--wait-idle name remoto-keys--case-seconds))
+             (seconds (round (- (float-time) start)))
+             (state (remoto-keys--eval name '(remoto-keys-state)))
+             (dead (remoto-keys--dead-urls state)))
+        (list :label label :seconds seconds :note note
               :line (remoto-keys--eval name '(remoto-keys-line))
-              :state (remoto-keys--eval name '(remoto-keys-state)))))))
+              :state (if dead (append state (list :dead dead)) state))))))
 
 ;;; Runs
 
@@ -457,8 +512,8 @@ A profile without golden files takes vanilla's, and evil's for ex cases."
 (defun remoto-keys--checks (label state expected note)
   "Return the failures of STATE, where the case LABEL ended, as strings.
 EXPECTED is the replay's state or nil; NOTE the runner's.  The checks hold
-whatever the data: the replay's landing, the typed name first among
-matches, clean Dired and Embark lines, no raw HTTP text, a bound on requests."
+whatever the data: the replay's landing, the typed name first among matches,
+clean Dired and Embark lines, no raw HTTP text, few requests, live URLs."
   (let* ((typed (substring label (1+ (or (string-search " " label) -1))))
          ;; Without remoto here, TRAMP would claim a typed name with two colons.
          (leaf (let ((file-name-handler-alist nil))
@@ -481,6 +536,12 @@ matches, clean Dired and Embark lines, no raw HTTP text, a bound on requests."
       (push (format "%s: %s" (if (plist-get state :dired) "Dired" (plist-get state :buffer))
                     problem)
             failures))
+    (pcase-dolist (`(,url . ,status) (plist-get state :dead))
+      (push (format "%s answers %s" url (or status "nothing")) failures))
+    (when (and (string-match-p "\\bembark y on\\b" label) (not (plist-get state :kill)))
+      (push "Embark's y copied nothing" failures))
+    (when (and (string-match-p "\\bembark b on\\b" label) (not (plist-get state :browsed)))
+      (push "Embark's b browsed nothing" failures))
     (when (< remoto-keys--max-requests requests)
       (push (format "%d requests, more than %d" requests remoto-keys--max-requests) failures))
     (nreverse failures)))
@@ -709,6 +770,11 @@ Each is (NAME SETUP . STEPS).  SETUP has :gitconfig and :authinfo texts, an
       ("cbtoken" (:gitconfig "" :codeberg t)
        ,(remoto-keys--ff "/cb:") (probe "logins" (remoto-keys-logins))
        (case ,(concat "dired " mine) ,(kbd "C-x d") ,mine submit)
+       ,@(when-let* ((org remoto-keys--codeberg-org)
+                     (dir (concat "/cb:" org "/")))
+           `((case ,(concat "dired " dir) ,(kbd "C-x d") ,dir submit)))
+       ,@(when remoto-keys--codeberg-private
+           (list (remoto-keys--ff (concat "/cb:" remoto-keys--codeberg-private))))
        ,(remoto-keys--ff "/cb:forgejo/docs")
        ,(remoto-keys--ff "/gh:agzam/remoto.el")
        (probe "auth" (remoto-keys-auth)))
@@ -748,7 +814,16 @@ Each is (NAME SETUP . STEPS).  SETUP has :gitconfig and :authinfo texts, an
        ,(remoto-keys--ff "/mock:forgejo/forgejo#14989")
        (step "ff /cb:forgejo/forgejo#14989"
              ,(kbd "C-x C-f") "/cb:forgejo/forgejo#14989" submit)
-       (probe "topics" (remoto-keys-topics))))))
+       (probe "topics" (remoto-keys-topics)))
+      ;; The first operation of a fresh session loads remoto through an autoload.
+      ,@(mapcar (lambda (name)
+                  `(,(concat "boot" (replace-regexp-in-string "[^[:alnum:]]+" "-" name))
+                    (:gitconfig "")
+                    ,(remoto-keys--ff name)
+                    (probe "loaded" (remoto-keys-loaded))))
+                '("/cb:forgejo/docs" "/cb:forgejo/docs/README.md" "/cb:forgejo/forgejo#14989"
+                  "/gh:agzam/remoto.el" "/gh:agzam/remoto.el/README.org"
+                  "/gh:agzam/remoto.el#51")))))
 
 (defun remoto-keys--probe (name label form)
   "Print LABEL and the value of FORM in the profile NAME, or its error."

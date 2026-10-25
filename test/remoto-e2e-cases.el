@@ -273,7 +273,9 @@ character or a raw byte, and Embark's annotations line up."
     "https://codeberg.org/forgejo/forgejo/pulls/14989"
     "https://codeberg.org/forgejo/forgejo/issues/14991"
     "git@codeberg.org:forgejo/docs.git" "codeberg.org/forgejo/docs"
-    "/cb:Freeyourgadget/Gadgetbridge" "/gh:Freeyourgadget/Gadgetbridge" "/cb:technomancy/")
+    "/cb:Freeyourgadget/Gadgetbridge" "/gh:Freeyourgadget/Gadgetbridge" "/cb:technomancy/"
+    "/cb:forgejo/forgejo@v17.0.0:/assets/go-licenses.json"
+    "/cb:forgejo/forgejo@v17.0.0:/public/assets/img/emoji/gitea.png")
   "Names typed against Codeberg, live only: no recorded answers replay them.
 The account root comes after a repository: as the first Codeberg request
 of a session it asks /user anonymously and url.el prompts for a password.")
@@ -303,9 +305,11 @@ An ex command line ends with RET whatever completes the file prompts."
   (remoto-e2e--selected
    (append (remoto-e2e--open-cases profile remoto-e2e--codeberg-names)
            (and (member profile '("embark" "full"))
-                ;; technomancy/sokobelt's description spans lines.
-                (remoto-e2e--embark-buffer-cases
-                 '("/cb:technomancy/" "/cb:forgejo/forgejo#" "/cb:forgejo/docs@next:/docs/"))))))
+                (append
+                 (remoto-e2e--embark-action-cases remoto-e2e--codeberg-targets "cb")
+                 ;; technomancy/sokobelt's description spans lines.
+                 (remoto-e2e--embark-buffer-cases
+                  '("/cb:technomancy/" "/cb:forgejo/forgejo#" "/cb:forgejo/docs@next:/docs/")))))))
 
 (defun remoto-e2e--tab-cases ()
   "Return the cases that complete a name with TAB."
@@ -354,26 +358,45 @@ An ex command line ends with RET whatever completes the file prompts."
        ((remoto-repo-cache-ttl . 0.05) (remoto-e2e-answer-delay . 0.1))
        ,@(remoto-e2e--in "/gh:agzam/")))))
 
-(defun remoto-e2e--embark-cases ()
-  "Return the cases of Embark actions on remoto targets."
+(defconst remoto-e2e--github-targets
+  '(:owner "/gh:agzam/" :repo "remoto.el" :accounts "/gh:agzam" :account "agzam"
+    :refs "/gh:agzam/remoto.el@" :ref "main" :tree "/gh:agzam/remoto.el/" :file "README.org"
+    :files "/gh:agzam/remoto.el@main:/test/" :topics "/gh:agzam/remoto.el#")
+  "The GitHub targets of the Embark cases.")
+
+(defconst remoto-e2e--codeberg-targets
+  '(:owner "/cb:forgejo/" :repo "docs" :accounts "/cb:forgejo" :account "forgejo"
+    :refs "/cb:forgejo/docs@" :ref "next" :tree "/cb:forgejo/docs/" :file "README.md"
+    :files "/cb:forgejo/docs@next:/docs/" :topics "/cb:forgejo/forgejo#")
+  "The Codeberg targets of the Embark cases, which run live only.")
+
+(defun remoto-e2e--embark-action-cases (targets &optional tag)
+  "Return the cases of Embark actions on TARGETS, a plist of remoto names.
+TAG, when non-nil, starts the label of each case."
   (let ((ret (kbd "RET"))
-        (act (kbd "C-c a")))
-    `(("embark y on a repository line" nil
-       ,@(remoto-e2e--in "/gh:agzam/" 'goto "remoto.el" ret act "y"))
-      ("embark b on a repository line" nil
-       ,@(remoto-e2e--in "/gh:agzam/" 'goto "remoto.el" ret act "b"))
-      ("embark y on an account line" nil
-       ,@(remoto-e2e--in "/gh:agzam" 'goto "agzam" ret act "y"))
-      ("embark y on a ref line" nil
-       ,@(remoto-e2e--in "/gh:agzam/remoto.el@" 'goto "main" ret act "y"))
-      ("embark y on a file line" nil
-       ,@(remoto-e2e--in "/gh:agzam/remoto.el/" 'goto "README.org" ret act "y"))
-      ("embark y on a file candidate" nil
-       ,(kbd "C-x C-f") "/gh:agzam/remoto.el@main:/test/" ,act "y")
-      ("embark y on an issue candidate" nil
-       ,(kbd "C-x C-f") "/gh:agzam/remoto.el#" ,act "y")
-      ,@(remoto-e2e--embark-buffer-cases
-         '("/gh:agzam/" "/gh:agzam/remoto.el#" "/gh:agzam/remoto.el@main:/test/")))))
+        (act (kbd "C-c a"))
+        (at (lambda (key) (plist-get targets key))))
+    (mapcar (lambda (case) (cons (if tag (concat tag " " (car case)) (car case)) (cdr case)))
+            `(("embark y on a repository line" nil
+               ,@(remoto-e2e--in (funcall at :owner) 'goto (funcall at :repo) ret act "y"))
+              ("embark b on a repository line" nil
+               ,@(remoto-e2e--in (funcall at :owner) 'goto (funcall at :repo) ret act "b"))
+              ("embark y on an account line" nil
+               ,@(remoto-e2e--in (funcall at :accounts) 'goto (funcall at :account) ret act "y"))
+              ("embark y on a ref line" nil
+               ,@(remoto-e2e--in (funcall at :refs) 'goto (funcall at :ref) ret act "y"))
+              ("embark y on a file line" nil
+               ,@(remoto-e2e--in (funcall at :tree) 'goto (funcall at :file) ret act "y"))
+              ("embark y on a file candidate" nil
+               ,(kbd "C-x C-f") ,(funcall at :files) ,act "y")
+              ("embark y on an issue candidate" nil
+               ,(kbd "C-x C-f") ,(funcall at :topics) ,act "y")))))
+
+(defun remoto-e2e--embark-cases ()
+  "Return the cases of Embark actions on remoto targets, and of its buffers."
+  (append (remoto-e2e--embark-action-cases remoto-e2e--github-targets)
+          (remoto-e2e--embark-buffer-cases
+           '("/gh:agzam/" "/gh:agzam/remoto.el#" "/gh:agzam/remoto.el@main:/test/"))))
 
 (defun remoto-e2e--embark-buffer-cases (names)
   "Return the cases that collect, and export, the candidates at each of NAMES."

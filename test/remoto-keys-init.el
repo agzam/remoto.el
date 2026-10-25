@@ -121,7 +121,10 @@ ENDPOINT); GitHub's go unprefixed, so the two compare."
         (kill-buffer buffer))))
   (delete-other-windows)
   (switch-to-buffer "*scratch*")
-  (setq default-directory remoto-keys--home)
+  ;; A case's :kill is what that case copied, as in the replay suite.
+  (setq default-directory remoto-keys--home
+        kill-ring nil
+        kill-ring-yank-pointer nil)
   (remoto-keys-mark)
   'reset)
 
@@ -230,6 +233,15 @@ ENDPOINT); GitHub's go unprefixed, so the two compare."
         :warnings (when-let* ((buffer (get-buffer "*Warnings*")))
                     (with-current-buffer buffer
                       (string-trim (buffer-substring-no-properties (point-min) (point-max)))))))
+
+(defun remoto-keys-loaded ()
+  "Return remoto's loaded features and its entries in `file-name-handler-alist'."
+  (list :features (seq-filter #'featurep '(remoto remoto-github remoto-forgejo remoto-topic))
+        :handlers (seq-keep (lambda (entry)
+                              (and (memq (cdr-safe entry) '(remoto-file-name-handler
+                                                            remoto-autoload-file-name-handler))
+                                   (cdr entry)))
+                            file-name-handler-alist)))
 
 (defun remoto-keys-topics ()
   "Return the topic buffers, each with the path of its repository."

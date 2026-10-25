@@ -41,7 +41,16 @@
             :to-equal '((text "ab") (key "F12") (text "c"))))
   (it "turns goto into F12 and keeps pauses"
     (expect (remoto-keys--steps (list 'goto "remoto.el" (kbd "RET") 'pause) "vanilla")
-            :to-equal '((key "F12") (text "remoto.el") (key "Enter") (pause)))))
+            :to-equal '((key "F12") (text "remoto.el") (key "Enter") (pause))))
+  (it "waits after a submit that keys follow, and before Embark, once"
+    (expect (remoto-keys--steps (list (kbd "C-x d") "/cb:forgejo/" 'submit 'goto "docs"
+                                      (kbd "RET") (kbd "C-c a") "y")
+                                "vertico")
+            :to-equal '((key "C-x") (text "d") (text "/cb:forgejo/") (key "M-Enter") (pause)
+                        (key "F12") (text "docs") (key "Enter") (pause) (key "C-c") (text "a")
+                        (text "y")))
+    (expect (remoto-keys--steps (list (kbd "C-x C-f") "/gh:agzam/" 'pause (kbd "C-c c")) "vertico")
+            :to-equal '((key "C-x") (key "C-f") (text "/gh:agzam/") (pause) (key "C-c") (text "c")))))
 
 (describe "remoto-keys--tmux-arg"
   (it "escapes a trailing semicolon, which tmux reads as a command separator"
@@ -85,6 +94,18 @@
                                      :problems ("annotations start at columns (24 30)"))
                                    nil nil)
               :to-equal '("*Embark Collect*: annotations start at columns (24 30)")))
+    (it "fails an Embark y case that copied nothing and a b case that browsed nothing"
+      (expect (remoto-keys--checks "cb embark y on a file line" '(:mode dired-mode) nil nil)
+              :to-equal '("Embark's y copied nothing"))
+      (expect (remoto-keys--checks "embark b on a repository line" '(:mode dired-mode) nil nil)
+              :to-equal '("Embark's b browsed nothing"))
+      (expect (remoto-keys--checks "embark y on a ref line" '(:kill "https://x") nil nil)
+              :to-be nil))
+    (it "fails a copied or browsed URL that does not load"
+      (expect (remoto-keys--checks "M-x remoto-copy-url"
+                                   '(:dead (("https://codeberg.org/x" . 404) ("https://y" . nil)))
+                                   nil nil)
+              :to-equal '("https://codeberg.org/x answers 404" "https://y answers nothing")))
     (it "fails raw HTTP text, too many requests, and a runner's note"
       (expect (remoto-keys--checks "ff /gh:" `(:raw ("HTTP/1.1 502 Bad Gateway")
                                                :requests ,(make-list 21 "r"))
@@ -281,6 +302,27 @@
     (setq answer "[1, 2]")
     (expect (remoto-keys--login "https://example.org/user" "not-a-token") :to-be nil)))
 
+(describe "remoto-keys--dead-urls"
+  (it "asks each web URL a case copied or browsed once, and keeps those that fail"
+    (let ((asked nil))
+      (spy-on 'remoto-keys--url-status
+              :and-call-fake (lambda (url) (push url asked) (if (string-suffix-p "gone" url) 404 200)))
+      (expect (remoto-keys--dead-urls '(:kill "https://x/ok"
+                                        :browsed ("https://x/gone" "https://x/ok"
+                                                  "git@codeberg.org:a/b.git")))
+              :to-equal '(("https://x/gone" . 404)))
+      (expect (sort asked #'string<) :to-equal '("https://x/gone" "https://x/ok")))))
+
+(describe "remoto-e2e--embark-action-cases"
+  (it "keeps GitHub's labels and tags Codeberg's, with the same actions"
+    (let ((github (remoto-e2e--embark-action-cases remoto-e2e--github-targets))
+          (codeberg (remoto-e2e--embark-action-cases remoto-e2e--codeberg-targets "cb")))
+      (expect (car (car github)) :to-equal "embark y on a repository line")
+      (expect (mapcar #'car codeberg)
+              :to-equal (mapcar (lambda (case) (concat "cb " (car case))) github))
+      (expect (member "/cb:forgejo/docs@next:/docs/" (assoc "cb embark y on a file candidate" codeberg))
+              :to-be-truthy))))
+
 (describe "remoto-keys--skip"
   (it "says which token a scenario lacks"
     (let ((remoto-keys--token nil) (remoto-keys--codeberg-token nil))
@@ -298,7 +340,10 @@
   (let ((scenarios (remoto-keys--scenarios 8899)))
     (it "holds steps of the known kinds; lit needs GitHub's token, cbtoken Codeberg's"
       (expect (mapcar #'car scenarios)
-              :to-equal '("none" "cbbad" "lit" "cbtoken" "mock" "instances"))
+              :to-equal '("none" "cbbad" "lit" "cbtoken" "mock" "instances"
+                          "boot-cb-forgejo-docs" "boot-cb-forgejo-docs-README-md"
+                          "boot-cb-forgejo-forgejo-14989" "boot-gh-agzam-remoto-el"
+                          "boot-gh-agzam-remoto-el-README-org" "boot-gh-agzam-remoto-el-51"))
       (dolist (scenario scenarios)
         (dolist (step (cddr scenario))
           (expect (memq (car step) '(case step probe fault)) :to-be-truthy)))
@@ -311,6 +356,15 @@
         (expect (seq-find (lambda (step) (equal (cadr step) "dired /cb:someone/"))
                           (cddr (assoc "cbtoken" (remoto-keys--scenarios 8899))))
                 :to-equal `(case "dired /cb:someone/" ,(kbd "C-x d") "/cb:someone/" submit))))
+    (it "lists the token's organization and opens its private repository, when it has them"
+      (let* ((labels (lambda ()
+                       (mapcar #'cadr (cddr (assoc "cbtoken" (remoto-keys--scenarios 8899))))))
+             (without (let ((remoto-keys--codeberg-login "someone")) (funcall labels)))
+             (with (let ((remoto-keys--codeberg-login "someone")
+                         (remoto-keys--codeberg-org "an-org")
+                         (remoto-keys--codeberg-private "an-org/secret"))
+                     (funcall labels))))
+        (expect (seq-difference with without) :to-equal '("dired /cb:an-org/" "ff /cb:an-org/secret"))))
     (it "points the mock instance at the port, over plain HTTP"
       (expect (format "%S" (plist-get (cadr (assoc "mock" scenarios)) :init))
               :to-match "\"127\\.0\\.0\\.1:8899/api/v1\".*(\"mock\" \"127\\.0\\.0\\.1:8899\")"))

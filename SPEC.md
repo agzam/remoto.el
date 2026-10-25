@@ -577,5 +577,9 @@ remoto.el/
     remoto-embark-tests.el      ;; Embark integration tests (real embark; make test-embark)
     remoto-integration-tests.el ;; end-to-end integration tests
     remoto-e2e.el               ;; typed cases under six completion setups, replayed from recorded answers
+    remoto-e2e-cases.el         ;; the cases, shared by the replay suite and the keystroke runner
+    remoto-keys.el              ;; the keystroke runner: emacs -nw -q under tmux, or the running Emacs
+    remoto-keys-init.el         ;; the init of each profile the runner starts
+    remoto-keys-tests.el        ;; buttercup tests of the runner (make test)
     record-codeberg-fixtures.el ;; records test/fixtures/codeberg.jsonl for the Codeberg conformance kit
 ```
