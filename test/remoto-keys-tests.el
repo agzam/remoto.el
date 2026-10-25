@@ -599,14 +599,16 @@
             :and-call-fake (lambda (name case &rest _)
                              (if (equal (car case) "ff /gh:a")
                                  (signal 'file-error (list "make client process failed"
-                                                           "Connection refused"))
+                                                           "Connection refused"
+                                                           :name "eval-at" :family 'local))
                                (list :label (car case) :seconds 1 :line name
                                      :state '(:mode dired-mode))))))
 
-  (it "fails a case whose Emacs gives no state, says why, and goes on"
+  (it "fails a case whose Emacs gives no state, says why in short, and goes on"
     (setq output (with-output-to-string
                    (setq counts (remoto-keys--profile "vanilla" "/elpa/" nil))))
     (expect counts :to-equal '(:cases 2 :failed 1 :differ 0))
+    (expect output :to-match "^vanilla +ff /gh:a +0s => no state \\[no state: ")
     (expect output :to-match (concat "^FAIL vanilla | ff /gh:a: no state: make client process"
                                      " failed: Connection refused$"))
     (expect written :to-equal '(("vanilla.eld" "ff /gh:a" "ff /gh:b")))

@@ -550,10 +550,11 @@ why, and give the Emacs of NAME, remoto from ELPA, a chance to recover."
     (condition-case err
         (remoto-keys--run name case profile)
       (error
-       (let ((why (format "no state: %s" (error-message-string err)))
+       ;; A refused connection's data goes on with the whole process plist.
+       (let ((why (format "no state: %s" (error-message-string (seq-take err 3))))
              (seconds (round (- (float-time) start))))
          (remoto-keys--revive name profile elpa)
-         (list :label (car case) :seconds seconds :note why :line why))))))
+         (list :label (car case) :seconds seconds :note why :line "no state"))))))
 
 ;;; Runs
 
