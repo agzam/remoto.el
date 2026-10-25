@@ -154,7 +154,9 @@ Signal an error that says why when no answer of status 2xx comes."
            (status (if end (string-to-number (match-string 1 output)) 0))
            (body (substring output 0 end)))
       (unless (<= 200 status 299)
-        (error "HTTP %d: %s" status (truncate-string-to-width (string-trim body) 100)))
+        (error "HTTP %d: %s" status
+               (truncate-string-to-width
+                (replace-regexp-in-string "[ \t\r\n]+" " " (string-trim body)) 100)))
       (json-parse-string body :object-type 'alist))))
 
 (defun remoto-keys--json (address token)
@@ -167,10 +169,23 @@ Signal an error that says why when no answer of status 2xx comes."
     (and (numberp .resources.search.remaining)
          (cons .resources.search.remaining .resources.search.reset))))
 
-(defun remoto-keys--login (address token)
-  "Return the account that ADDRESS names for TOKEN, or nil."
-  (let ((data (remoto-keys--json address token)))
-    (and (listp data) (alist-get 'login data))))
+(defconst remoto-keys--account-pauses '(0 5 15)
+  "The seconds to wait before each time the run asks for a token's account.")
+
+(defun remoto-keys--account (forge address token)
+  "Return the account that ADDRESS of FORGE names for TOKEN.
+Ask again after a failure; signal an error that says why when no answer
+names one, since a profile without it would read FORGE anonymously."
+  (let (why)
+    (or (seq-some (lambda (pause)
+                    (sleep-for pause)
+                    (condition-case err
+                        (let ((data (remoto-keys--ask address token)))
+                          (or (and (listp data) (alist-get 'login data))
+                              (ignore (setq why "the answer names no login"))))
+                      (error (ignore (setq why (error-message-string err))))))
+                  remoto-keys--account-pauses)
+        (error "%s names no account for its token: %s" forge why))))
 
 (defvar remoto-keys--url-statuses (make-hash-table :test #'equal)
   "The status each web URL a case copied or browsed answered, by URL.")
@@ -200,34 +215,34 @@ Without curl no URL is checked, which the run says once."
                       (unless (and status (< status 400)) (cons url status))))
                   urls)))))
 
-(defun remoto-keys--learn-logins ()
-  "Ask each forge whose token the run has for the account of that token."
+(defun remoto-keys--learn-logins (&optional codeberg)
+  "Learn the account of GitHub's token and, with CODEBERG, of Codeberg's.
+Only the scenarios use Codeberg's.  Signal an error when a forge names
+no account for its token, as `remoto-keys--account' does."
   (when remoto-keys--token
     (setq remoto-keys--github-login
-          (remoto-keys--login "https://api.github.com/user" remoto-keys--token))
-    (when remoto-keys--github-login
-      (setq remoto-e2e--root-account remoto-keys--github-login))
-    (princ (format "GitHub token of %s\n" (or remoto-keys--github-login "no account GitHub names"))))
-  (when remoto-keys--codeberg-token
+          (remoto-keys--account "GitHub" "https://api.github.com/user" remoto-keys--token)
+          remoto-e2e--root-account remoto-keys--github-login)
+    (princ (format "GitHub token of %s\n" remoto-keys--github-login)))
+  (when (and codeberg remoto-keys--codeberg-token)
     (setq remoto-keys--codeberg-login
-          (remoto-keys--login "https://codeberg.org/api/v1/user" remoto-keys--codeberg-token))
-    (princ (format "Codeberg token of %s\n"
-                   (or remoto-keys--codeberg-login "no account Codeberg names")))
-    (when remoto-keys--codeberg-login
-      (let ((orgs (remoto-keys--json "https://codeberg.org/api/v1/user/orgs"
-                                     remoto-keys--codeberg-token))
-            (repos (remoto-keys--json "https://codeberg.org/api/v1/user/repos?limit=50"
-                                      remoto-keys--codeberg-token)))
-        (setq remoto-keys--codeberg-org
-              (and (vectorp orgs) (< 0 (length orgs)) (alist-get 'username (aref orgs 0)))
-              remoto-keys--codeberg-private
-              (and (vectorp repos)
-                   (seq-some (lambda (repo)
-                               (and (eq t (alist-get 'private repo)) (alist-get 'full_name repo)))
-                             repos)))
-        (princ (format "Codeberg organization %s, private repository %s\n"
-                       (or remoto-keys--codeberg-org "none")
-                       (or remoto-keys--codeberg-private "none")))))))
+          (remoto-keys--account "Codeberg" "https://codeberg.org/api/v1/user"
+                                remoto-keys--codeberg-token))
+    (princ (format "Codeberg token of %s\n" remoto-keys--codeberg-login))
+    (let ((orgs (remoto-keys--json "https://codeberg.org/api/v1/user/orgs"
+                                   remoto-keys--codeberg-token))
+          (repos (remoto-keys--json "https://codeberg.org/api/v1/user/repos?limit=50"
+                                    remoto-keys--codeberg-token)))
+      (setq remoto-keys--codeberg-org
+            (and (vectorp orgs) (< 0 (length orgs)) (alist-get 'username (aref orgs 0)))
+            remoto-keys--codeberg-private
+            (and (vectorp repos)
+                 (seq-some (lambda (repo)
+                             (and (eq t (alist-get 'private repo)) (alist-get 'full_name repo)))
+                           repos)))
+      (princ (format "Codeberg organization %s, private repository %s\n"
+                     (or remoto-keys--codeberg-org "none")
+                     (or remoto-keys--codeberg-private "none"))))))
 
 (defun remoto-keys--wait-for-search ()
   "Wait while GitHub has fewer than 8 search requests left for the run."
@@ -1018,9 +1033,7 @@ Each is (NAME SETUP . STEPS).  SETUP has :gitconfig and :authinfo texts, an
   (cond ((and (plist-get setup :token) (not remoto-keys--token))
          "needs REMOTO_E2E_TOKEN")
         ((and (plist-get setup :codeberg) (not remoto-keys--codeberg-token))
-         "needs REMOTO_E2E_CODEBERG_TOKEN")
-        ((and (plist-get setup :codeberg) (not remoto-keys--codeberg-login))
-         "Codeberg names no account for REMOTO_E2E_CODEBERG_TOKEN")))
+         "needs REMOTO_E2E_CODEBERG_TOKEN")))
 
 (defun remoto-keys--scenario (scenario elpa)
   "Run SCENARIO in a vanilla profile with remoto from ELPA.
@@ -1076,7 +1089,7 @@ that signals stops the scenario with a failure that says why."
          (only (split-string (or (getenv "REMOTO_KEYS_SCENARIOS") "") "[ ,]+" t))
          (cases 0) (failed 0))
     (remoto-keys--install-checkout elpa)
-    (remoto-keys--learn-logins)
+    (remoto-keys--learn-logins t)
     (princ (format "mock Forgejo on 127.0.0.1:%d\n" port))
     (dolist (scenario (remoto-keys--scenarios port))
       (when (or (null only) (member (car scenario) only))

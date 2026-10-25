@@ -348,10 +348,11 @@
                              exit)))
   (it "reads the account of a token"
     (setq answer "{\"login\":\"someone\",\"id\":1}\n200")
-    (expect (remoto-keys--login "https://example.org/user" "not-a-token") :to-equal "someone"))
+    (expect (remoto-keys--account "GitHub" "https://example.org/user" "not-a-token")
+            :to-equal "someone"))
   (it "gives curl the token on its standard input, never as an argument"
     (setq answer "{\"login\":\"someone\"}\n200")
-    (remoto-keys--login "https://example.org/user" "not-a-token")
+    (remoto-keys--json "https://example.org/user" "not-a-token")
     (expect curl-input :to-equal "Authorization: token not-a-token\n")
     (expect (seq-find (lambda (arg) (string-search "not-a-token" arg)) curl-args) :to-be nil)
     (expect (last curl-args) :to-equal '("https://example.org/user")))
@@ -360,19 +361,16 @@
     (expect (remoto-keys--search-left) :to-equal '(5 . 100)))
   (it "answers nil for an answer without the field"
     (setq answer "{\"message\":\"Bad credentials\"}\n200")
-    (expect (remoto-keys--login "https://example.org/user" "not-a-token") :to-be nil)
-    (expect (remoto-keys--search-left) :to-be nil)
-    (setq answer "[1, 2]\n200")
-    (expect (remoto-keys--login "https://example.org/user" "not-a-token") :to-be nil))
+    (expect (remoto-keys--search-left) :to-be nil))
   (it "answers nil, and runs no url.el, when no host answers"
     ;; A batch Emacs exits 255 on an error in url.el's process sentinel.
     (setq answer "curl: (6) Could not resolve host: api.github.com" exit 6)
     (expect (remoto-keys--search-left) :to-be nil)
     (expect 'url-retrieve-synchronously :not :to-have-been-called))
-  (it "signals why when an answer is no success"
-    (setq answer "{\"message\":\"Bad credentials\"}\n401")
+  (it "signals why on one line when an answer is no success"
+    (setq answer "{\n  \"message\": \"Bad credentials\"\n}\n401")
     (expect (remoto-keys--ask "https://example.org/user" "not-a-token")
-            :to-throw 'error '("HTTP 401: {\"message\":\"Bad credentials\"}"))
+            :to-throw 'error '("HTTP 401: { \"message\": \"Bad credentials\" }"))
     (setq answer "curl: (6) Could not resolve host: example.org" exit 6)
     (expect (remoto-keys--ask "https://example.org/user" nil)
             :to-throw 'error '("curl: (6) Could not resolve host: example.org"))))
@@ -418,12 +416,61 @@
       (expect (remoto-keys--skip '(:token t)) :to-equal "needs REMOTO_E2E_TOKEN")
       (expect (remoto-keys--skip '(:codeberg t)) :to-equal "needs REMOTO_E2E_CODEBERG_TOKEN")
       (expect (remoto-keys--skip '(:gitconfig "")) :to-be nil)))
-  (it "skips the Codeberg scenario when Codeberg names no account for the token"
-    (let ((remoto-keys--codeberg-token "not-a-codeberg-token") (remoto-keys--codeberg-login nil))
-      (expect (remoto-keys--skip '(:codeberg t))
-              :to-equal "Codeberg names no account for REMOTO_E2E_CODEBERG_TOKEN"))
-    (let ((remoto-keys--codeberg-token "not-a-codeberg-token") (remoto-keys--codeberg-login "x"))
+  (it "runs the Codeberg scenario with Codeberg's token"
+    (let ((remoto-keys--codeberg-token "not-a-codeberg-token"))
       (expect (remoto-keys--skip '(:codeberg t)) :to-be nil))))
+
+(describe "remoto-keys--learn-logins"
+  :var (answers)
+  (before-each
+    (spy-on 'sleep-for)
+    ;; A string answer is the error that asking signals.
+    (spy-on 'remoto-keys--ask
+            :and-call-fake (lambda (&rest _)
+                             (let ((answer (pop answers)))
+                               (if (stringp answer) (error "%s" answer) answer)))))
+
+  (it "asks again after a failure and takes the account a later answer names"
+    (setq answers '("curl: (6) Could not resolve host: api.github.com" ((login . "someone"))))
+    (let ((remoto-keys--token "not-a-token")
+          (remoto-keys--github-login nil)
+          (remoto-e2e--root-account "emacs-mirror"))
+      (expect (with-output-to-string (remoto-keys--learn-logins))
+              :to-equal "GitHub token of someone\n")
+      (expect remoto-keys--github-login :to-equal "someone")
+      (expect remoto-e2e--root-account :to-equal "someone")))
+
+  (it "stops the run and says why when no answer names an account"
+    ;; The profile went on anonymously, and its first cases failed for want of a token.
+    (setq answers '("curl: (6) Could not resolve host: api.github.com"
+                    [1 2]
+                    "curl: (6) Could not resolve host: api.github.com"))
+    (let ((remoto-keys--token "not-a-token")
+          (remoto-keys--github-login nil))
+      (expect (with-output-to-string (remoto-keys--learn-logins))
+              :to-throw 'error '("GitHub names no account for its token: curl: (6) Could not resolve host: api.github.com"))
+      (expect 'remoto-keys--ask :to-have-been-called-times 3)
+      (expect remoto-keys--github-login :to-be nil)))
+
+  (it "asks Codeberg only for a run that uses its account"
+    (setq answers '(((login . "someone"))))
+    (let ((remoto-keys--token "not-a-token")
+          (remoto-keys--codeberg-token "not-a-codeberg-token")
+          (remoto-keys--github-login nil)
+          (remoto-keys--codeberg-login nil))
+      (with-output-to-string (remoto-keys--learn-logins))
+      (expect 'remoto-keys--ask :to-have-been-called-times 1)
+      (expect remoto-keys--codeberg-login :to-be nil)))
+
+  (it "stops the scenarios when Codeberg names no account for its token"
+    (setq answers '("HTTP 401: {\"message\":\"token is required\"}"
+                    "HTTP 401: {\"message\":\"token is required\"}"
+                    "HTTP 401: {\"message\":\"token is required\"}"))
+    (let ((remoto-keys--token nil)
+          (remoto-keys--codeberg-token "not-a-codeberg-token")
+          (remoto-keys--codeberg-login nil))
+      (expect (with-output-to-string (remoto-keys--learn-logins t))
+              :to-throw 'error '("Codeberg names no account for its token: HTTP 401: {\"message\":\"token is required\"}")))))
 
 (describe "remoto-keys--scenarios"
   (let ((scenarios (remoto-keys--scenarios 8899)))

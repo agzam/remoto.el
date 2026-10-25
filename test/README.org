@@ -37,7 +37,7 @@ REMOTO_E2E_ONLY='^ff /gh:agzam' make test-keys-vanilla    # some cases
 - The embark and full profiles also collect (=C-c c=) and export (=C-c e=) the candidates of annotated prompts: an owner's repositories, the topics of a repository, a directory's files; on Codeberg, technomancy's repositories, one of whose descriptions spans lines.  They run Embark's actions on Codeberg's targets too, as the replay suite does on GitHub's.
 - ~REMOTO_KEYS_INIT=FORM~ has each profile evaluate FORM at the end of its init, say to plant a regression and see a check fail: ~REMOTO_KEYS_INIT='(with-eval-after-load (quote remoto) (fset (quote remoto--one-line) (function identity)))'~.
 - With =REMOTO_KEYS_MAIN=, the Codeberg cases run on the checkout only: origin/main has no Codeberg.
-- Each profile has a git config and an auth-source of its own, empty unless a scenario fills them, so nothing of yours reaches it but the token you pass.  The token reaches it through a file only you can read, which the profile deletes on start.  The run asks GitHub whose token it is and puts that account in the profile's git config as =github.user=, since ghub uses no token without one.  Without a token remoto reads anonymously.
+- Each profile has a git config and an auth-source of its own, empty unless a scenario fills them, so nothing of yours reaches it but the token you pass.  The token reaches it through a file only you can read, which the profile deletes on start.  The run asks GitHub whose token it is and puts that account in the profile's git config as =github.user=, since ghub uses no token without one.  It asks up to three times; when no answer names an account, the run says why and exits 1 rather than read anonymously.  Without a token remoto reads anonymously.
 - The run waits whenever GitHub has fewer than 8 searches left.
 - ~REMOTO_KEYS_SIZE=COLSxLINES~ sets the terminal, 100x40 by default.
 
@@ -61,7 +61,7 @@ REMOTO_KEYS_SCENARIOS='none mock' make test-keys-scenarios  # some
 REMOTO_E2E_CODEBERG_TOKEN=TOKEN REMOTO_KEYS_SCENARIOS=cbtoken make test-keys-scenarios
 #+end_src
 
-The Codeberg token needs read access to repositories, issues, organizations and your user; the run asks Codeberg for its account.  It goes into =.keys/scenarios/fixtures/sc-cbtoken.authinfo=, readable by you only, which the run deletes when the scenario ends; with =REMOTO_KEYS_KEEP= it stays until =make clean=.
+The Codeberg token needs read access to repositories, issues, organizations and your user; the run asks Codeberg for its account, and stops with exit 1 when Codeberg names none.  It goes into =.keys/scenarios/fixtures/sc-cbtoken.authinfo=, readable by you only, which the run deletes when the scenario ends; with =REMOTO_KEYS_KEEP= it stays until =make clean=.
 
 ** Watching and exploring by hand
 
