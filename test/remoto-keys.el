@@ -158,19 +158,34 @@ Codeberg answers any other client its bot check, a 200, whatever the path."
            (let ((code (string-to-number (buffer-string))))
              (and (< 0 code) code))))))
 
+(defvar remoto-keys--no-curl-said nil
+  "Non-nil once the run said that it checks no web URL, for want of curl.")
+
 (defun remoto-keys--dead-urls (state)
-  "Return (URL . STATUS) for the web URLs STATE copied or browsed that fail to load."
-  (seq-keep (lambda (url)
-              (when (and (stringp url) (string-match-p "\\`https?://" url))
-                (let ((status (remoto-keys--url-status url)))
-                  (unless (and status (< status 400)) (cons url status)))))
-            (delete-dups (cons (plist-get state :kill) (copy-sequence (plist-get state :browsed))))))
+  "Return (URL . STATUS) for the web URLs STATE copied or browsed that fail to load.
+Without curl no URL is checked, which the run says once."
+  (let ((urls (seq-filter (lambda (url) (and (stringp url) (string-match-p "\\`https?://" url)))
+                          (delete-dups (cons (plist-get state :kill)
+                                             (copy-sequence (plist-get state :browsed)))))))
+    (cond
+     ((null urls) nil)
+     ((not (executable-find "curl"))
+      (unless remoto-keys--no-curl-said
+        (setq remoto-keys--no-curl-said t)
+        (princ "No curl: the web URLs that cases copy or browse go unchecked\n"))
+      nil)
+     (t (seq-keep (lambda (url)
+                    (let ((status (remoto-keys--url-status url)))
+                      (unless (and status (< status 400)) (cons url status))))
+                  urls)))))
 
 (defun remoto-keys--learn-logins ()
   "Ask each forge whose token the run has for the account of that token."
   (when remoto-keys--token
     (setq remoto-keys--github-login
           (remoto-keys--login "https://api.github.com/user" remoto-keys--token))
+    (when remoto-keys--github-login
+      (setq remoto-e2e--root-account remoto-keys--github-login))
     (princ (format "GitHub token of %s\n" (or remoto-keys--github-login "no account GitHub names"))))
   (when remoto-keys--codeberg-token
     (setq remoto-keys--codeberg-login
@@ -485,14 +500,40 @@ Return a plist of the label, seconds, a note, the line and the state."
 ;;; Fixed checks
 
 (defconst remoto-keys--max-requests 20
-  "The requests one case may make before a check calls it too many.")
+  "The requests one case may make before a check calls it too many.
+The commit annotations of a directory's files count apart, as many again:
+remoto asks for up to 20, one per file.")
+
+(defun remoto-keys--annotation-p (request)
+  "Non-nil when REQUEST asks for the last commit of one file, an annotation."
+  (string-match-p "/commits\\?sha=[^&]*&path=" request))
+
+(defconst remoto-keys--ido-landings
+  '(("ff /gh:agzam/remoto.el/") ("ff /gh:agzam/remoto.el@2.2.0:/")
+    ("ff /gh:agzam/remoto.el@ceaf310:/") ("ff /gh:agzam/remoto el")
+    ("ff /gh:Agzam/Remoto.el" :dired "/github:agzam/Remoto.el@main:/")
+    ("dired /gh:agzam" :dired "/github:agzam/") ("dired /gh:qlik" :dired "/github:qlik/")
+    ("dired /gh:agzam/remoto") ("dired /gh:agzam/remoto.el/")
+    ("dired /gh:agzam/remoto.el/README.org" :dired "/github:agzam/remoto.el@main:/README.org/")
+    ("dired /gh:agzam/remoto.el/READ" :dired "/github:agzam/remoto.el@main:/READ/")
+    ("dired /gh:agzam/remoto.el/nope.txt" :dired "/github:agzam/remoto.el@main:/nope.txt/")
+    ("dired /gh:agzam/remoto.el@ma") ("dired /gh:agzam/remoto.el@main:/test/remo")
+    ("dired /gh:agzam/remoto.el@2.2.0:/") ("dired /gh:agzam/remoto.el@2.2")
+    ("dired /gh:agzam/remoto.el@ceaf310:/") ("dired /gh:agzam/.doom")
+    ("dired /gh:Agzam/Remoto.el" :dired "/github:agzam/Remoto.el@main:/")
+    ("dired /gh:agzam/remoto el") ("dired https://github.com/agzam/remoto.el"))
+  "Where ido ends a case that vanilla ends elsewhere, origin/main as the branch.
+ido's C-j submits what ido completed, not what was typed.  A label with
+no landing ends in no Dired and no file, so it has no landing to check.")
 
 (defvar remoto-keys--golden nil
   "The replay's expected states read so far, an alist by profile.")
 
 (defun remoto-keys--expected-state (profile label)
   "Return the replay's expected state of the case LABEL under PROFILE, or nil.
-A profile without golden files takes vanilla's, and evil's for ex cases."
+A profile without golden files takes vanilla's, and evil's for ex cases;
+ido's own landings come from `remoto-keys--ido-landings'.  RET on an
+account line opens `remoto-e2e--root-account'."
   (let ((reference (cond ((member profile remoto-e2e-profiles) profile)
                          ((string-prefix-p "ex " label) "evil")
                          (t "vanilla"))))
@@ -502,7 +543,13 @@ A profile without golden files takes vanilla's, and evil's for ex cases."
                    (expand-file-name (format "e2e/expected/%s.eld" reference)
                                      remoto-keys--test-dir)))
             remoto-keys--golden))
-    (cdr (assoc label (cdr (assoc reference remoto-keys--golden))))))
+    (let ((state (cdr (assoc label (cdr (assoc reference remoto-keys--golden))))))
+      (cond ((and (equal profile "ido") (assoc label remoto-keys--ido-landings))
+             (cdr (assoc label remoto-keys--ido-landings)))
+            ((and state (equal label "dired RET on an account line"))
+             (plist-put (copy-sequence state) :dired
+                        (format "/github:%s/" remoto-e2e--root-account)))
+            (t state)))))
 
 (defun remoto-keys--landing (state)
   "Return where STATE ended: (:dired DIRECTORY), (:file FILE), or nil."
@@ -521,7 +568,8 @@ clean Dired and Embark lines, no raw HTTP text, few requests, live URLs."
          (want (remoto-keys--landing expected))
          (got (remoto-keys--landing state))
          (names (plist-get state :names))
-         (requests (length (plist-get state :requests)))
+         (annotations (seq-count #'remoto-keys--annotation-p (plist-get state :requests)))
+         (requests (- (length (plist-get state :requests)) annotations))
          failures)
     (when note
       (push note failures))
@@ -544,6 +592,10 @@ clean Dired and Embark lines, no raw HTTP text, few requests, live URLs."
       (push "Embark's b browsed nothing" failures))
     (when (< remoto-keys--max-requests requests)
       (push (format "%d requests, more than %d" requests remoto-keys--max-requests) failures))
+    (when (< remoto-keys--max-requests annotations)
+      (push (format "%d commit annotations, more than %d" annotations
+                    remoto-keys--max-requests)
+            failures))
     (nreverse failures)))
 
 (defun remoto-keys--check (name result expected)

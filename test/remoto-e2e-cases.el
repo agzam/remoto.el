@@ -321,13 +321,18 @@ An ex command line ends with RET whatever completes the file prompts."
   "Return the keys that open DIR in Dired, then KEYS."
   `(,(kbd "C-x d") ,dir submit ,@keys))
 
+(defvar remoto-e2e--root-account "emacs-mirror"
+  "The account that RET on an account line of /github: opens.
+An organization of the replay's token; a terminal run with a real token
+takes that token's own account, which its root listing surely holds.")
+
 (defun remoto-e2e--dired-cases ()
   "Return the cases of Dired operations in remoto's listings."
   (let ((ret (kbd "RET")))
     `(("dired RET on a repository line" nil
        ,@(remoto-e2e--in "/gh:agzam/" 'goto "remoto.el" ret ret))
       ("dired RET on an account line" nil
-       ,@(remoto-e2e--in "/gh:" 'goto "emacs-mirror" ret ret))
+       ,@(remoto-e2e--in "/gh:" 'goto remoto-e2e--root-account ret ret))
       ("dired RET on a ref line" nil
        ,@(remoto-e2e--in "/gh:agzam/remoto.el@" 'goto "main" ret ret))
       ("dired RET on a file line" nil

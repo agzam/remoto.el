@@ -112,7 +112,25 @@
                                    nil "still busy after 60s")
               :to-equal '("still busy after 60s"
                           "raw HTTP text in the messages: HTTP/1.1 502 Bad Gateway"
-                          "21 requests, more than 20")))))
+                          "21 requests, more than 20")))
+    (it "counts the commit annotations of a directory's files apart, with a cap of their own"
+      ;; remoto documents up to 20 of them, one per file, on top of the tree.
+      (let ((annotation (lambda (forge)
+                          (format "%srepos/o/r/commits?sha=main&path=f&%s" forge
+                                  (if (string-empty-p forge) "per_page=1" "limit=1")))))
+        (expect (remoto-keys--checks
+                 "ff /cb:forgejo/forgejo@v17.0.0:/"
+                 `(:requests ,(append (make-list 11 "/codeberg:repos/o/r/git/trees/x")
+                                      (make-list 20 (funcall annotation "/codeberg:"))))
+                 nil nil)
+                :to-be nil)
+        (expect (remoto-keys--checks
+                 "ff /gh:agzam/remoto.el@main:/test/"
+                 `(:requests ,(cons "repos/o/r/git/trees/main"
+                                    (make-list 21 (funcall annotation ""))))
+                 nil nil)
+                :to-equal '("21 commit annotations, more than 20"))
+        (expect (remoto-keys--annotation-p "async repos/o/r/commits/main") :to-be nil)))))
 
 (describe "remoto-keys--expected-state"
   (it "takes vanilla's golden state for a profile without its own, evil's for ex"
@@ -121,7 +139,29 @@
     (expect (remoto-keys--expected-state "full" "ex /gh:agzam/remoto.el")
             :to-equal (remoto-keys--expected-state "evil" "ex /gh:agzam/remoto.el"))
     (expect (plist-get (remoto-keys--expected-state "vanilla" "ff /gh:agzam/remoto.el") :dired)
-            :to-equal "/github:agzam/remoto.el@main:/")))
+            :to-equal "/github:agzam/remoto.el@main:/"))
+
+  (it "takes ido's own landing where ido ends a case elsewhere, on main too"
+    (expect (remoto-keys--landing (remoto-keys--expected-state "ido" "dired /gh:qlik"))
+            :to-equal '(:dired "/github:qlik/"))
+    (expect (remoto-keys--landing (remoto-keys--expected-state "vanilla" "dired /gh:qlik"))
+            :to-equal '(:dired "/github:"))
+    ;; ido's C-j ends this one in no Dired and no file: nothing to check.
+    (expect (remoto-keys--expected-state "ido" "dired /gh:agzam/remoto") :to-be nil)
+    (expect (remoto-keys--checks "dired /gh:qlik" '(:dired "/github:qlik/")
+                                 (remoto-keys--expected-state "ido" "dired /gh:qlik") nil)
+            :to-be nil))
+
+  (it "opens the account line of the token's own account, as the replay opens its org"
+    (expect (plist-get (remoto-keys--expected-state "vanilla" "dired RET on an account line")
+                       :dired)
+            :to-equal "/github:emacs-mirror/")
+    (let ((remoto-e2e--root-account "someone"))
+      (expect (plist-get (remoto-keys--expected-state "full" "dired RET on an account line")
+                         :dired)
+              :to-equal "/github:someone/")
+      (expect (member "someone" (assoc "dired RET on an account line" (remoto-e2e--dired-cases)))
+              :to-be-truthy))))
 
 (describe "remoto-e2e--codeberg-cases"
   (it "opens each Codeberg name with the profile's commands, ex lines ending in RET"
@@ -311,7 +351,20 @@
                                         :browsed ("https://x/gone" "https://x/ok"
                                                   "git@codeberg.org:a/b.git")))
               :to-equal '(("https://x/gone" . 404)))
-      (expect (sort asked #'string<) :to-equal '("https://x/gone" "https://x/ok")))))
+      (expect (sort asked #'string<) :to-equal '("https://x/gone" "https://x/ok"))))
+  (it "checks no URL without curl, and says so once"
+    ;; The remoto-linux image has no curl: every URL check failed "answers nothing".
+    (let ((remoto-keys--no-curl-said nil)
+          (printed nil))
+      (spy-on 'executable-find :and-return-value nil)
+      (spy-on 'remoto-keys--url-status)
+      (let ((standard-output (lambda (char) (push char printed))))
+        (expect (remoto-keys--dead-urls '(:kill "https://x/gone")) :to-be nil)
+        (expect (remoto-keys--dead-urls '(:browsed ("https://x/other"))) :to-be nil)
+        (expect (remoto-keys--dead-urls '(:kill "git@codeberg.org:a/b.git")) :to-be nil))
+      (expect 'remoto-keys--url-status :not :to-have-been-called)
+      (expect (concat (nreverse printed))
+              :to-equal "No curl: the web URLs that cases copy or browse go unchecked\n"))))
 
 (describe "remoto-e2e--embark-action-cases"
   (it "keeps GitHub's labels and tags Codeberg's, with the same actions"
