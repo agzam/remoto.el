@@ -120,10 +120,13 @@ every source older than an existing output file, so it must not exist."
   (it "finds a repository on a line of an owner listing, and an account above it"
     (let ((remoto--listing-cache (make-hash-table :test 'equal))
           (remoto--default-branch-cache (make-hash-table :test 'equal))
-          (remoto--authenticated-user "me")
+          (remoto--logins (let ((logins (make-hash-table :test 'equal)))
+                            (puthash "api.github.com" (remoto--login-create :user "me")
+                                     logins)
+                            logins))
           (dired-listing-switches "-al"))
       (spy-on 'remoto--api :and-call-fake
-              (lambda (endpoint)
+              (lambda (_forge endpoint)
                 (cond ((string-prefix-p "user/orgs" endpoint)
                        '(((login . "acme") (description . "Acme tools"))))
                       ((string-prefix-p "user/repos" endpoint)
@@ -485,6 +488,15 @@ with that property intact and no live minibuffer."
   (it "leaves owner and issue/PR targets for their own parsers"
     (expect (remoto--embark-canonicalize "/gh:torvalds") :to-equal "/github:torvalds")
     (expect (remoto--embark-canonicalize "/gh:o/r#42") :to-equal "/github:o/r#42"))
+
+  (it "reads a candidate joined to the default directory as the file prompt does"
+    ;; Embark gets a file prompt's candidate this way, without Vertico's tidying.
+    (expect (remoto--embark-canonicalize "~/x/home//gh:agzam/remoto.el@main:/test/e2e/")
+            :to-equal "/github:agzam/remoto.el@main:/test/e2e/")
+    (expect (remoto--embark-canonicalize "/tmp//cb:forgejo/forgejo#14989")
+            :to-equal "/codeberg:forgejo/forgejo#14989")
+    (expect (remoto--embark-canonicalize "https://github.com/agzam/remoto.el")
+            :to-equal "https://github.com/agzam/remoto.el"))
 
   (it "passes non-strings through unchanged"
     (expect (remoto--embark-canonicalize nil) :to-be nil)))

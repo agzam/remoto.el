@@ -1,4 +1,4 @@
-;;; remoto.el --- Browse GitHub repos without cloning -*- lexical-binding: t; -*-
+;;; remoto.el --- Browse GitHub and Codeberg repos without cloning -*- lexical-binding: t; -*-
 ;;
 ;; Copyright (C) 2026 Ag Ibragimov
 ;;
@@ -9,7 +9,7 @@
 ;; Version: 2.3.0
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
-;; Package-Requires: ((emacs "29.1") (ghub "4.0.0"))
+;; Package-Requires: ((emacs "29.1") (ghub "5.3.0"))
 ;;
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;
@@ -17,12 +17,12 @@
 
 ;;; Commentary:
 
-;; remoto.el lets you browse any GitHub repository in Emacs as if it were
-;; cloned locally - without cloning it.  It registers a virtual filesystem
-;; via `file-name-handler-alist' that translates Emacs file operations into
-;; requests to a forge.  A forge is a `remoto-forge' that answers the
-;; generic functions of the forge contract with plain data; GitHub's
-;; answers live in remoto-github.el and use the `ghub' library.
+;; remoto.el lets you browse any GitHub or Codeberg repository in Emacs as
+;; if it were cloned locally - without cloning it.  It registers a virtual
+;; filesystem via `file-name-handler-alist' that translates Emacs file
+;; operations into requests to a forge.  A forge is a `remoto-forge' that
+;; answers the generic functions of the forge contract with plain data;
+;; GitHub's answers live in remoto-github.el and use the `ghub' library.
 ;;
 ;; Loading this file defines things and changes nothing.  `global-remoto-mode'
 ;; is the switch: it installs the file-name handler, the `find-file' and
@@ -31,14 +31,16 @@
 ;;
 ;; Usage:
 ;;   C-x C-f /github:torvalds/linux RET
+;;   C-x C-f /cb:forgejo/forgejo RET
 ;;   M-x remoto-browse RET https://github.com/torvalds/linux RET
 ;;
-;; Both turn the mode on when it is off: `remoto-browse' itself, and the
+;; Each turns the mode on when it is off: `remoto-browse' itself, and the
 ;; path through `remoto-autoload-file-name-handler', which the package
-;; autoloads register for `/github:' and `/gh:' paths the way TRAMP
-;; autoloads on a remote path.  `(global-remoto-mode 1)' in the init file
-;; turns it on ahead of time.  `remoto-browse' supports pasting any GitHub
-;; URL, git remote URL, or owner/repo shorthand.
+;; autoloads register for the prefixes of the forges that come with
+;; remoto, the way TRAMP autoloads on a remote path.
+;; `(global-remoto-mode 1)' in the init file turns it on ahead of time.
+;; `remoto-browse' supports pasting any GitHub URL, git remote URL, or
+;; owner/repo shorthand.
 
 ;;; Code:
 
@@ -67,9 +69,9 @@ canonical; DELIMITERS the characters after OWNER/REPO it supports."
 
 (defvar remoto--handler-regexp "\\`/\\(?:github\\|gh\\):"
   "Regexp matching remoto file paths: every prefix of every forge.
-`remoto-register-forge' rebuilds it.  The autoload cookie on
-`remoto-autoload-file-name-handler' repeats the GitHub prefixes as a
-literal, in this spelling.")
+`remoto-register-forge' rebuilds it.  Each forge file carries an
+autoload cookie that repeats its prefixes as a literal, in this
+spelling, for `remoto-autoload-file-name-handler'.")
 
 (defun remoto--prefix (forge)
   "Return the canonical path prefix of FORGE, such as /github:."
@@ -94,6 +96,34 @@ Register the delimiters of FORGE with `remoto-register-delimiter' first."
     (if-let* ((entry (assoc prefix remoto--forges)))
         (setcdr entry forge)
       (setq remoto--forges (append remoto--forges (list (cons prefix forge))))))
+  (setq remoto--handler-regexp
+        (concat "\\`/\\(?:"
+                (mapconcat #'regexp-quote (mapcar #'car remoto--forges) "\\|")
+                "\\):"))
+  (remoto--refresh-handler))
+
+(defun remoto--forge-buffers (forge)
+  "Return the buffers of FORGE: its files, its Dired directories, its topics."
+  (let ((regexp (concat "\\`/" (regexp-opt (remoto-forge-prefixes forge)) ":")))
+    (seq-filter (lambda (buffer)
+                  (when-let* ((name (with-current-buffer buffer
+                                      (or buffer-file-name
+                                          (and (derived-mode-p 'dired-mode)
+                                               default-directory)
+                                          (bound-and-true-p remoto-topic--repo-path)))))
+                    (string-match-p regexp name)))
+                (buffer-list))))
+
+(defun remoto-unregister-forge (forge)
+  "Remove FORGE from the registry and refresh the handler regexp.
+The buffers of FORGE are killed first: once no handler serves their
+names, `uniquify' fails to kill any buffer that shares their name."
+  (when-let* ((killed (seq-count #'kill-buffer (remoto--forge-buffers forge)))
+              ((< 0 killed)))
+    (message "Remoto: killed %d buffer%s of %s" killed (if (= killed 1) "" "s")
+             (remoto--prefix forge)))
+  (setq remoto--forges (seq-remove (lambda (entry) (eq (cdr entry) forge))
+                                   remoto--forges))
   (setq remoto--handler-regexp
         (concat "\\`/\\(?:"
                 (mapconcat #'regexp-quote (mapcar #'car remoto--forges) "\\|")
@@ -428,12 +458,17 @@ A canonical tree path comes back with the slash after its colon."
                       (remoto-delimiter-char (remoto--delimiter-of level)))
                      query)))))
 
+(defun remoto--repo-id (forge owner repo)
+  "Return the cache key of OWNER/REPO on FORGE: its canonical name.
+Two forges may host an OWNER/REPO each, so the prefix is part of the key."
+  (concat (remoto--prefix forge) owner "/" repo))
+
 (defun remoto--repo-key (parsed)
-  "Return cache key string for PARSED `remoto-path'.
-Format: owner/repo@ref."
-  (format "%s/%s@%s"
-          (remoto-path-owner parsed)
-          (remoto-path-repo parsed)
+  "Return the cache key of the tree PARSED names: /PREFIX:OWNER/REPO@REF."
+  (format "%s@%s"
+          (remoto--repo-id (remoto-path-forge parsed)
+                           (remoto-path-owner parsed)
+                           (remoto-path-repo parsed))
           (or (remoto-path-ref parsed) "HEAD")))
 
 ;;;; Options, auth and the ghub transport
@@ -442,7 +477,7 @@ Format: owner/repo@ref."
 (declare-function dired-goto-file "dired" (file))
 
 (defgroup remoto nil
-  "Browse GitHub repos without cloning."
+  "Browse the repositories of GitHub, Codeberg and other forges without cloning."
   :group 'tools
   :prefix "remoto-")
 
@@ -474,21 +509,42 @@ directory-listing caches.  Defined early so functions above the
   :type 'integer
   :group 'remoto)
 
-(defvar remoto--auth-failed nil
-  "Non-nil when authenticated GitHub access has permanently failed.
-Set on actual auth errors (missing token, 401), NOT on timeouts.
-Causes `remoto--api' to skip token lookup and use unauthenticated
-requests.  Reset with `remoto-reset-auth'.")
+(cl-defstruct (remoto--login (:constructor remoto--login-create)
+                             (:copier nil))
+  "What remoto knows of its login at one API host.
+FAILED is non-nil once authenticated access failed for good (a missing
+or rejected token, not a timeout), so requests go unauthenticated until
+`remoto-reset-auth'; TOKEN is the token that works; USER its account."
+  failed token user)
 
-(defvar remoto--effective-auth nil
-  "Resolved auth value that actually works, or nil if not yet probed.
-Set by `remoto--warm-auth' after trying `remoto-github-auth' and
-falling back to `forge' if available.  Cleared by `remoto-reset-auth'.")
+(defvar remoto--logins (make-hash-table :test 'equal)
+  "Login state by API host, each a `remoto--login'.
+Forges on one host, such as GitHub and gists, share one entry.")
 
-(defvar remoto--authenticated-user nil
-  "Cached GitHub login of the authenticated user, or nil if unknown.
-Set by `remoto--get-authenticated-user' on first successful lookup.
-Cleared by `remoto-reset-auth'.")
+(defun remoto--login (host)
+  "Return the `remoto--login' of the API host HOST, made on first use."
+  (or (gethash host remoto--logins)
+      (puthash host (remoto--login-create) remoto--logins)))
+
+(cl-defgeneric remoto--api-host (forge)
+  "Return the host `remoto--api' sends the requests of FORGE to.
+In ghub's spelling, with the path of the API: \"api.github.com\",
+\"codeberg.org/api/v1\".")
+
+(cl-defmethod remoto--api-host ((_forge remoto-github))
+  "GitHub's API host."
+  "api.github.com")
+
+(cl-defgeneric remoto--ghub-forge (forge)
+  "Return the symbol ghub knows the kind of FORGE by, nil for GitHub.")
+
+(cl-defmethod remoto--ghub-forge ((_forge remoto-github))
+  "GitHub is ghub's default kind."
+  nil)
+
+(defun remoto--forge-login (forge)
+  "Return the `remoto--login' at the API host of FORGE."
+  (remoto--login (remoto--api-host forge)))
 
 (defun remoto--json-reader (_status)
   "Parse JSON response with list-type arrays for remoto compatibility.
@@ -512,7 +568,7 @@ across different ghub and url.el versions."
 ;;;; Fetch indicator
 
 (defcustom remoto-show-fetch-indicator t
-  "When non-nil, show a \"fetching\" indicator during GitHub requests.
+  "When non-nil, show a \"fetching\" indicator during forge requests.
 While completing a remoto path (e.g. with \\[find-file]) or at the
 `remoto-browse' prompt, it is drawn as minibuffer text, so it works with
 any completion UI (vertico, icomplete, default, ...).  A fetch that
@@ -666,7 +722,7 @@ A message that something else put up meanwhile is left alone."
     (setq remoto--sync-fetch-overlay nil)))
 
 (defmacro remoto--with-fetch-indicator (&rest body)
-  "Run BODY, a blocking GitHub round-trip, with the fetch indicator up.
+  "Run BODY, a blocking forge round-trip, with the fetch indicator up.
 Every synchronous API call goes through this, so `remoto-browse' and a
 path at `find-file' or `dired' show the same thing: the minibuffer
 overlay while completing, the echo area once the prompt is gone.
@@ -681,44 +737,52 @@ there is no display.  Returns BODY's value."
        (remoto--sync-fetch-end))))
 
 (cl-defstruct (remoto--request (:constructor remoto--request-create))
-  "A GitHub request started under `while-no-input'."
+  "A forge request started under `while-no-input'."
   (status 'pending)
   buffer
-  value)
+  value
+  headers)
+
+(defvar remoto--response-headers nil
+  "The headers of the answer that `remoto--ghub-get' read last.
+Bind it around a call to read the headers of that call's answer.")
 
 (defvar remoto--pending-requests (make-hash-table :test 'equal)
-  "Requests started under `while-no-input', keyed by (RESOURCE . AUTH).
+  "Requests started under `while-no-input', keyed by (HOST RESOURCE AUTH).
 Such a request outlives the completion call that started it: the reply
 lands in its `remoto--request', and the next call for the same key
 waits on that request or reads the landed reply instead of asking
-GitHub again.  A failed request leaves the table, so the next call
+the forge again.  A failed request leaves the table, so the next call
 retries.")
 
-(defun remoto--request-condition (err resource)
+(defun remoto--request-condition (err host resource)
   "Turn ERR, as ghub hands it to an errorback, into the condition ghub signals.
-RESOURCE names the request in the condition data."
+HOST and RESOURCE name the request in the condition data."
   (pcase err
     (`(error http ,code . ,rest)
      (list 'ghub-http-error code (nth 2 (assq code url-http-codes))
-           (concat "https://api.github.com" resource) (car rest)))
+           (concat "https://" host resource) (car rest)))
     (`(error . ,data) (cons 'ghub-error data))
     (_ err)))
 
-(defun remoto--request-start (key resource auth)
-  "Start a callback request for RESOURCE with AUTH and register it under KEY."
-  (let ((req (remoto--request-create)))
+(defun remoto--request-start (key forge resource auth)
+  "Start a callback request to FORGE for RESOURCE with AUTH, registered under KEY."
+  (let ((req (remoto--request-create))
+        (host (remoto--api-host forge)))
     (setf (remoto--request-buffer req)
           (ghub-get resource nil
                     :auth auth
                     :reader #'remoto--json-reader
-                    :host "api.github.com"
-                    :callback (lambda (value &rest _)
+                    :host host
+                    :forge (remoto--ghub-forge forge)
+                    :callback (lambda (value &optional headers &rest _)
                                 (setf (remoto--request-value req) value
+                                      (remoto--request-headers req) headers
                                       (remoto--request-status req) 'done))
                     :errorback (lambda (err &rest _)
                                  (remhash key remoto--pending-requests)
                                  (setf (remoto--request-value req)
-                                       (remoto--request-condition err resource)
+                                       (remoto--request-condition err host resource)
                                        (remoto--request-status req) 'error))))
     (puthash key req remoto--pending-requests)
     req))
@@ -730,138 +794,219 @@ keys are readable in a backtrace or a variable dump, so a token string
 goes in hashed.  A symbol such as `none' is no secret and stays as is."
   (if (stringp auth) (secure-hash 'sha256 auth) auth))
 
-(defun remoto--ghub-get-interruptible (resource auth)
-  "GET RESOURCE with AUTH through a callback, waiting in a way input can end.
+(defun remoto--ghub-get-interruptible (forge resource auth)
+  "GET RESOURCE of FORGE with AUTH through a callback, in a way input can end.
 `url-retrieve-synchronously' leaves its buffer behind when `while-no-input'
 throws past it, and the reply nobody reads keeps the buffer alive; ghub
 kills the buffer of a callback request itself once the reply is handled.
 Return the value or signal the condition the synchronous call would."
-  (let* ((key (cons resource (remoto--auth-key auth)))
+  (let* ((key (list (remoto--api-host forge) resource (remoto--auth-key auth)))
          (req (or (gethash key remoto--pending-requests)
-                  (remoto--request-start key resource auth))))
+                  (remoto--request-start key forge resource auth))))
     (while (and (eq (remoto--request-status req) 'pending)
                 (buffer-live-p (remoto--request-buffer req)))
       (accept-process-output nil 0.1))
     (remhash key remoto--pending-requests)
     (pcase (remoto--request-status req)
-      ('done (remoto--request-value req))
+      ('done (setq remoto--response-headers (remoto--request-headers req))
+             (remoto--request-value req))
       ('error (let ((err (remoto--request-value req)))
                 (signal (car err) (cdr err))))
       (_ (error "Remoto: no reply for %s" resource)))))
 
 (defconst remoto--not-found "Remoto: not found: "
   "How the `user-error' for an answer of 404 starts, or of 422 to a search.
+Forgejo's 400 for a ref it lacks is one too.
 Callers that take a missing resource for an answer test for it: a child
 error of `user-error' would print its message in quotes.")
 
-(defun remoto--ghub-get (resource auth endpoint)
-  "Call `ghub-get' on RESOURCE with AUTH, translating errors.
-ENDPOINT is used in error messages for context.  Always passes
-`:host \"api.github.com\"' explicitly - ghub's default host
-resolution can resolve to github.com (HTML) instead of the
-JSON API endpoint."
-  (condition-case err
-      (remoto--with-fetch-indicator
-        (let ((inhibit-message (not ghub-debug)))
-          ;; `while-no-input' binds `throw-on-input'; only then can input
-          ;; abandon the call, and only then is the callback path needed.
-          (if throw-on-input
-              (remoto--ghub-get-interruptible resource auth)
-            (ghub-get resource nil
-                      :auth auth
-                      :reader #'remoto--json-reader
-                      :host "api.github.com"))))
-    ;; ghub signals every HTTP failure as (ghub-http-error CODE MESSAGE URL
-    ;; PAYLOAD); there are no per-status error symbols to match on.
-    (ghub-http-error
-     (pcase (cadr err)
-       ;; A search answers 422 when its user: qualifier names no account.
-       ((or 404 422) (user-error "%s%s" remoto--not-found endpoint))
-       (403 (user-error "Remoto: access denied (rate limit or permissions): %s"
-                        endpoint))
-       (401 (user-error "Remoto: authentication failed; \
-configure ghub token in auth-source"))
-       (_ (user-error "Remoto: API error: %s" (error-message-string err)))))
-    (json-error
-     (user-error "Remoto: could not parse API response for %s" endpoint))))
+(defconst remoto--auth-rejected "Remoto: authentication failed for "
+  "How the `user-error' for an answer of 401 starts, the API host after it.
+`remoto--api' tests for it to go on without the token that was refused.")
 
-(defun remoto--api (endpoint)
-  "Call GitHub REST API ENDPOINT via ghub, return parsed JSON.
+(defun remoto--error-payload-message (err)
+  "Return the message in the body that came with ERR, a `ghub-http-error'."
+  (let ((payload (nth 4 err)))
+    (and (listp payload) (stringp (alist-get 'message payload))
+         (alist-get 'message payload))))
+
+(defun remoto--http-error-message (forge endpoint err headers)
+  "Return the message for ERR, the `ghub-http-error' of ENDPOINT on FORGE.
+HEADERS came with the answer; a Retry-After among them says how long to wait."
+  (let ((code (nth 1 err))
+        (wait (cdr (assoc-string "retry-after" headers t)))
+        (detail (remoto--error-payload-message err)))
+    (concat (format "Remoto: %s " (remoto--api-host forge))
+            (if (eql code 429)
+                (format "rate limited %s (429)" endpoint)
+              (format "answered %s%s for %s" code
+                      (if (nth 2 err) (concat " " (nth 2 err)) "") endpoint))
+            (and detail (concat ": " detail))
+            (cond ((null wait) (and (eql code 429) "; retry later"))
+                  ((string-match-p "\\`[0-9]+\\'" wait)
+                   (format "; retry in %s seconds" wait))
+                  (t (format "; retry after %s" wait))))))
+
+(defun remoto--ghub-get (forge resource auth endpoint)
+  "Call `ghub-get' on RESOURCE of FORGE with AUTH, translating errors.
+ENDPOINT is used in error messages for context.  The host is always
+explicit: ghub's default for a forge is its web host, which answers HTML."
+  ;; A synchronous ghub-get leaves the headers of its answer here, so
+  ;; the binding holds this request's and no earlier one's.
+  (let ((ghub-response-headers nil))
+    (condition-case err
+        (remoto--with-fetch-indicator
+          (let ((inhibit-message (not ghub-debug)))
+            ;; `while-no-input' binds `throw-on-input'; only then can input
+            ;; abandon the call, and only then is the callback path needed.
+            (if throw-on-input
+                (remoto--ghub-get-interruptible forge resource auth)
+              (prog1 (ghub-get resource nil
+                               :auth auth
+                               :reader #'remoto--json-reader
+                               :host (remoto--api-host forge)
+                               :forge (remoto--ghub-forge forge))
+                (setq remoto--response-headers ghub-response-headers)))))
+      ;; ghub signals every HTTP failure as (ghub-http-error CODE MESSAGE URL
+      ;; PAYLOAD); there are no per-status error symbols to match on.
+      (ghub-http-error
+       (pcase (cadr err)
+         ;; A search answers 422 when its user: qualifier names no account.
+         ((or 404 422) (user-error "%s%s" remoto--not-found endpoint))
+         ;; Forgejo answers 400 "sha not found [REF]" to a ref it lacks.
+         ((and 400 (guard (string-match-p "not found"
+                                          (or (remoto--error-payload-message err) ""))))
+          (user-error "%s%s" remoto--not-found endpoint))
+         (403 (user-error "Remoto: access denied (rate limit or permissions): %s"
+                          endpoint))
+         (401 (user-error "%s%s; configure a token for it in auth-source, \
+then M-x remoto-reset-auth" remoto--auth-rejected (remoto--api-host forge)))
+         (_ (user-error "%s" (remoto--http-error-message
+                              forge endpoint err ghub-response-headers)))))
+      (json-error
+       (user-error "Remoto: could not parse API response for %s" endpoint)))))
+
+(cl-defgeneric remoto--literal-token (_forge)
+  "Return the token of FORGE from a user option, or nil."
+  nil)
+
+(cl-defmethod remoto--literal-token ((_forge remoto-github))
+  "A string `remoto-github-auth' is GitHub's token."
+  (and (stringp remoto-github-auth) remoto-github-auth))
+
+(defun remoto--auth (forge)
+  "Return the `:auth' for a request to FORGE: a token, nil or `none'.
+nil leaves the lookup to ghub; `none' goes unauthenticated.  A token
+found here is kept in the login of the host, so later calls skip the
+auth-source search.  A failed search marks the login (see
+`remoto--find-token'), and this call goes unauthenticated at once."
+  (let ((login (remoto--forge-login forge)))
+    (cond ((remoto--login-failed login) 'none)
+          ((remoto--login-token login))
+          ((remoto--literal-token forge))
+          ((when-let* ((token (remoto--find-token forge)))
+             (setf (remoto--login-token login) token)))
+          ((remoto--login-failed login) 'none))))
+
+(defun remoto--anonymous-get (forge endpoint)
+  "GET ENDPOINT of the API of FORGE without a token.
+The endpoints of the token's account, user and below, are not asked:
+they answer 401, which url.el takes for a cue to prompt for a password."
+  (if (string-match-p (rx bos "user" (or eos (in "/?"))) endpoint)
+      (user-error "Remoto: %s needs a token for %s" endpoint (remoto--api-host forge))
+    (remoto--ghub-get forge (concat "/" endpoint) 'none endpoint)))
+
+(defun remoto--api (forge endpoint)
+  "Call ENDPOINT of the REST API of FORGE via ghub, return parsed JSON.
 ENDPOINT should not have a leading slash - one is prepended
-automatically.  Auth resolution order: `remoto--effective-auth',
-`remoto-github-auth', ghub's built-in auth-source lookup,
-`remoto--find-github-token' (last resort).  When every avenue
-fails, signals `user-error'.  Public repos work without any
-setup via unauthenticated fallback."
+automatically.  Auth resolution order: the token of the host's login,
+the forge's token option, `remoto--find-token', ghub's own lookup.
+When every avenue fails, signals `user-error'.  Public repositories work
+without any setup via unauthenticated fallback."
   (let* ((resource (concat "/" endpoint))
-         (auth (cond (remoto--auth-failed 'none)
-                     (remoto--effective-auth remoto--effective-auth)
-                     ((stringp remoto-github-auth) remoto-github-auth)
-                     ;; Try our own auth-source search before ghub's
-                     ;; resolution, which uses different host/user
-                     ;; patterns and often fails on fresh sessions.
-                     (t (or (when-let* ((token (remoto--find-github-token)))
-                              (setq remoto--effective-auth token)
-                              token)
-                            ;; A lookup that fails inside sets the flag; this
-                            ;; call must go unauthenticated too, or ghub's own
-                            ;; lookup hits the same broken backend and errors.
-                            (and remoto--auth-failed 'none))))))
+         (login (remoto--forge-login forge))
+         (auth (remoto--auth forge)))
     (if (eq auth 'none)
-        (remoto--ghub-get resource 'none endpoint)
+        (remoto--anonymous-get forge endpoint)
       (condition-case err
-          ;; Only apply the auth timeout on the first call (before we
-          ;; know whether auth works).  Once the authenticated user is
-          ;; cached, auth-source won't block, so skip the timeout to
-          ;; avoid aborting slow HTTP responses.
-          (if remoto--authenticated-user
-              (remoto--ghub-get resource auth endpoint)
+          ;; The timeout guards ghub's own token lookup, which a nil AUTH
+          ;; leaves to it.  With the token in hand no lookup is left, and
+          ;; a slow answer is no lookup that hangs.
+          (if (or (stringp auth) (remoto--login-user login))
+              (remoto--ghub-get forge resource auth endpoint)
             (let ((result (with-timeout (remoto-auth-timeout 'remoto--timed-out)
-                            (remoto--ghub-get resource auth endpoint))))
+                            (remoto--ghub-get forge resource auth endpoint))))
               (when (eq result 'remoto--timed-out)
                 (message "Remoto: auth lookup timed out; retrying next call (see `remoto-auth-timeout')")
-                (setq result (remoto--ghub-get resource 'none endpoint)))
+                (setq result (remoto--anonymous-get forge endpoint)))
               result))
-        ;; Re-raise API errors (404, 403, etc.) from remoto--ghub-get;
-        ;; these are not auth failures.
         (user-error
-         (if (string-prefix-p "Remoto:" (cadr err))
-             (signal (car err) (cdr err))
-           ;; ghub auth config error (e.g. "Cannot determine
-           ;; username").  Every avenue exhausted - fail loudly.
-           (setq remoto--auth-failed t)
+         (cond
+          ;; The forge refused the token: go on without it, as the GitHub
+          ;; warm-up does, until `remoto-reset-auth'.
+          ((string-prefix-p remoto--auth-rejected (cadr err))
+           (setf (remoto--login-failed login) t)
+           (message "Remoto: %s rejected the token; reading it anonymously \
+until M-x remoto-reset-auth" (remoto--api-host forge))
+           (remoto--anonymous-get forge endpoint))
+          ;; Any other answer of the API (404, 403, ...) is no auth failure.
+          ((string-prefix-p "Remoto:" (cadr err))
+           (signal (car err) (cdr err)))
+          ;; ghub auth config error.  Every avenue exhausted - fail loudly.
+          (t
+           (setf (remoto--login-failed login) t)
            (user-error "Remoto: authentication failed for %s; \
-configure a GitHub token in auth-source, then M-x remoto-reset-auth"
-                       endpoint)))
+configure a token for %s in auth-source, then M-x remoto-reset-auth"
+                       endpoint (remoto--api-host forge)))))
         (error
          ;; ghub could not resolve auth at all.  Fail loudly so the
          ;; user knows auth is the problem, not a missing repo.
-         (setq remoto--auth-failed t)
+         (setf (remoto--login-failed login) t)
          (user-error "Remoto: authentication failed for %s (%s); \
-configure a GitHub token in auth-source, then M-x remoto-reset-auth"
-                     endpoint (error-message-string err)))))))
+configure a token for %s in auth-source, then M-x remoto-reset-auth"
+                     endpoint (error-message-string err)
+                     (remoto--api-host forge)))))))
 
-(defun remoto--paginated-api (endpoint per-page &optional max-pages)
-  "Fetch all pages of paginated GitHub API ENDPOINT via `remoto--api'.
-Request PER-PAGE items per page, following pages until a short page is
-returned or MAX-PAGES (default 10) is reached.  The cap bounds latency
-and request count on very large repositories."
-  (let ((query-endpoint (concat endpoint (if (cl-search "?" endpoint) "&" "?"))))
+(cl-defgeneric remoto--page-params (_forge count &optional page)
+  "Return the query that asks FORGE for COUNT items, those of PAGE.
+In GitHub's spelling by default."
+  (concat (format "per_page=%d" count)
+          (and page (format "&page=%d" page))))
+
+(cl-defgeneric remoto--page-size (_forge)
+  "Return the most items FORGE lists per page."
+  100)
+
+(cl-defgeneric remoto--paginated-api (forge endpoint &optional max-pages)
+  "Fetch all pages of the paginated ENDPOINT of FORGE via `remoto--api'.
+Request `remoto--page-size' items per page, following pages until a
+short page is returned or MAX-PAGES (default 10) is reached.  The cap
+bounds latency and request count on very large repositories."
+  (let ((query-endpoint (concat endpoint (if (cl-search "?" endpoint) "&" "?")))
+        (per-page (remoto--page-size forge)))
     (cl-loop for page from 1 to (or max-pages 10)
              for page-data = (remoto--api
-                              (format "%sper_page=%d&page=%d"
-                                      query-endpoint per-page page))
+                              forge
+                              (concat query-endpoint
+                                      (remoto--page-params forge per-page page)))
              append page-data
              until (< (length page-data) per-page))))
 
-(defun remoto-reset-auth ()
-  "Clear the auth failure cache, retrying token lookup on next API call.
-Use after adding a GitHub token to auth-source."
-  (interactive)
-  (setq remoto--auth-failed nil
-        remoto--effective-auth nil
-        remoto--authenticated-user nil)
-  (message "Remoto: auth cache cleared; will retry token lookup on next request"))
+(defun remoto-reset-auth (&optional host)
+  "Forget the login state of every API host, retrying the token lookup next.
+With HOST, one of them, interactively with a prefix argument; an empty
+HOST is every host.  Use after adding a token to auth-source."
+  (interactive
+   (list (and current-prefix-arg
+              (completing-read "Remoto: reset the login of host (empty for all): "
+                               (hash-table-keys remoto--logins) nil t))))
+  (when (equal host "")
+    (setq host nil))
+  (if host
+      (remhash host remoto--logins)
+    (clrhash remoto--logins))
+  (message "Remoto: login state cleared for %s; retrying the token lookup \
+on the next request" (or host "every host")))
 
 (defconst remoto--dir-entry
   '((type . "tree") (size . 0) (sha . "") (mode . "040000"))
@@ -870,10 +1015,10 @@ Use after adding a GitHub token to auth-source."
 ;;;; Tree cache
 
 (defvar remoto--tree-cache (make-hash-table :test 'equal)
-  "Cache: \"owner/repo@ref\" -> hash table of path -> entry plist.")
+  "Cache: `remoto--repo-key' -> hash table of path -> entry plist.")
 
 (defvar remoto--default-branch-cache (make-hash-table :test 'equal)
-  "Cache: \"owner/repo\" -> default branch name.")
+  "Cache: `remoto--repo-id' -> default branch name.")
 
 (cl-defstruct (remoto--listing (:constructor remoto--listing-create)
                                (:copier nil))
@@ -905,7 +1050,7 @@ Returns a new `remoto-path' with ref filled in."
     (let* ((forge (remoto-path-forge parsed))
            (owner (remoto-path-owner parsed))
            (repo (remoto-path-repo parsed))
-           (repo-id (format "%s/%s" owner repo))
+           (repo-id (remoto--repo-id forge owner repo))
            (branch (or (gethash repo-id remoto--default-branch-cache)
                        (let ((b (remoto-forge-default-ref forge owner repo)))
                          (puthash repo-id b remoto--default-branch-cache)
@@ -914,12 +1059,37 @@ Returns a new `remoto-path' with ref filled in."
        :forge forge :owner owner :repo repo :ref branch
        :path (remoto-path-path parsed)))))
 
+(defun remoto--repo-empty-p (forge owner repo ref failure)
+  "Non-nil if OWNER/REPO on FORGE has no commit; FAILURE is how REF's tree failed.
+GitHub says so in its 409.  Forgejo answers 404 and marks the repository,
+which is asked only when REF is the default branch, the one ref an empty
+repository names."
+  (or (string-match-p "Git Repository is empty" failure)
+      (and (string-prefix-p remoto--not-found failure)
+           (equal ref (gethash (remoto--repo-id forge owner repo)
+                               remoto--default-branch-cache))
+           (eq t (alist-get 'empty (ignore-errors
+                                     (remoto--api forge (format "repos/%s/%s" owner repo))))))))
+
+(defun remoto--forge-tree (forge owner repo ref)
+  "Return the tree of OWNER/REPO at REF on FORGE, an empty one without a commit."
+  (condition-case err
+      (remoto-forge-tree forge owner repo ref)
+    (user-error
+     (if (not (remoto--repo-empty-p forge owner repo ref (error-message-string err)))
+         (signal (car err) (cdr err))
+       (message "Remoto: %s/%s is empty" owner repo)
+       (let ((table (make-hash-table :test 'equal)))
+         (puthash "" remoto--dir-entry table)
+         (puthash "/" remoto--dir-entry table)
+         table)))))
+
 (defun remoto--ensure-tree (parsed)
   "Ensure tree is cached for PARSED path, return the tree hash table."
   (let* ((resolved (remoto--resolve-ref parsed))
          (key (remoto--repo-key resolved)))
     (or (gethash key remoto--tree-cache)
-        (let* ((tree (remoto-forge-tree
+        (let* ((tree (remoto--forge-tree
                       (remoto-path-forge resolved)
                       (remoto-path-owner resolved)
                       (remoto-path-repo resolved)
@@ -1356,7 +1526,7 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
          (let ((query (remoto--completion-query file directory))
                (candidate (lambda (acct) (remoto--owner-candidate acct prefix))))
            (if (string-empty-p query)
-               (when-let* ((user remoto--authenticated-user))
+               (when-let* ((user (remoto--known-user forge)))
                  (let* ((orgs (remoto-forge-user-orgs forge user))
                         (all (cons (propertize user 'remoto-acct-type "User") orgs)))
                    (mapcar candidate all)))
@@ -1515,8 +1685,8 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
          ;; Canonical path: entries of the tree at the ref
          (let* ((ref (remoto-path-ref parsed))
                 (path (remoto-path-path parsed))
-                (dir-path (if (equal path "/") ""
-                            (string-trim-left path "/")))
+                ;; A directory's files join it with one slash: test/x, not test//x.
+                (dir-path (string-trim path "/+" "/+"))
                 (children (remoto--tree-children parsed))
                 (names (thread-last children
                                     (mapcar (lambda (child)
@@ -1593,12 +1763,12 @@ ignored since remoto paths always qualify."
 (defun remoto--reached-p (filename)
   "Return non-nil when FILENAME's repository was already reached this session.
 A cached default branch or tree is as close as remoto comes to an open
-connection: it means GitHub answered for that repository without a new
-request."
+connection: it means the forge answered for that repository without a
+new request."
   (when-let* ((parsed (remoto--parse-path filename)))
-    (or (gethash (format "%s/%s"
-                         (remoto-path-owner parsed)
-                         (remoto-path-repo parsed))
+    (or (gethash (remoto--repo-id (remoto-path-forge parsed)
+                                  (remoto-path-owner parsed)
+                                  (remoto-path-repo parsed))
                  remoto--default-branch-cache)
         (gethash (remoto--repo-key parsed) remoto--tree-cache))))
 
@@ -1806,6 +1976,13 @@ English month names, as in the fixed date, keep the columns aligned."
            (format-time-string "%b %e %H:%M" time))
           (t (format-time-string "%b %e  %Y" time)))))
 
+(defun remoto--one-line (text)
+  "Return TEXT with each line break, and the blanks around it, as one space.
+A forge's description may span lines; a Dired line or an annotation cannot."
+  (if (string-match-p "[\n\r\f\v]" text)
+      (mapconcat #'identity (split-string text "[\n\r\f\v]+" t "[ \t]+") " ")
+    text))
+
 (defun remoto--format-dired-entry (name plist &optional classify widths)
   "Format a single Dired line for NAME with PLIST attributes.
 CLASSIFY appends the ls -F type indicator.  WIDTHS, the size and name
@@ -1813,7 +1990,7 @@ column widths, line up a listing; a note in PLIST starts 4 columns past
 the names, where `dired-hide-details-mode' hides it with symlink targets."
   (let* ((dir? (equal "tree" (alist-get 'type plist)))
          (indicator (remoto--ls-indicator plist classify))
-         (note (alist-get 'note plist)))
+         (note (and (alist-get 'note plist) (remoto--one-line (alist-get 'note plist)))))
     (concat (or (alist-get 'perms plist)
                 (remoto--mode-to-string (alist-get 'mode plist) dir?))
             "  1 github github "
@@ -1960,11 +2137,12 @@ and without it FILENAME gets its one line, as with ls-lisp.  /github: and
   (when-let* ((parsed (remoto--parse-path filename))
               (resolved (remoto--resolve-ref parsed))
               (path (remoto--relative-path (remoto-path-path resolved)))
-              (content (remoto--fetch-file-content
+              (content (remoto-forge-content
+                        (remoto-path-forge resolved)
                         (remoto-path-owner resolved)
                         (remoto-path-repo resolved)
-                        path
-                        (remoto-path-ref resolved))))
+                        (remoto-path-ref resolved)
+                        path)))
     (let* ((ext (file-name-extension path t))
            (temp (make-temp-file "remoto-" nil ext))
            (coding-system-for-write 'no-conversion))
@@ -2002,7 +2180,7 @@ or /github:OWNER/REPO@/REF."
     directory))
 
 (defun remoto--handle-file-name-case-insensitive-p (_filename)
-  "GitHub repos are case-sensitive."
+  "Forge repositories are case-sensitive."
   nil)
 
 (defun remoto--handle-vc-registered (_filename)
@@ -2113,6 +2291,7 @@ a Dired of branches and tags, forget the repository's branches and tags."
      (compare . "https://github.com/%o/%r/compare/%R")
      (new-pr  . "https://github.com/%o/%r/pull/new/%R")
      (issue   . "https://github.com/%o/%r/issues/%N")
+     (pr      . "https://github.com/%o/%r/pull/%N")
      (pr-diff . "https://github.com/%o/%r/pull/%N/files")
      (owner       . "https://github.com/%o")
      (owner-repos . "https://github.com/%o?tab=repositories")
@@ -2130,6 +2309,7 @@ line-fragment builders `line' and `region'.  Templates are expanded with
   %o  repository owner
   %r  repository name
   %R  git ref (branch, tag, or commit SHA)
+  %k  the kind of %R where the forge spells it out: branch, tag or commit
   %p  path relative to the repository root
   %L  line fragment built from the `line'/`region' templates
   %s  start line (in the `line' and `region' templates)
@@ -2137,6 +2317,11 @@ line-fragment builders `line' and `region'.  Templates are expanded with
 
 A forge registered with `remoto-register-forge' needs an entry here
 under its name.")
+
+(cl-defgeneric remoto--ref-kind (_forge _owner _repo _ref)
+  "Return \"branch\", \"tag\" or \"commit\" for REF of OWNER/REPO on FORGE.
+Only a forge whose URL templates use %k answers; nil by default."
+  nil)
 
 (defun remoto--forge-type (path)
   "Return the forge symbol for remoto PATH, or nil when undetermined.
@@ -2169,10 +2354,13 @@ one."
                 (line-start
                  (format-spec (alist-get 'line templates)
                               `((?s . ,line-start))))
-                (t ""))))
+                (t "")))
+         (kind (and (string-search "%k" template)
+                    (remoto--ref-kind (remoto--forge-named forge) owner repo ref))))
     (format-spec template `((?o . ,owner)
                             (?r . ,repo)
                             (?R . ,(or ref "HEAD"))
+                            (?k . ,(or kind "branch"))
                             (?p . ,(remoto--url-encode-path path))
                             (?L . ,line)))))
 
@@ -2426,18 +2614,13 @@ queries that returned zero results."
   (puthash key (cons (float-time) results) remoto--search-cache)
   results)
 
-(defun remoto--api-async (endpoint callback &optional errback)
-  "Call GitHub REST API ENDPOINT asynchronously via ghub.
+(defun remoto--api-async (forge endpoint callback &optional errback)
+  "Call ENDPOINT of the REST API of FORGE asynchronously via ghub.
 CALLBACK receives the parsed JSON response; on a failure ERRBACK, when
 non-nil, is called with no arguments.  The `:host' is explicit, or ghub
 may resolve the HTML site.  The call counts toward the fetch indicator."
   (let* ((resource (concat "/" endpoint))
-         (auth (cond (remoto--auth-failed 'none)
-                     (remoto--effective-auth remoto--effective-auth)
-                     ((stringp remoto-github-auth) remoto-github-auth)
-                     (t (when-let* ((token (remoto--find-github-token)))
-                          (setq remoto--effective-auth token)
-                          token)))))
+         (auth (remoto--auth forge)))
     (condition-case nil
         (let ((inhibit-message t))
           (remoto--inflight-inc)
@@ -2448,7 +2631,8 @@ may resolve the HTML site.  The call counts toward the fetch indicator."
           (ghub-get resource nil
                     :auth auth
                     :reader #'remoto--json-reader
-                    :host "api.github.com"
+                    :host (remoto--api-host forge)
+                    :forge (remoto--ghub-forge forge)
                     :callback (lambda (value &rest _)
                                 (remoto--inflight-dec)
                                 (funcall callback value))
@@ -2511,6 +2695,29 @@ cached candidates appear without the user editing the input."
        (with-selected-window win
          (remoto--invalidate-completion-ui))))))
 
+(defvar remoto--user-timer nil
+  "Idle timer of the lookup of the token's account that completion waits for.")
+
+(defun remoto--known-user (forge)
+  "Return the login of the account of the token on FORGE, or nil until known.
+An unknown one is looked up after `remoto-debounce-delay' of idle time,
+as a search waits, and the completions refresh when it answers.  The
+lookup asks nothing without a token, and settles the login either way."
+  (let ((login (remoto--forge-login forge)))
+    (or (remoto--login-user login)
+        (unless (remoto--login-failed login)
+          (when (timerp remoto--user-timer)
+            (cancel-timer remoto--user-timer))
+          (setq remoto--user-timer
+                (run-with-idle-timer
+                 remoto-debounce-delay nil
+                 (lambda ()
+                   (setq remoto--user-timer nil)
+                   (when (stringp (while-no-input
+                                    (remoto--get-authenticated-user forge)))
+                     (remoto--refresh-minibuffer-completions)))))
+          nil))))
+
 ;;;; Listings above the repository level
 
 (defcustom remoto-listing-cap 1000
@@ -2519,9 +2726,6 @@ The listing keeps the most recently pushed ones.  Its first page arrives
 before Dired shows it; the later ones load in the background."
   :type 'integer
   :group 'remoto)
-
-(defconst remoto--listing-page-size 100
-  "Repositories per listing request, the most the API sends in one page.")
 
 (defun remoto--listing-dir (filename)
   "Return the listing directory that FILENAME names, or nil.
@@ -2632,7 +2836,7 @@ after %d; M-x remoto-refresh retries" owner count))
 ;;;; Matches of a name that names nothing
 
 (defun remoto--if-found (fn &rest args)
-  "Call FN with ARGS, or return nil when GitHub answers 404 to it.
+  "Call FN with ARGS, or return nil when the forge answers 404 to it.
 Any other failure signals."
   (condition-case err
       (apply fn args)
@@ -2799,17 +3003,18 @@ comes back as `remoto--maybe-rewrite' makes it."
       (let ((name (remoto--maybe-rewrite filename)))
         (or (remoto--file-matches name) name))))
 
-(defun remoto--get-authenticated-user ()
-  "Return the GitHub login of the authenticated user, or nil.
+(defun remoto--get-authenticated-user (forge)
+  "Return the login of the account of the token on FORGE, or nil.
 Caches the result for the session.  Returns nil when auth has
 failed or the API call errors."
-  (or remoto--authenticated-user
-      (unless remoto--auth-failed
-        (condition-case nil
-            (when-let* ((data (remoto--api "user"))
-                        (login (alist-get 'login data)))
-              (setq remoto--authenticated-user login))
-          (user-error nil)))))
+  (let ((login (remoto--forge-login forge)))
+    (or (remoto--login-user login)
+        (unless (remoto--login-failed login)
+          (condition-case nil
+              (when-let* ((data (remoto--api forge "user"))
+                          (user (alist-get 'login data)))
+                (setf (remoto--login-user login) user))
+            (user-error nil))))))
 
 ;;;; Rewriting what find-file and dired receive
 
@@ -2820,12 +3025,14 @@ without a slash after the ref; its ref is nil for the default branch."
   (pcase (remoto-path-level parsed)
     ('owner
      (when-let* ((repo (remoto--bare-name parsed)))
-       (remoto-path-create :owner (remoto-path-owner parsed) :repo repo
+       (remoto-path-create :forge (remoto-path-forge parsed)
+                           :owner (remoto-path-owner parsed) :repo repo
                            :ref nil :path "/")))
     ('refs
      (let ((ref (string-remove-suffix "/" (remoto-path-query parsed))))
        (unless (string-empty-p ref)
-         (remoto-path-create :owner (remoto-path-owner parsed)
+         (remoto-path-create :forge (remoto-path-forge parsed)
+                             :owner (remoto-path-owner parsed)
                              :repo (remoto-path-repo parsed)
                              :ref ref :path "/"))))))
 
@@ -2848,7 +3055,7 @@ components resolve first: a short form reads /github:OWNER/.. as a repo."
       (let* ((owner (remoto-path-owner parsed))
              (repo (remoto-path-repo parsed))
              (subpath (substring (remoto-path-path parsed) 1))
-             (repo-id (format "%s/%s" owner repo))
+             (repo-id (remoto--repo-id (remoto-path-forge parsed) owner repo))
              (branch (or (gethash repo-id remoto--default-branch-cache)
                          (let ((b (remoto-forge-default-ref
                                    (remoto-path-forge parsed) owner repo)))
@@ -2908,19 +3115,39 @@ nothing opens a Dired of the names that match it."
 
 ;;;; Eager auth warm-up
 
-(defun remoto--find-github-token ()
-  "Search auth-source for a GitHub API token.
-Different ghub versions and user setups store tokens under different
-hosts (api.github.com vs github.com) and package suffixes (^forge,
-^ghub).  Try all known combinations to find a working token."
-  (when-let* ((username (condition-case nil
-                            (ghub--username "github.com" nil)
-                          (error nil))))
-    (let ((hosts '("api.github.com" "github.com"))
-          (packages '("forge" "ghub" nil)))
+(defun remoto--git-user-key (forge)
+  "Return the git config key, in ghub's spelling, of the account name for FORGE.
+KIND.user serves only the domain of ghub's default host for the kind of
+forge, which is api.github.com or github.com by ghub's version; any
+other host needs KIND.HOST.user."
+  (let ((kind (or (remoto--ghub-forge forge) 'github))
+        (host (remoto-forge-host forge)))
+    (if (equal (ghub--host-domain host)
+               (ghub--host-domain (alist-get kind ghub-default-host-alist)))
+        (format "%s.user" kind)
+      (format "%s.%s.user" kind host))))
+
+(defun remoto--find-token (forge)
+  "Search auth-source for a token of the API host of FORGE.
+Follow ghub's conventions for the kind of forge: the user name from
+git config, under the API host or the web host, as USER^forge,
+USER^ghub or USER.  Without a user name in git config no token can be
+found, by ghub either, so the login goes unauthenticated for good."
+  (let* ((login (remoto--forge-login forge))
+         (api-host (remoto--api-host forge))
+         (web-host (remoto-forge-host forge))
+         (username (condition-case nil
+                       (ghub--username web-host (remoto--ghub-forge forge))
+                     (error nil))))
+    (if (null username)
+        (progn
+          (setf (remoto--login-failed login) t)
+          (message "Remoto: no %s in git config, reading %s anonymously"
+                   (remoto--git-user-key forge) web-host)
+          nil)
       (catch 'found
-        (dolist (host hosts)
-          (dolist (pkg packages)
+        (dolist (host (delete-dups (list api-host web-host)))
+          (dolist (pkg '("forge" "ghub" nil))
             (let* ((user (if pkg (format "%s^%s" username pkg) username))
                    (results (condition-case err
                                 (auth-source-search :host host :user user :max 1)
@@ -2931,7 +3158,7 @@ hosts (api.github.com vs github.com) and package suffixes (^forge,
                               ;; it once, go unauthenticated, and leave the
                               ;; retry to `remoto-reset-auth'.
                               (error
-                               (setq remoto--auth-failed t)
+                               (setf (remoto--login-failed login) t)
                                (message "Remoto: auth-source lookup failed (%s); \
 using unauthenticated access until M-x remoto-reset-auth"
                                         (error-message-string err))
@@ -2946,33 +3173,35 @@ using unauthenticated access until M-x remoto-reset-auth"
 Runs on an idle timer so GPG decryption happens before the user
 types anything.  Bypasses ghub's own token resolution (which may
 look up the wrong auth-source host) by searching auth-source
-directly and passing the token string to ghub."
-  (unless (or remoto--authenticated-user remoto--auth-failed)
-    (if-let* ((token (or (and (stringp remoto-github-auth) remoto-github-auth)
-                         (remoto--find-github-token))))
-        (condition-case err
-            (when-let* ((data (let ((inhibit-message t))
-                                (ghub-get "/user" nil
-                                          :auth token
-                                          :host "api.github.com"
-                                          :reader #'remoto--json-reader)))
-                        (login (alist-get 'login data)))
-              (setq remoto--authenticated-user login
-                    remoto--effective-auth token)
-              (message "Remoto: authenticated as %s" login))
-          (error
-           (setq remoto--auth-failed t)
-           (message "Remoto: token found but API call failed (%s); \
+directly and passing the token string to ghub.  GitHub only: the
+other forges look their token up on their first request."
+  (let ((login (remoto--forge-login remoto--github)))
+    (unless (or (remoto--login-user login) (remoto--login-failed login))
+      (if-let* ((token (or (remoto--literal-token remoto--github)
+                           (remoto--find-token remoto--github))))
+          (condition-case err
+              (when-let* ((data (let ((inhibit-message t))
+                                  (ghub-get "/user" nil
+                                            :auth token
+                                            :host (remoto--api-host remoto--github)
+                                            :reader #'remoto--json-reader)))
+                          (user (alist-get 'login data)))
+                (setf (remoto--login-user login) user
+                      (remoto--login-token login) token)
+                (message "Remoto: authenticated as %s" user))
+            (error
+             (setf (remoto--login-failed login) t)
+             (message "Remoto: token found but API call failed (%s); \
 using unauthenticated access"
-                    (error-message-string err))))
-      ;; No token found yet - don't set auth-failed so remoto--api
-      ;; can still try ghub's own auth-source resolution on demand.
-      ;; The warm-up is opportunistic; failing here should not lock
-      ;; out the session permanently.  A backend failure inside the
-      ;; lookup has already set auth-failed and said so.
-      (unless remoto--auth-failed
-        (message "Remoto: no token found during warm-up; \
-will try ghub auth on first API call")))))
+                      (error-message-string err))))
+        ;; No token found yet - don't mark the login failed, so remoto--api
+        ;; can still try ghub's own auth-source resolution on demand.
+        ;; The warm-up is opportunistic; failing here should not lock
+        ;; out the session permanently.  A failure inside the lookup has
+        ;; already marked the login and said so.
+        (unless (remoto--login-failed login)
+          (message "Remoto: no token found during warm-up; \
+will try ghub auth on first API call"))))))
 
 (defvar remoto--warm-auth-timer nil
   "Pending idle timer for `remoto--warm-auth', or nil.
@@ -3012,8 +3241,8 @@ binding the variable `remoto-command-map' to a prefix key.")
 
 Offers forge-agnostic commands to copy or open the web URL of the file
 or directory shown in the current buffer.  The commands work the same in
-file buffers and in Dired, and adapt to the forge behind the path (only
-GitHub today, but designed for more).
+file buffers and in Dired, and adapt to the forge behind the path:
+GitHub, Codeberg, or a server of `remoto-forgejo-instances'.
 
 While `global-remoto-mode' is on, `remoto-mode' is enabled automatically
 when visiting a remoto path.  Its keymap is empty by default; the
@@ -3063,7 +3292,7 @@ Uses display property for alignment (works in any completion UI)."
     (mapcar (lambda (x)
               (let* ((c (nth 0 x))
                      (prefix (nth 1 x))
-                     (suffix (nth 2 x)))
+                     (suffix (remoto--one-line (nth 2 x))))
                 (list c prefix
                       (if (string-empty-p suffix) ""
                         (concat (propertize " " 'display
@@ -3251,18 +3480,20 @@ Each step is idempotent, so a second call while on is a no-op."
 
 ;;;###autoload
 (define-minor-mode global-remoto-mode
-  "Toggle remoto's virtual filesystem for GitHub repositories.
+  "Toggle remoto's virtual filesystem for the repositories of forges.
 
-When on, `/github:OWNER/REPO...' and `/gh:...' paths work in `find-file',
-`dired', and every other file operation, GitHub URLs typed at those
-prompts are rewritten to remoto paths, `find-file' completion inside a
-remoto path shows remoto's annotations, `remoto-mode' turns on in remoto
-buffers, and a GitHub token is looked up once Emacs is idle.  When off,
-all of that is removed again.
+When on, the paths of every forge, such as `/github:OWNER/REPO...',
+`/gh:...' and `/cb:...', work in `find-file', `dired', and every other
+file operation, forge URLs typed at those prompts are rewritten to
+remoto paths, `find-file' completion inside a remoto path shows remoto's
+annotations, `remoto-mode' turns on in remoto buffers, and a GitHub
+token is looked up once Emacs is idle.  When off, all of that is
+removed again.
 
 Loading remoto does not turn this mode on.  Enable it in your init file,
 or let the first use do it: `remoto-browse', the Embark open actions,
-and a `/github:' or `/gh:' path at any file prompt all turn it on."
+and a path of a forge that comes with remoto at any file prompt all turn
+it on."
   :global t
   :group 'remoto
   (if global-remoto-mode
@@ -3281,10 +3512,11 @@ file-name handler for as long as they live, so the mode has to stay on."
 (defun remoto-autoload-file-name-handler (operation &rest args)
   "Turn on `global-remoto-mode' for the first remoto path, then run OPERATION.
 ARGS are the arguments of OPERATION.  The package autoloads register
-this handler in `file-name-handler-alist', so a `/github:' or `/gh:'
-path typed at a file prompt works before remoto is loaded, the way a
-remote path loads TRAMP.  Calling it loads remoto; it then leaves the
-alist for good, and `remoto--install' puts the real handler in front.
+this handler in `file-name-handler-alist', so a path of a forge that
+comes with remoto, such as `/github:' or `/cb:', typed at a file prompt
+works before remoto is loaded, the way a remote path loads TRAMP.
+Calling it loads remoto; it then leaves the alist for good, and
+`remoto--install' puts the real handler in front.
 
 The call that brings remoto in runs without the advice `remoto--install'
 adds, because the advice arrives while that call is already under way.
@@ -3298,8 +3530,6 @@ typed into, so it is left alone."
   (when (and (eq operation 'expand-file-name) (stringp (car args)))
     (setcar args (remoto--maybe-rewrite (car args))))
   (apply operation args))
-
-;;;###autoload (add-to-list 'file-name-handler-alist '("\\`/\\(?:github\\|gh\\):" . remoto-autoload-file-name-handler))
 
 ;;;; Issue display (see remoto-topic.el for full implementation)
 
@@ -3331,6 +3561,7 @@ remoto was loaded some other way and the mode never turned on."
   (clrhash remoto--listing-cache)
   (clrhash remoto--entry-cache)
   (clrhash remoto--pending-requests)
+  (clrhash remoto--logins)
   (dolist (forge (seq-uniq (mapcar #'cdr remoto--forges)))
     (remoto-forge-forget-all forge))
   nil)
@@ -3338,7 +3569,12 @@ remoto was loaded some other way and the mode never turned on."
 (provide 'remoto)
 
 ;; The forges that come with remoto load after the core they extend, as
-;; magit's own libraries do; each registers itself when loaded.
-(require 'remoto-github)
+;; magit's own libraries do; each registers itself when loaded.  They load
+;; from this file's directory: an upgrade by package.el reloads this file
+;; before that directory is on `load-path'.
+(require 'remoto-github
+         (expand-file-name "remoto-github" (file-name-directory (macroexp-file-name))))
+(require 'remoto-forgejo
+         (expand-file-name "remoto-forgejo" (file-name-directory (macroexp-file-name))))
 
 ;;; remoto.el ends here

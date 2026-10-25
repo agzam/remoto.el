@@ -155,6 +155,8 @@ Path lookup is normalized via `remoto--tree-lookup-key`, which strips leading/tr
 
 Cache invalidation: manual only. A command `remoto-refresh` clears the cache for a given repo@ref, forcing re-fetch on next access.
 
+A repository without a commit has no tree: GitHub answers 409 "Git Repository is empty.", Forgejo 404. `remoto--forge-tree` gives it a tree of the root alone and says the repository is empty. After a 404 it asks the repository for `empty`, and only when the ref is the cached default branch, the one ref an empty repository names, so a missing ref costs no extra request.
+
 ### Large repos
 
 The Trees API truncates at 100,000 entries / 7 MB response. When `truncated` is true in the response, fall back to per-directory fetching via the Contents API:
@@ -405,7 +407,7 @@ For PRs: fetches full PR data (`repos/OWNER/REPO/pulls/NUM`) for diff stats, bra
 
 For both: fetches comments (`repos/OWNER/REPO/issues/NUM/comments`).
 
-Buffer name: `*remoto: owner/repo#NUM*`. Mode: `remoto-topic-mode` (derived from `special-mode`). Keybindings: `b` (browse URL), `g` (refresh). Carriage returns stripped from body/comments.
+Buffer name: `*remoto: /PREFIX:owner/repo#NUM*`, the canonical prefix of the forge (`/github:`, `/codeberg:`). Mode: `remoto-topic-mode` (derived from `special-mode`). Keybindings: `b` (browse URL), `g` (refresh). Carriage returns stripped from body/comments.
 
 Faces: `remoto-topic-title`, `remoto-topic-state-open`, `remoto-topic-state-closed`, `remoto-topic-state-merged`, `remoto-topic-meta`, `remoto-topic-comment-header`, `remoto-topic-additions`, `remoto-topic-deletions`.
 
@@ -505,74 +507,79 @@ A remoto file buffer visits a real file name, so the major mode hooks, `after-ch
 
 ## Multi-forge Direction
 
-Switching from `gh` CLI to `ghub` opens up support for other forges. ghub already handles auth and transport for GitHub, GitLab, Gitea/Forgejo, Gogs, and Bitbucket via its `:forge` and `:host` keyword arguments.
+The core speaks to a forge through the generic functions of the forge contract (`remoto-forge-*`), dispatching on a `cl-defstruct` type per forge; a forge registers its path prefixes with `remoto-register-forge`. Two forges ship: GitHub in `remoto-github.el` and Forgejo in `remoto-forgejo.el`, which registers Codeberg under `/codeberg:` and `/cb:`.
 
-### Forge API compatibility
+### Forgejo: GitHub's API against another host
 
-Gitea (and by extension Codeberg, Forgejo) cloned GitHub's REST API almost exactly:
+Forgejo (and Gitea, and Codeberg, which runs Forgejo) cloned GitHub's REST API, so `remoto-forgejo` includes `remoto-github` and inherits its methods. Every GitHub function takes the forge it speaks for, and the transport asks the forge for its API host (`remoto--api-host`, `codeberg.org/api/v1`) and its kind for ghub (`remoto--ghub-forge`, `forgejo`). Forgejo overrides only what differs:
 
-| Operation | GitHub | Gitea/Codeberg |
+| Difference | GitHub | Forgejo |
 |---|---|---|
-| Repo info | `GET /repos/:owner/:repo` | `GET /repos/:owner/:repo` |
-| Tree | `GET /repos/:owner/:repo/git/trees/:sha?recursive=1` | `GET /repos/:owner/:repo/git/trees/:sha?recursive=1` |
-| Contents | `GET /repos/:owner/:repo/contents/:path?ref=REF` | `GET /repos/:owner/:repo/contents/:path?ref=REF` |
-| Blob | `GET /repos/:owner/:repo/git/blobs/:sha` | `GET /repos/:owner/:repo/git/blobs/:sha` |
-| Search | `GET /search/repositories?q=QUERY` | `GET /repos/search?q=QUERY` |
+| Page size and its name | `per_page=100&page=N`, 100 max, one page after another | `limit=50&page=N`, 50 max; the pages after the first are asked for at once, as many as its `X-Total-Count` says |
+| Recursive tree | one answer, `truncated` past 100k entries | 1000 entries a page, `total_count`; the pages after the first are asked for at once |
+| Tree of an empty repository | 409 `Git Repository is empty.` | 404; `repos/O/R` says `empty: true` |
+| The token's own repositories | `user/repos?affiliation=owner` | `user/repos` ignores `affiliation` and adds its organizations' repositories; a listing keeps those whose owner is OWNER |
+| Account search | `search/users?q=` -> `items` | `users/search?q=` -> `data` |
+| Repository search | `search/repositories?q=Q in:name user:O` | `repos/search?q=Q&uid=ID&exclusive=true`, the owner's id from the account search that found O, or from `users/O` once |
+| Topic search | `search/issues?q=Q repo:O/R` | `repos/O/R/issues?q=Q&state=all&type=all` |
+| Refs under a prefix | `git/matching-refs/KIND/PREFIX` | `git/refs/KIND/PREFIX` |
+| A ref's commit | `commits/REF` | `git/commits/REF` |
+| Review states | `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED` | `APPROVED`, `REQUEST_CHANGES`, `COMMENT`, `REQUEST_REVIEW`; spelled GitHub's way, requests dropped |
+| An organization's name | `login` | `username` |
+| Web URLs | `blob/REF/PATH`, `tree/REF/PATH` | `src/branch/REF/PATH`, `src/tag/REF/PATH`, `src/commit/SHA/PATH`; `%k` in the templates is the kind, from the cached refs |
 
-Response shapes are nearly identical. Gitea/Codeberg support could be added with minimal per-forge logic - mostly just different `:host` / `:forge` kwargs to ghub and a different search endpoint.
+Other Forgejo and Gitea servers come from `remoto-forgejo-instances`, `(PREFIX HOST)` pairs; each registers a `remoto-forgejo` whose API is at `HOST/api/v1`, with URL templates for `HOST` under the prefix's name. Setting the option keeps the servers that stay as they are. A server that goes is unregistered, and its URL templates and its login go too, unless another forge shares its API host. `remoto-unregister-forge` kills the buffers of the forge first, file, Dired and topic buffers alike: a buffer whose name no handler serves makes `uniquify` fail to kill any buffer of the same name.
 
-GitLab's API is structurally different:
+### Login per host
 
-| Operation | GitLab |
-|---|---|
-| Repo info | `GET /projects/:id` (uses URL-encoded `owner/repo` as `:id`) |
-| Tree | `GET /projects/:id/repository/tree?path=PATH&ref=REF&recursive=true` |
-| File | `GET /projects/:id/repository/files/:path?ref=REF` (base64 in `.content`) |
-| Blob | `GET /projects/:id/repository/blobs/:sha` |
-| Search | `GET /projects?search=QUERY` |
+The login state (`remoto--login`: failed, token, user) is kept per API host in `remoto--logins`, so a GitHub token and a Codeberg token live apart and a failure on one host leaves the other alone. The token lookup follows ghub's conventions for the kind of forge: the user name from git config (`github.user`, `forgejo.user`), the secret in auth-source under the API host or the web host as `USER^forge`, `USER^ghub` or `USER`. A forge with no user name in git config is read anonymously, said once. `remoto-reset-auth` forgets every host, or one with a prefix argument. A request runs under `remoto-auth-timeout` only while ghub looks its token up itself; one with the token in hand waits for its answer. The token's account heads the root listing and the completion at a forge's root: GitHub's idle warm-up learns it once the mode is on, and the root completion of any forge learns it after `remoto-debounce-delay` of idle time and refreshes, asking `/user` only with a token.
 
-GitLab requires a forge-specific API adapter but the overall structure (fetch tree, cache it, fetch files on demand) maps 1:1.
+### Caches per forge
 
-### Path syntax for multi-forge
+Every cache key starts with the canonical prefix of the forge (`remoto--repo-id`, `remoto--repo-key`): the tree cache, the default branches, the refs, issues, directory contents and searches. An `OWNER/REPO` that exists on two forges is two repositories.
 
-The path prefix determines the forge:
+### Path syntax
 
 ```
-/github:owner/repo@ref:/path      (existing)
-/gitlab:owner/repo@ref:/path      (future)
-/codeberg:owner/repo@ref:/path    (future)
+/github:owner/repo@ref:/path
+/codeberg:owner/repo@ref:/path
+/PREFIX:owner/repo@ref:/path       (an instance from remoto-forgejo-instances)
 ```
 
-Each prefix would have its own entry in `file-name-handler-alist`, dispatching to the same handler with forge context derived from the prefix. The handler, tree cache, and content cache are forge-agnostic - only the API adapter layer differs.
+Each forge file carries an autoload cookie that registers `remoto-autoload-file-name-handler` for its prefixes, so the first path of a session loads remoto; the mode then installs the real handler under `remoto--handler-regexp`, every registered prefix. An instance's prefix exists once remoto is loaded.
 
-### Implementation approach
+### Next
 
-1. Extract a forge-agnostic protocol (API adapter) with methods: `fetch-repo-info`, `fetch-tree`, `fetch-contents`, `fetch-blob`, `search-repos`.
-2. Implement the GitHub adapter (current code, essentially unchanged).
-3. Add a Gitea adapter (near-copy of GitHub, different `:forge`/`:host` in ghub calls, different search endpoint).
-4. Add a GitLab adapter (different endpoint construction and response parsing).
-5. Register multiple handler-alist entries, one per forge prefix.
+GitLab (`/gitlab:`) and gists (`/gist:`) follow, after the contract is reshaped around the sources they need (nested groups, flat files, no refs).
 
 ## Dependencies
 
 - Emacs 29.1+
-- `ghub` 4.0+ (token configured in auth-source; see ghub docs)
+- `ghub` 5.3+ (token configured in auth-source; see ghub docs; Forgejo since 5.0, `FORGE.user` for the domain of the web host since 5.3)
 - No optional dependencies - completion works with any frontend (vertico, ivy, helm, vanilla Emacs)
 
 ## File Structure
 
 ```
 remoto.el/
-  remoto.el          ;; core: file-name-handler, completion, API, caching
+  remoto.el          ;; core: file-name-handler, completion, transport, caching, the forge contract
+  remoto-github.el   ;; GitHub: the REST endpoints behind the contract, URL parsers, remoto-browse
+  remoto-forgejo.el  ;; Forgejo and Gitea on GitHub's shape; registers Codeberg, remoto-forgejo-instances
   remoto-topic.el    ;; issue/PR display buffers
   remoto-embark.el   ;; optional Embark integration (loaded only when embark is present)
   SPEC.md            ;; this spec
   README.org         ;; user-facing documentation
-  CHANGELOG.org      ;; release history
+  changelog.org      ;; release history
   Makefile           ;; test runner
   LICENSE
   test/
-    remoto-tests.el             ;; buttercup tests (embark-free path)
+    remoto-tests.el             ;; buttercup tests (embark-free path), the grammar and conformance suites
     remoto-embark-tests.el      ;; Embark integration tests (real embark; make test-embark)
     remoto-integration-tests.el ;; end-to-end integration tests
+    remoto-e2e.el               ;; typed cases under six completion setups, replayed from recorded answers
+    remoto-e2e-cases.el         ;; the cases, shared by the replay suite and the keystroke runner
+    remoto-keys.el              ;; the keystroke runner: emacs -nw -q under tmux, or the running Emacs
+    remoto-keys-init.el         ;; the init of each profile the runner starts
+    remoto-keys-tests.el        ;; buttercup tests of the runner (make test)
+    record-codeberg-fixtures.el ;; records test/fixtures/codeberg.jsonl for the Codeberg conformance kit
 ```

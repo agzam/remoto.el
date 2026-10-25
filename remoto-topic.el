@@ -98,11 +98,11 @@
   "Open the current issue/PR in a web browser."
   (interactive)
   (when-let* ((number remoto-topic--number)
-              (path remoto-topic--repo-path)
-              ((string-match (rx "/github:" (group (+ nonl))) path))
-              (slug (match-string 1 path))
-              (type (if remoto-topic--is-pr "pull" "issues")))
-    (browse-url (format "https://github.com/%s/%s/%s" slug type number))))
+              (parsed (remoto-topic--parse-repo-path remoto-topic--repo-path)))
+    (pcase-let ((`(,forge ,owner ,repo) parsed))
+      (browse-url (remoto--forge-issue-url (remoto-forge-name forge) owner repo
+                                           number
+                                           (if remoto-topic--is-pr 'pr 'issue))))))
 
 (defun remoto-topic-refresh ()
   "Re-fetch and redisplay the current issue/PR."
@@ -271,7 +271,8 @@ Detects whether NUMBER is a PR and renders accordingly."
                         (remoto-forge-reviews forge owner repo number)))
              (comments (remoto-forge-topic-comments forge owner repo number))
              (display-data (or pr-data issue))
-             (buf-name (format "*remoto: %s/%s#%s*" owner repo number))
+             (buf-name (format "*remoto: %s%s/%s#%s*"
+                               (remoto--prefix forge) owner repo number))
              (buf (get-buffer-create buf-name)))
         (with-current-buffer buf
           (let ((inhibit-read-only t))

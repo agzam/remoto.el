@@ -15,9 +15,11 @@ EMACS_SANDBOX = emacs -Q --init-directory $(SANDBOX) \
 	--eval "(package-initialize)"
 
 E2E_PROFILES = vanilla fido vertico orderless evil embark
+KEYS_PROFILES = $(E2E_PROFILES) ido evil-vertico full
 E2E = $(EMACS_BATCH) --directory . -l test/remoto-e2e.el
+KEYS = $(EMACS_BATCH) --directory . -l test/remoto-keys.el -f remoto-keys-main
 
-.PHONY: help test test-embark test-integration test-all deps lint check-autoloads check-compile compile clean sandbox test-e2e test-e2e-update test-e2e-record
+.PHONY: help test test-embark test-integration test-all deps lint check-autoloads check-compile compile clean sandbox test-e2e test-e2e-update test-e2e-record test-fixtures-codeberg test-keys test-keys-scenarios test-keys-live
 
 help:
 	@echo "Available commands:"
@@ -28,6 +30,11 @@ help:
 	@echo "  make test-e2e-PROFILE  The same in one profile: $(E2E_PROFILES)"
 	@echo "  make test-e2e-update   Rewrite test/e2e/expected from a run (-j6 too)"
 	@echo "  make test-e2e-record   Record the GitHub answers test/e2e/fixtures.jsonl lacks (needs REMOTO_E2E_TOKEN and network)"
+	@echo "  make test-keys         Type the E2E cases into emacs -nw -q under tmux, against GitHub (needs tmux and network)"
+	@echo "  make test-keys-PROFILE The same in one profile: $(KEYS_PROFILES); REMOTO_KEYS_MAIN=1 adds origin/main"
+	@echo "  make test-keys-scenarios  Auth setups, gitea.com and a mock Forgejo with faults, under tmux (needs network)"
+	@echo "  make test-keys-live    Type the C-x C-f and C-x d cases into the running Emacs, through its server"
+	@echo "  make test-fixtures-codeberg  Record test/fixtures/codeberg.jsonl from codeberg.org (needs network)"
 	@echo "  make test-integration  Run integration tests (needs network)"
 	@echo "  make test-all          Run all tests"
 	@echo "  make lint              package-lint and checkdoc the package files"
@@ -47,6 +54,8 @@ $(ELPA_DIR):
 	--eval "(package-install 'vertico)" \
 	--eval "(package-install 'marginalia)" \
 	--eval "(package-install 'evil)" \
+	--eval "(package-install 'consult)" \
+	--eval "(package-install 'embark-consult)" \
 	--eval "(package-install 'package-lint)"
 
 deps: $(ELPA_DIR)
@@ -65,6 +74,7 @@ test: $(ELPA_DIR)
 	$(EMACS_BATCH) --directory . \
 	--eval "(setq buttercup-stack-frame-style 'omit)" \
 	-l test/remoto-tests.el \
+	-l test/remoto-keys-tests.el \
 	--funcall buttercup-run
 
 test-embark: $(ELPA_DIR)
@@ -89,6 +99,10 @@ test-e2e-%: $(ELPA_DIR)
 test-e2e-update:
 	$(MAKE) test-e2e REMOTO_E2E_UPDATE=1
 
+# The answers the Codeberg conformance kit replays, asked of codeberg.org anonymously.
+test-fixtures-codeberg: $(ELPA_DIR)
+	$(EMACS_BATCH) -l test/record-codeberg-fixtures.el -f record-codeberg-fixtures
+
 # One profile at a time: each run adds to the fixtures the next one reads.
 test-e2e-record: $(ELPA_DIR)
 	@test -n "$$REMOTO_E2E_TOKEN" || { echo "REMOTO_E2E_TOKEN must hold a GitHub token"; exit 1; }
@@ -96,14 +110,29 @@ test-e2e-record: $(ELPA_DIR)
 	  REMOTO_E2E_PROFILE=$$p REMOTO_E2E_UPDATE=1 $(E2E) || exit 1; \
 	done
 
+# Each profile in .keys/PROFILE, so -j runs them side by side; they share
+# GitHub's rate limits.
+test-keys: $(addprefix test-keys-,$(KEYS_PROFILES))
+
+test-keys-%: $(ELPA_DIR)
+	REMOTO_KEYS_PROFILES=$* REMOTO_KEYS_DIR=.keys/$* $(KEYS)
+
+# Auth setups and other servers, a profile each; REMOTO_KEYS_SCENARIOS picks some.
+test-keys-scenarios: $(ELPA_DIR)
+	REMOTO_KEYS_DIR=.keys/scenarios $(EMACS_BATCH) --directory . -l test/remoto-keys.el -f remoto-keys-scenarios-main
+
+# The running Emacs, through its server: keep off the keyboard while it types.
+test-keys-live: $(ELPA_DIR)
+	$(EMACS_BATCH) --directory . -l test/remoto-keys.el -f remoto-keys-live-main
+
 lint: $(ELPA_DIR)
 	$(EMACS_BATCH) --directory . \
 	--eval "(require 'package-lint)" \
-	-f package-lint-batch-and-exit remoto.el remoto-github.el remoto-embark.el remoto-topic.el
+	-f package-lint-batch-and-exit remoto.el remoto-github.el remoto-forgejo.el remoto-embark.el remoto-topic.el
 	$(EMACS_BATCH) \
 	--eval "(require 'checkdoc)" \
 	--eval "(setq checkdoc-verb-check-experimental-flag t)" \
-	--eval "(dolist (f '(\"remoto.el\" \"remoto-github.el\" \"remoto-embark.el\" \"remoto-topic.el\")) \
+	--eval "(dolist (f '(\"remoto.el\" \"remoto-github.el\" \"remoto-forgejo.el\" \"remoto-embark.el\" \"remoto-topic.el\")) \
 	           (with-current-buffer (find-file-noselect f) \
 	             (check-parens) \
 	             (checkdoc-current-buffer t)))" \
@@ -126,9 +155,9 @@ check-compile: $(ELPA_DIR) check-autoloads
 	$(EMACS_BATCH) \
 	--eval "(setq byte-compile-error-on-warn t)" \
 	--eval "(add-to-list 'load-path \".\")" \
-	--eval "(dolist (f '(\"remoto.el\" \"remoto-github.el\" \"remoto-embark.el\" \"remoto-topic.el\")) \
+	--eval "(dolist (f '(\"remoto.el\" \"remoto-github.el\" \"remoto-forgejo.el\" \"remoto-embark.el\" \"remoto-topic.el\")) \
 	           (unless (byte-compile-file f) (kill-emacs 1)))"
-	rm -f remoto.elc remoto-github.elc remoto-embark.elc remoto-topic.elc
+	rm -f remoto.elc remoto-github.elc remoto-forgejo.elc remoto-embark.elc remoto-topic.elc
 
 compile: $(ELPA_DIR)
 	@echo "Byte-compiling package files..."
@@ -139,4 +168,4 @@ compile: $(ELPA_DIR)
 clean:
 	@echo "Cleaning compiled files..."
 	rm -f *.elc test/*.elc
-	rm -rf $(ELPA_DIR) $(SANDBOX)
+	rm -rf $(ELPA_DIR) $(SANDBOX) .keys
