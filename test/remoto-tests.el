@@ -1842,6 +1842,29 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
       (remoto-browse "testowner/testrepo/src/main.el")
       (expect 'find-file :to-have-been-called))))
 
+(describe "remoto-browse with the name of another forge"
+  ;; It asked GitHub for an owner named codeberg.org, or said "cannot parse input".
+  (it "says it reads GitHub names and points at find-file, asking nothing"
+    (spy-on 'ghub-get)
+    (dolist (input '("https://codeberg.org/forgejo/docs" "codeberg.org/forgejo/docs"
+                     "/cb:forgejo/docs" "/codeberg:forgejo/docs@next:/README.md"
+                     "git@codeberg.org:forgejo/docs.git"
+                     "https://codeberg.org/forgejo/forgejo/pulls/14989"))
+      (expect (condition-case err (progn (remoto-browse input) nil)
+                (user-error (error-message-string err)))
+              :to-equal (format "Remoto: remoto-browse reads GitHub names; \
+open %s with find-file" input)))
+    (expect 'ghub-get :not :to-have-been-called))
+
+  (it "offers no candidates for it while it is typed"
+    (spy-on 'ghub-get)
+    (spy-on 'remoto--api-async)
+    (dolist (input '("codeberg.org/forgejo/" "codeberg.org/forgejo/docs@"
+                     "/cb:forgejo/docs#" "https://codeberg.org/forgejo/do"))
+      (expect (remoto--browse-completions input) :to-be nil))
+    (expect 'ghub-get :not :to-have-been-called)
+    (expect 'remoto--api-async :not :to-have-been-called)))
+
 (describe "remoto--read-repo"
   (it "returns completing-read result directly"
     (spy-on 'completing-read :and-return-value "torvalds/linux")

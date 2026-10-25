@@ -837,12 +837,21 @@ protocol."
 (defvar remoto--browse-history nil
   "Minibuffer history for `remoto-browse'.")
 
+(defun remoto--other-forge-name-p (input)
+  "Return non-nil when INPUT is a URL, remote or path of a forge besides GitHub."
+  (when-let* (((stringp input))
+              (forge (or (remoto--url-forge input)
+                         (cdr (remoto--prefix-of input)))))
+    (not (eq forge remoto--github))))
+
 (defun remoto--browse-parse-input (string)
   "Parse STRING from `remoto-browse' into (MODE OWNER REPO QUERY).
-MODE is one of `search', `branches', `issues'.
-OWNER+REPO are non-nil for @ and # modes.
-QUERY is the text after the delimiter."
+MODE is one of `search', `branches', `issues', `files', or `other' for
+a name of another forge, which nothing completes.  OWNER+REPO are
+non-nil for the @, # and / modes.  QUERY is the text after the delimiter."
   (cond
+   ((remoto--other-forge-name-p string)
+    (list 'other nil nil string))
    ;; owner/repo#query - issues mode
    ((string-match (rx bos (group (+ (not (in "/@#"))))
                       "/" (group (+ (not (in "/@#"))))
@@ -1065,6 +1074,9 @@ Turns on `global-remoto-mode' when it is off: the buffers this command
 opens need the file-name handler for as long as they live."
   (interactive (progn (remoto--ensure-global-mode)
                       (list (remoto--read-repo))))
+  (when (remoto--other-forge-name-p input)
+    (user-error "Remoto: remoto-browse reads GitHub names; open %s with find-file"
+                input))
   (remoto--ensure-global-mode)
   ;; A pull request or issue web URL is the topic, not the repository root
   ;; the URL parser would make of it.

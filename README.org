@@ -72,6 +72,8 @@ M-x remoto-browse RET git@github.com:torvalds/linux.git RET
 M-x remoto-browse RET torvalds/linux RET
 #+end_src
 
+It reads GitHub names only; a Codeberg URL or a ~/cb:~ path opens with ~C-x C-f~.
+
 *** C-x d / C-x C-f
 
 GitHub URLs are detected automatically in ~dired~ and ~find-file~:
