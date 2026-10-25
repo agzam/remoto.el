@@ -2171,6 +2171,25 @@ The test delivers the reply through `remoto-test--reply' when it decides."
               :to-equal '((name . "main")))
       (expect (hash-table-count remoto--pending-requests) :to-equal 0)))
 
+  (it "leaves the headers of the answer in remoto--response-headers, either way"
+    ;; Forgejo's pages say in X-Total-Count how many items there are.
+    (let ((remoto--response-headers nil)
+          (throw-on-input 'remoto-test-input))
+      (remoto-test--ghub-answers-later)
+      (run-at-time 0.01 nil (lambda ()
+                              (funcall (car remoto-test--reply) '((name . "main"))
+                                       '(("X-Total-Count" . "306")))))
+      (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r")
+      (expect remoto--response-headers :to-equal '(("X-Total-Count" . "306"))))
+    (let ((remoto--response-headers nil)
+          (throw-on-input nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (&rest _)
+                (setq ghub-response-headers '(("X-Total-Count" . "28")))
+                '((name . "main"))))
+      (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r")
+      (expect remoto--response-headers :to-equal '(("X-Total-Count" . "28")))))
+
   (it "hands the reply of an abandoned request to the next call"
     (let ((throw-on-input 'remoto-test-input))
       (remoto-test--ghub-answers-later)
@@ -2827,6 +2846,45 @@ using unauthenticated access until M-x remoto-reset-auth")
       (let ((branches (remoto-forge-branches remoto--codeberg "o" "r")))
         (expect (length branches) :to-equal 51)
         (expect (car (last branches)) :to-equal "last"))))
+
+  (it "asks the pages after the first at once, as many as X-Total-Count says"
+    ;; One after another, the 7 tag pages of forgejo/forgejo took 7 round trips.
+    (remoto-test-with-cache
+      (let ((names (lambda (from to)
+                     (cl-loop for i from from to to collect `((name . ,(format "t%d" i)))))))
+        (spy-on 'remoto--api :and-call-fake
+                (lambda (_forge endpoint)
+                  (expect endpoint :to-equal "repos/o/r/tags?limit=50&page=1")
+                  (setq remoto--response-headers '(("x-total-count" . "120")))
+                  (funcall names 1 50)))
+        (spy-on 'remoto--api-async :and-call-fake
+                (lambda (_forge endpoint callback &optional _errback)
+                  (funcall callback
+                           (pcase endpoint
+                             ("repos/o/r/tags?limit=50&page=2" (funcall names 51 100))
+                             ("repos/o/r/tags?limit=50&page=3" (funcall names 101 120))
+                             (_ (error "Unexpected %s" endpoint))))))
+        (let ((tags (remoto-forge-tags remoto--codeberg "o" "r")))
+          (expect (length tags) :to-equal 120)
+          (expect (seq-take tags 2) :to-equal '("t1" "t2"))
+          (expect (car (last tags)) :to-equal "t120"))
+        (expect (mapcar #'cadr (spy-calls-all-args 'remoto--api-async))
+                :to-equal '("repos/o/r/tags?limit=50&page=2"
+                            "repos/o/r/tags?limit=50&page=3")))))
+
+  (it "asks no more pages at once than MAX-PAGES, and keeps the pages that answer"
+    (spy-on 'remoto--api :and-call-fake
+            (lambda (_forge _endpoint)
+              (setq remoto--response-headers '(("X-Total-Count" . "5000")))
+              (make-list 50 '((name . "a")))))
+    (spy-on 'remoto--api-async :and-call-fake
+            (lambda (_forge endpoint callback &optional errback)
+              (if (string-suffix-p "page=2" endpoint)
+                  (funcall errback)
+                (funcall callback (make-list 50 '((name . "b")))))))
+    (let ((items (remoto--paginated-api remoto--codeberg "repos/o/r/tags" 3)))
+      (expect 'remoto--api-async :to-have-been-called-times 2)
+      (expect (length items) :to-equal 100)))
 
   (it "searches accounts and repositories at Forgejo's endpoints, by the owner's id"
     (remoto-test-with-cache

@@ -738,7 +738,12 @@ there is no display.  Returns BODY's value."
   "A GitHub request started under `while-no-input'."
   (status 'pending)
   buffer
-  value)
+  value
+  headers)
+
+(defvar remoto--response-headers nil
+  "The headers of the answer that `remoto--ghub-get' read last.
+Bind it around a call to read the headers of that call's answer.")
 
 (defvar remoto--pending-requests (make-hash-table :test 'equal)
   "Requests started under `while-no-input', keyed by (HOST RESOURCE AUTH).
@@ -768,8 +773,9 @@ HOST and RESOURCE name the request in the condition data."
                     :reader #'remoto--json-reader
                     :host host
                     :forge (remoto--ghub-forge forge)
-                    :callback (lambda (value &rest _)
+                    :callback (lambda (value &optional headers &rest _)
                                 (setf (remoto--request-value req) value
+                                      (remoto--request-headers req) headers
                                       (remoto--request-status req) 'done))
                     :errorback (lambda (err &rest _)
                                  (remhash key remoto--pending-requests)
@@ -800,7 +806,8 @@ Return the value or signal the condition the synchronous call would."
       (accept-process-output nil 0.1))
     (remhash key remoto--pending-requests)
     (pcase (remoto--request-status req)
-      ('done (remoto--request-value req))
+      ('done (setq remoto--response-headers (remoto--request-headers req))
+             (remoto--request-value req))
       ('error (let ((err (remoto--request-value req)))
                 (signal (car err) (cdr err))))
       (_ (error "Remoto: no reply for %s" resource)))))
@@ -852,11 +859,12 @@ explicit: ghub's default for a forge is its web host, which answers HTML."
             ;; abandon the call, and only then is the callback path needed.
             (if throw-on-input
                 (remoto--ghub-get-interruptible forge resource auth)
-              (ghub-get resource nil
-                        :auth auth
-                        :reader #'remoto--json-reader
-                        :host (remoto--api-host forge)
-                        :forge (remoto--ghub-forge forge)))))
+              (prog1 (ghub-get resource nil
+                               :auth auth
+                               :reader #'remoto--json-reader
+                               :host (remoto--api-host forge)
+                               :forge (remoto--ghub-forge forge))
+                (setq remoto--response-headers ghub-response-headers)))))
       ;; ghub signals every HTTP failure as (ghub-http-error CODE MESSAGE URL
       ;; PAYLOAD); there are no per-status error symbols to match on.
       (ghub-http-error
@@ -967,7 +975,7 @@ In GitHub's spelling by default."
   "Return the most items FORGE lists per page."
   100)
 
-(defun remoto--paginated-api (forge endpoint &optional max-pages)
+(cl-defgeneric remoto--paginated-api (forge endpoint &optional max-pages)
   "Fetch all pages of the paginated ENDPOINT of FORGE via `remoto--api'.
 Request `remoto--page-size' items per page, following pages until a
 short page is returned or MAX-PAGES (default 10) is reached.  The cap

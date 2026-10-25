@@ -515,7 +515,7 @@ Forgejo (and Gitea, and Codeberg, which runs Forgejo) cloned GitHub's REST API, 
 
 | Difference | GitHub | Forgejo |
 |---|---|---|
-| Page size and its name | `per_page=100&page=N`, 100 max | `limit=50&page=N`, 50 max |
+| Page size and its name | `per_page=100&page=N`, 100 max, one page after another | `limit=50&page=N`, 50 max; the pages after the first are asked for at once, as many as its `X-Total-Count` says |
 | Recursive tree | one answer, `truncated` past 100k entries | 1000 entries a page, `total_count`; the pages after the first are asked for at once |
 | Tree of an empty repository | 409 `Git Repository is empty.` | 404; `repos/O/R` says `empty: true` |
 | The token's own repositories | `user/repos?affiliation=owner` | `user/repos` ignores `affiliation` and adds its organizations' repositories; a listing keeps those whose owner is OWNER |

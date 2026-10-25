@@ -51,6 +51,44 @@
   "Forgejo answers 50 items a page at most, by default."
   50)
 
+(defun remoto-forgejo--at-once (forge endpoints)
+  "Ask FORGE for all ENDPOINTS at once; return their answers in that order.
+The answer of a request that fails is the symbol `failed'."
+  (let ((answers (make-vector (length endpoints) nil))
+        (pending (length endpoints)))
+    (seq-do-indexed (lambda (endpoint slot)
+                      (remoto--api-async forge endpoint
+                                         (lambda (data)
+                                           (aset answers slot data)
+                                           (cl-decf pending))
+                                         (lambda ()
+                                           (aset answers slot 'failed)
+                                           (cl-decf pending))))
+                    endpoints)
+    (while (< 0 pending)
+      (accept-process-output nil 0.1))
+    (append answers nil)))
+
+(cl-defmethod remoto--paginated-api ((forge remoto-forgejo) endpoint &optional max-pages)
+  "Forgejo's pages of ENDPOINT on FORGE: the first, then the rest at once.
+X-Total-Count of the first answer tells how many follow, MAX-PAGES (10)
+at most.  An answer without it pages one after another, from the first."
+  (let* ((remoto--response-headers nil)
+         (size (remoto--page-size forge))
+         (page (lambda (n)
+                 (concat endpoint (if (cl-search "?" endpoint) "&" "?")
+                         (remoto--page-params forge size n))))
+         (first (remoto--api forge (funcall page 1)))
+         (total (cdr (assoc-string "x-total-count" remoto--response-headers t))))
+    (cond
+     ((< (length first) size) first)
+     ((null total) (cl-call-next-method))
+     (t (let ((pages (min (or max-pages 10) (ceiling (string-to-number total) size))))
+          (apply #'append first
+                 (seq-remove (lambda (answer) (eq answer 'failed))
+                             (remoto-forgejo--at-once
+                              forge (mapcar page (number-sequence 2 pages))))))))))
+
 ;;;; Searches
 
 (cl-defmethod remoto--search-items ((_forge remoto-forgejo) data)
@@ -169,24 +207,16 @@ awaited together.  A page that fails leaves the table partial."
   (let* ((first (remoto--api forge (remoto-forgejo--tree-page owner repo ref 1)))
          (pages (ceiling (or (alist-get 'total_count first) 0) 1000))
          (wanted (min pages remoto-forgejo--tree-pages))
-         (answers (make-vector (max wanted 1) nil))
-         (pending (max 0 (1- wanted)))
-         (failed nil))
-    (aset answers 0 (alist-get 'tree first))
-    (cl-loop for page from 2 to wanted
-             do (let ((slot (1- page)))
-                  (remoto--api-async
-                   forge (remoto-forgejo--tree-page owner repo ref page)
-                   (lambda (data)
-                     (aset answers slot (alist-get 'tree data))
-                     (cl-decf pending))
-                   (lambda ()
-                     (setq failed t)
-                     (cl-decf pending)))))
-    (while (< 0 pending)
-      (accept-process-output nil 0.1))
-    (remoto--tree-table (apply #'append (append answers nil))
-                        (or failed (< wanted pages))
+         (rest (remoto-forgejo--at-once
+                forge (mapcar (lambda (page)
+                                (remoto-forgejo--tree-page owner repo ref page))
+                              (number-sequence 2 wanted)))))
+    (remoto--tree-table (apply #'append (alist-get 'tree first)
+                               (mapcar (lambda (answer)
+                                         (unless (eq answer 'failed)
+                                           (alist-get 'tree answer)))
+                                       rest))
+                        (or (memq 'failed rest) (< wanted pages))
                         owner repo ref)))
 
 (cl-defmethod remoto--matching-refs ((forge remoto-forgejo) owner repo kind prefix)
