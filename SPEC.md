@@ -532,7 +532,7 @@ Other Forgejo and Gitea servers come from `remoto-forgejo-instances`, `(PREFIX H
 
 ### Login per host
 
-The login state (`remoto--login`: failed, token, user) is kept per API host in `remoto--logins`, so a GitHub token and a Codeberg token live apart and a failure on one host leaves the other alone. The token lookup follows ghub's conventions for the kind of forge: the user name from git config (`github.user`, `forgejo.user`), the secret in auth-source under the API host or the web host as `USER^forge`, `USER^ghub` or `USER`. A forge with no user name in git config is read anonymously, said once. `remoto-reset-auth` forgets every host, or one with a prefix argument.
+The login state (`remoto--login`: failed, token, user) is kept per API host in `remoto--logins`, so a GitHub token and a Codeberg token live apart and a failure on one host leaves the other alone. The token lookup follows ghub's conventions for the kind of forge: the user name from git config (`github.user`, `forgejo.user`), the secret in auth-source under the API host or the web host as `USER^forge`, `USER^ghub` or `USER`. A forge with no user name in git config is read anonymously, said once. `remoto-reset-auth` forgets every host, or one with a prefix argument. A request runs under `remoto-auth-timeout` only while ghub looks its token up itself; one with the token in hand waits for its answer. The token's account heads the root listing and the completion at a forge's root: GitHub's idle warm-up learns it once the mode is on, and the root completion of any forge learns it after `remoto-debounce-delay` of idle time and refreshes, asking `/user` only with a token.
 
 ### Caches per forge
 

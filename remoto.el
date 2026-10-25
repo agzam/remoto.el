@@ -526,11 +526,6 @@ In ghub's spelling, with the path of the API: \"api.github.com\",
   "Return the `remoto--login' at the API host of FORGE."
   (remoto--login (remoto--api-host forge)))
 
-(defun remoto--known-user (forge)
-  "Return the login of the account of the token on FORGE, if known already.
-Asks nothing; `remoto--get-authenticated-user' does."
-  (remoto--login-user (remoto--forge-login forge)))
-
 (defun remoto--json-reader (_status)
   "Parse JSON response with list-type arrays for remoto compatibility.
 Finds the JSON body by scanning for the first `{' or `[',
@@ -2671,6 +2666,29 @@ cached candidates appear without the user editing the input."
      (when-let* ((win (active-minibuffer-window)))
        (with-selected-window win
          (remoto--invalidate-completion-ui))))))
+
+(defvar remoto--user-timer nil
+  "Idle timer of the lookup of the token's account that completion waits for.")
+
+(defun remoto--known-user (forge)
+  "Return the login of the account of the token on FORGE, or nil until known.
+An unknown one is looked up after `remoto-debounce-delay' of idle time,
+as a search waits, and the completions refresh when it answers.  The
+lookup asks nothing without a token, and settles the login either way."
+  (let ((login (remoto--forge-login forge)))
+    (or (remoto--login-user login)
+        (unless (remoto--login-failed login)
+          (when (timerp remoto--user-timer)
+            (cancel-timer remoto--user-timer))
+          (setq remoto--user-timer
+                (run-with-idle-timer
+                 remoto-debounce-delay nil
+                 (lambda ()
+                   (setq remoto--user-timer nil)
+                   (when (stringp (while-no-input
+                                    (remoto--get-authenticated-user forge)))
+                     (remoto--refresh-minibuffer-completions)))))
+          nil))))
 
 ;;;; Listings above the repository level
 

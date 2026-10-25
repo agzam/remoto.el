@@ -3693,7 +3693,9 @@ organizations, which needs a token for %s" dir host)))
     (expect 'remoto--prefetch-owner-repos :to-have-been-called-with remoto--github "torvalds"))
 
   (it "returns nil for empty user query"
-    (let ((completions (remoto--handle-file-name-all-completions "" "/github:")))
+    (spy-on 'run-with-idle-timer)
+    (let* ((remoto--logins (remoto-test--logins))
+           (completions (remoto--handle-file-name-all-completions "" "/github:")))
       (expect completions :to-be nil)))
 
   (it "returns recent repos for empty query at /github:owner/"
@@ -5403,8 +5405,57 @@ Returns the full path after completion, or INPUT if no completion."
   (it "falls back to nil when not authenticated"
     (let ((remoto--logins (remoto-test--logins :user nil)))
       (spy-on 'remoto--search-users :and-return-value nil)
+      (spy-on 'run-with-idle-timer)
       (let ((completions (remoto--handle-file-name-all-completions "" "/github:")))
-        (expect completions :to-be nil)))))
+        (expect completions :to-be nil))))
+
+  (it "learns the account of the token in the background, then lists it and its organizations"
+    ;; A Codeberg login has no warm-up: nothing but this lookup names its user.
+    (let ((remoto--logins (remoto-test--logins))
+          (remoto--user-timer nil))
+      (setf (remoto--login-token (remoto--login "codeberg.org/api/v1")) "cb_token")
+      (spy-on 'run-with-idle-timer :and-call-fake
+              (lambda (_secs _repeat fn &rest args) (apply fn args) nil))
+      (spy-on 'remoto--refresh-minibuffer-completions)
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (resource &optional _params &rest args)
+                (expect (plist-get args :auth) :to-equal "cb_token")
+                (let ((value (pcase resource
+                               ("/user" '((login . "ag")))
+                               ("/user/orgs?limit=50&page=1"
+                                '(((username . "testy-shmeisty"))))
+                               (_ (error "Unexpected %s" resource))))
+                      (callback (plist-get args :callback)))
+                  ;; Under `while-no-input' the reply comes through the callback.
+                  (if (not callback)
+                      value
+                    (funcall callback value)
+                    (let ((buffer (generate-new-buffer " *remoto-test-http*")))
+                      (kill-buffer buffer)
+                      buffer)))))
+      (expect (remoto--handle-file-name-all-completions "" "/codeberg:") :to-be nil)
+      (expect 'remoto--refresh-minibuffer-completions :to-have-been-called-times 1)
+      (expect (remoto--handle-file-name-all-completions "" "/codeberg:")
+              :to-equal '("ag/" "testy-shmeisty/"))
+      (expect (remoto--login-user (remoto-test--github-login)) :to-be nil)))
+
+  (it "asks for the account of no token, and only once"
+    ;; An anonymous /user answers 401, and url.el answers that with a
+    ;; password prompt.
+    (let ((remoto--logins (remoto-test--logins))
+          (remoto--user-timer nil))
+      (spy-on 'run-with-idle-timer :and-call-fake
+              (lambda (_secs _repeat fn &rest args) (apply fn args) nil))
+      (spy-on 'ghub--username :and-call-fake
+              (lambda (&rest _) (error "Cannot determine username")))
+      (spy-on 'remoto--refresh-minibuffer-completions)
+      (spy-on 'message)
+      (spy-on 'ghub-get)
+      (expect (remoto--handle-file-name-all-completions "" "/codeberg:") :to-be nil)
+      (expect (remoto--handle-file-name-all-completions "" "/codeberg:") :to-be nil)
+      (expect 'ghub-get :not :to-have-been-called)
+      (expect 'run-with-idle-timer :to-have-been-called-times 1)
+      (expect 'remoto--refresh-minibuffer-completions :not :to-have-been-called))))
 
 ;;; ---- Issue cache ----
 
@@ -7484,6 +7535,7 @@ of `completion-all-completions'; Vertico inserts a candidate as
     (spy-on 'remoto--search-users)
     (spy-on 'remoto--search-owner-repos)
     (spy-on 'remoto--recent-owner-repos :and-return-value '("repo"))
+    (spy-on 'run-with-idle-timer)
     (let ((remoto--logins (remoto-test--logins :user nil)))
       (expect (remoto--handle-file-name-all-completions "" "/github:") :to-be nil))
     (expect (remoto--handle-file-name-all-completions "" "/github:kn66/")
