@@ -102,9 +102,10 @@ The search is at users/search on FORGE."
           (remoto--page-params forge count)))
 
 (defvar remoto-forgejo--accounts (make-hash-table :test 'equal)
-  "Cache: forge prefix and lowercase name -> the account users/NAME answers.
-`none' marks a name of no account.  users/NAME answers for organizations,
-which users/search leaves out, and gives the id repos/search filters by.")
+  "Cache: forge prefix and lowercase name -> the account and its id.
+users/search and users/NAME answer it, and repos/search filters by the
+id.  `none' marks a name of no account.  users/NAME also answers for
+organizations, which users/search leaves out.")
 
 (defvar remoto-forgejo--account-timer nil
   "Idle timer of the account lookup that completion waits for, or nil.")
@@ -124,6 +125,14 @@ It is asked for once, a name of no account included."
                                     (concat "users/" (url-hexify-string name)))))
         (puthash key (or data 'none) remoto-forgejo--accounts)
         data))))
+
+(cl-defmethod remoto--extract-search-users :before ((forge remoto-forgejo) data)
+  "Keep each account of the users/search DATA of FORGE, with its id.
+The search of an account's repositories then needs no users/NAME."
+  (dolist (item (remoto--search-items forge data))
+    (when-let* ((login (alist-get 'login item)))
+      (puthash (remoto-forgejo--account-key forge login) item
+               remoto-forgejo--accounts))))
 
 (defun remoto-forgejo--account-soon (forge name)
   "Return the account NAME of FORGE if known, else ask for it in the background.

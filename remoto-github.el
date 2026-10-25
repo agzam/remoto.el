@@ -517,7 +517,7 @@ and a failure signals instead of matching none."
               (remoto--api forge (remoto--account-search-endpoint
                                   forge query (remoto--page-size forge)))))))))
 
-(defun remoto--extract-search-users (forge data)
+(cl-defgeneric remoto--extract-search-users (forge data)
   "Return the logins in the user search DATA of FORGE, each with its account type."
   (mapcar (lambda (item)
             (propertize (alist-get 'login item)

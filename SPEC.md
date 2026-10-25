@@ -520,7 +520,7 @@ Forgejo (and Gitea, and Codeberg, which runs Forgejo) cloned GitHub's REST API, 
 | Tree of an empty repository | 409 `Git Repository is empty.` | 404; `repos/O/R` says `empty: true` |
 | The token's own repositories | `user/repos?affiliation=owner` | `user/repos` ignores `affiliation` and adds its organizations' repositories; a listing keeps those whose owner is OWNER |
 | Account search | `search/users?q=` -> `items` | `users/search?q=` -> `data` |
-| Repository search | `search/repositories?q=Q in:name user:O` | `repos/search?q=Q&uid=ID&exclusive=true`, the owner's id from `users/O` once |
+| Repository search | `search/repositories?q=Q in:name user:O` | `repos/search?q=Q&uid=ID&exclusive=true`, the owner's id from the account search that found O, or from `users/O` once |
 | Topic search | `search/issues?q=Q repo:O/R` | `repos/O/R/issues?q=Q&state=all&type=all` |
 | Refs under a prefix | `git/matching-refs/KIND/PREFIX` | `git/refs/KIND/PREFIX` |
 | A ref's commit | `commits/REF` | `git/commits/REF` |

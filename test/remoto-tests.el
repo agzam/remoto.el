@@ -2928,6 +2928,33 @@ using unauthenticated access until M-x remoto-reset-auth")
       (expect (cdr (remoto--account-matches "/codeberg:Forgejo"))
               :to-equal '("forgejo" "forgejo-bot" "niceforgejo"))))
 
+  (it "keeps the ids users/search answers, so a searched account's repositories need no lookup"
+    ;; Partial-completion lists the repositories of every account a name
+    ;; expands to; each users/NAME was one request more.
+    (remoto-test-with-cache
+      (spy-on 'run-with-idle-timer :and-call-fake
+              (lambda (_secs _repeat fn &rest args) (apply fn args) nil))
+      (spy-on 'remoto--refresh-minibuffer-completions)
+      (spy-on 'remoto--api-async :and-call-fake
+              (lambda (_forge endpoint callback &optional _errback)
+                (funcall callback
+                         (pcase endpoint
+                           ("users/search?q=forgejo&limit=30"
+                            '((ok . t) (data . (((id . 9) (login . "forgejo-bot"))
+                                                ((id . 70422) (login . "forgejo"))))))
+                           (_ (error "Unexpected %s" endpoint))))))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_forge endpoint)
+                (pcase endpoint
+                  ("repos/search?uid=9&exclusive=true&sort=updated&order=desc&limit=30"
+                   '((ok . t) (data . (((name . "r") (full_name . "forgejo-bot/r"))))))
+                  (_ (error "Unexpected %s" endpoint)))))
+      (remoto-forge-search-accounts remoto--codeberg "forgejo" nil)
+      (expect (remoto-forge-recent-repos remoto--codeberg "forgejo-bot" t) :to-equal '("r"))
+      (expect (remoto-forge-search-accounts remoto--codeberg "forgejo" nil)
+              :to-equal '("forgejo" "forgejo-bot"))
+      (expect 'remoto--api-async :to-have-been-called-times 1)))
+
   (it "offers the account the query names in completion once its lookup answers"
     (remoto-test-with-cache
       (spy-on 'run-with-idle-timer :and-call-fake
