@@ -3,7 +3,7 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
-* [Unreleased]
+* [2.4.0] - 2026-10-25
 
 ** Added
 - Codeberg. ~/codeberg:OWNER/REPO~ and ~/cb:OWNER/REPO~ browse a Codeberg repository the way ~/github:~ browses one on GitHub: the tree, ~@~ for branches and tags, ~#~ for issues and pull requests, the listings above a repository, completion with searches at every level, the web URLs out and in (~https://codeberg.org/OWNER/REPO/src/branch/REF/PATH~, ~src/tag/~, ~src/commit/~, ~raw/~, ~issues/N~, ~pulls/N~, the ssh remote), Embark's actions, and ~remoto-topic~ for a pull request with its reviews. Public repositories work without a token. The new ~remoto-forgejo.el~ holds it: Forgejo's API copies GitHub's, so ~remoto-forgejo~ is a ~remoto-github~ against another host, with its own methods only where the two differ - the paged recursive tree, the search endpoints, the ref lookup, the review states, the web URLs, which spell the kind of a ref in the path. The token follows ~ghub~'s conventions for Forgejo: ~forgejo.user~ in git config and a secret under ~codeberg.org/api/v1~.
@@ -24,8 +24,6 @@ Changes to the project, following Keep a Changelog conventions.
 - Refs with a slash. ~/github:OWNER/REPO@release/2026.5.0:/~ parses: the ref ends at the colon. The Dired of branches and tags lists such refs, which it used to drop, and ~RET~ on one opens its tree. Before a colon, everything after ~@~ is the ref: ~/github:o/r@dev/sub~ names the ref ~dev/sub~, not a path under ~dev~.
 - Specs that walk the grammar: every shape a remoto name can take, built from the delimiter registry, checked for what holds whatever the data. The directory part is a prefix and joins with the rest into the name, parse and unparse invert, ~expand-file-name~ is a fixed point and ~..~ names the level above, a directory exists unless ~RET~ must ask first, and every completion candidate joins into a name one level down whose ~remoto-target~ is canonical.
 - Specs of the forge contract: the defaults, the dispatch to GitHub, the routing of a URL to the forge that reads it; and a conformance suite that asserts the level table, what each level is and does, against GitHub's recorded answers, the ones ~make test-e2e~ replays. A new forge runs the same suite with its own fixture kit.
-
-** Changed
 - One parser. ~remoto--parse~ reads any name with a registered prefix, partial or canonical, into its level, the directory it is in, and the query after it; every file operation branches on the level. The nine shape regexps of ~file-exists-p~, the six of ~file-name-directory~ and the rest, 90 fragments, are gone.
 - The synchronous search that completion at ~/github:OWNER/~ falls back to answers from the cache its first call filled. A keystroke there cost up to four identical search requests; it costs one.
 
