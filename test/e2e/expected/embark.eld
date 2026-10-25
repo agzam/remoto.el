@@ -986,3 +986,103 @@
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
   "async /repos/agzam/remoto.el/issues?state=open&sort=updated&per_page=30"))
+
+("embark collect at /gh:agzam/" :buffer
+ "*Embark Collect: find-file - /tmp//gh:agzam/*" :mode
+ embark-collect-mode :names
+ ("mxp/" "tecla/" "resume/" ".doom.d/" ".emacs.d/" "pdf-text/"
+  "occult.el/" "prisma.el/" "remoto.el/" "slacko.el/")
+ :count 25 :requests
+ ("async /user/orgs?per_page=100&page=1"
+  "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
+  "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"))
+
+("embark export at /gh:agzam/" :buffer
+ "*Embark Collect: find-file - /tmp//gh:agzam/*" :mode
+ embark-collect-mode :names
+ ("mxp/" "tecla/" "resume/" ".doom.d/" ".emacs.d/" "pdf-text/"
+  "occult.el/" "prisma.el/" "remoto.el/" "slacko.el/")
+ :count 25 :requests
+ ("async /user/orgs?per_page=100&page=1"
+  "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
+  "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"))
+
+("embark collect at /gh:agzam/remoto.el#" :buffer
+ "*Embark Collect: find-file - /tmp//gh:agzam/remoto.el#*" :mode
+ embark-collect-mode :names
+ ("47" "49" "48" "46" "45" "44" "43" "42" "41" "40") :count 11
+ :requests
+ ("async /user/orgs?per_page=100&page=1"
+  "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
+  "async /repos/agzam/remoto.el/issues?state=open&sort=updated&per_page=30"
+  "async /search/repositories?q=remoto.el%20in%3Aname%20user%3Aagzam&per_page=100"))
+
+("embark export at /gh:agzam/remoto.el#" :buffer
+ "*Embark Collect: find-file - /tmp//gh:agzam/remoto.el#*" :mode
+ embark-collect-mode :names
+ ("47" "49" "48" "46" "45" "44" "43" "42" "41" "40") :count 11
+ :requests
+ ("async /user/orgs?per_page=100&page=1"
+  "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
+  "async /repos/agzam/remoto.el/issues?state=open&sort=updated&per_page=30"
+  "async /search/repositories?q=remoto.el%20in%3Aname%20user%3Aagzam&per_page=100"))
+
+("embark collect at /gh:agzam/remoto.el@main:/test/" :buffer
+ "*Embark Collect: find-file - /tmp//gh:agzam/remoto.el@main:/test/*"
+ :mode embark-collect-mode :names
+ ("demo.gif" "remoto-tests.el" "el-remoto-logo.png"
+  "remoto-embark-tests.el" "remoto-integration-tests.el")
+ :count 5 :requests
+ ("async /user/orgs?per_page=100&page=1"
+  "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
+  "async /repos/agzam/remoto.el/branches?per_page=100&page=1"
+  "async /repos/agzam/remoto.el/tags?per_page=100&page=1"
+  "async /repos/agzam/remoto.el/git/trees/main?recursive=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=.github&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=.gitignore&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=LICENSE&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=Makefile&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=README.org&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=SPEC.md&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=changelog.org&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=plan.md&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=remoto-embark.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=remoto-topic.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=remoto.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fdemo.gif&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fel-remoto-logo.png&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-embark-tests.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-integration-tests.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-tests.el&per_page=1"
+  "async /search/repositories?q=remoto.el%20in%3Aname%20user%3Aagzam&per_page=100"))
+
+("embark export at /gh:agzam/remoto.el@main:/test/" :buffer
+ "*Embark Collect: find-file - /tmp//gh:agzam/remoto.el@main:/test/*"
+ :mode embark-collect-mode :names
+ ("demo.gif" "remoto-tests.el" "el-remoto-logo.png"
+  "remoto-embark-tests.el" "remoto-integration-tests.el")
+ :count 5 :requests
+ ("async /user/orgs?per_page=100&page=1"
+  "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
+  "async /repos/agzam/remoto.el/branches?per_page=100&page=1"
+  "async /repos/agzam/remoto.el/tags?per_page=100&page=1"
+  "async /repos/agzam/remoto.el/git/trees/main?recursive=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=.github&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=.gitignore&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=LICENSE&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=Makefile&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=README.org&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=SPEC.md&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=changelog.org&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=plan.md&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=remoto-embark.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=remoto-topic.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=remoto.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fdemo.gif&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fel-remoto-logo.png&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-embark-tests.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-integration-tests.el&per_page=1"
+  "async /repos/agzam/remoto.el/commits?sha=main&path=test%2F%2Fremoto-tests.el&per_page=1"
+  "async /search/repositories?q=remoto.el%20in%3Aname%20user%3Aagzam&per_page=100"))

@@ -394,7 +394,7 @@ FAILURE is the message of the error that ended it, MARK where *Messages*
 stood when it began, UNSETTLED non-nil when answers kept coming."
   (with-current-buffer (window-buffer (selected-window))
     (let* ((dired (derived-mode-p 'dired-mode))
-           (names (and dired (remoto-e2e--dired-names)))
+           (names (remoto-e2e--buffer-names))
            (messages (with-current-buffer (messages-buffer)
                        (split-string (buffer-substring-no-properties
                                       mark (point-max))
@@ -407,6 +407,7 @@ stood when it began, UNSETTLED non-nil when answers kept coming."
                                            (car dired-directory)
                                          dired-directory))
                      :matches (and dired (consp dired-directory))
+                     :problems (remoto-e2e--buffer-problems)
                      :names (seq-take names 10)
                      :count (and names (length names))
                      :point (and dired (remoto-e2e--line-name))

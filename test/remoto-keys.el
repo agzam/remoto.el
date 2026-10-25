@@ -42,6 +42,15 @@
 (defconst remoto-keys--token (getenv "REMOTO_E2E_TOKEN")
   "A GitHub token for the profiles, or nil to read anonymously.")
 
+(defconst remoto-keys--codeberg-token (getenv "REMOTO_E2E_CODEBERG_TOKEN")
+  "A Codeberg token for the scenario that signs in to Codeberg, or nil.")
+
+(defvar remoto-keys--github-login nil
+  "The GitHub account of `remoto-keys--token', as GitHub names it.")
+
+(defvar remoto-keys--codeberg-login nil
+  "The Codeberg account of `remoto-keys--codeberg-token', as Codeberg names it.")
+
 (defconst remoto-keys--keep (getenv "REMOTO_KEYS_KEEP")
   "Non-nil to leave the profiles running after the cases, to explore by hand.")
 
@@ -103,21 +112,43 @@ Return nil, or a note when it still worked after SECONDS."
       (sleep-for 0.25))
     (and (<= end (float-time)) (format "still busy after %ss" seconds))))
 
+(defun remoto-keys--json (address token)
+  "Return the JSON object that ADDRESS answers, asked with TOKEN if any, or nil."
+  (ignore-errors
+    (let ((url-request-extra-headers
+           (and token `(("Authorization" . ,(concat "token " token)))))
+          (url-show-status nil))
+      (when-let* ((buffer (url-retrieve-synchronously address t t 10)))
+        (with-current-buffer buffer
+          (unwind-protect
+              ;; url.el leaves point past the headers.
+              (progn (goto-char (point-min))
+                     (and (re-search-forward "\n\n" nil t)
+                          (json-parse-buffer :object-type 'alist)))
+            (kill-buffer buffer)))))))
+
 (defun remoto-keys--search-left ()
   "Return GitHub's search requests left and the time they come back, or nil."
-  (let ((url-request-extra-headers
-         (and remoto-keys--token
-              `(("Authorization" . ,(concat "token " remoto-keys--token)))))
-        (url-show-status nil))
-    (when-let* ((buffer (ignore-errors
-                          (url-retrieve-synchronously "https://api.github.com/rate_limit"
-                                                      t t 10))))
-      (with-current-buffer buffer
-        (unwind-protect
-            (when (re-search-forward "\n\n" nil t)
-              (let-alist (json-parse-buffer :object-type 'alist)
-                (cons .resources.search.remaining .resources.search.reset)))
-          (kill-buffer buffer))))))
+  (let-alist (remoto-keys--json "https://api.github.com/rate_limit" remoto-keys--token)
+    (and (numberp .resources.search.remaining)
+         (cons .resources.search.remaining .resources.search.reset))))
+
+(defun remoto-keys--login (address token)
+  "Return the account that ADDRESS names for TOKEN, or nil."
+  (let ((data (remoto-keys--json address token)))
+    (and (listp data) (alist-get 'login data))))
+
+(defun remoto-keys--learn-logins ()
+  "Ask each forge whose token the run has for the account of that token."
+  (when remoto-keys--token
+    (setq remoto-keys--github-login
+          (remoto-keys--login "https://api.github.com/user" remoto-keys--token))
+    (princ (format "GitHub token of %s\n" (or remoto-keys--github-login "no account GitHub names"))))
+  (when remoto-keys--codeberg-token
+    (setq remoto-keys--codeberg-login
+          (remoto-keys--login "https://codeberg.org/api/v1/user" remoto-keys--codeberg-token))
+    (princ (format "Codeberg token of %s\n"
+                   (or remoto-keys--codeberg-login "no account Codeberg names")))))
 
 (defun remoto-keys--wait-for-search ()
   "Wait while GitHub has fewer than 8 search requests left for the run."
@@ -204,32 +235,58 @@ The dependencies come from the .elpa of the checkout, linked in."
       (with-temp-file file (insert (or text ""))))
     file))
 
+(defun remoto-keys--codeberg-authinfo (name)
+  "Write the Codeberg token to the authinfo of the profile NAME; return the file."
+  (let ((file (expand-file-name (format "fixtures/%s.authinfo" name) remoto-keys--dir)))
+    (make-directory (file-name-directory file) t)
+    (with-file-modes #o600
+      (with-temp-file file
+        (insert "machine codeberg.org/api/v1 login " remoto-keys--codeberg-login
+                "^ghub password " remoto-keys--codeberg-token "\n")))
+    file))
+
 (defun remoto-keys--env (name profile elpa &optional setup)
   "Return the whole environment of the profile NAME: PROFILE, remoto from ELPA.
 SETUP is the plist of a scenario of `remoto-keys--scenarios'.  Git config
-never comes from the person running it, so no account name either."
-  (append
-   (mapcar (lambda (var) (concat var "=" (or (getenv var) "")))
-           '("HOME" "USER" "LOGNAME" "SHELL" "TMPDIR" "PATH"))
-   (list (concat "LANG=" (or (getenv "LANG") "en_US.UTF-8"))
-         ;; A screen TERM keeps Emacs from querying the terminal at startup.
-         "TERM=screen-256color"
-         "GIT_CONFIG_NOSYSTEM=1"
-         (concat "GIT_CONFIG_GLOBAL="
-                 (remoto-keys--fixture name "gitconfig" (plist-get setup :gitconfig)))
-         (concat "REMOTO_KEYS_ELPA=" elpa)
-         (concat "REMOTO_KEYS_PROFILE=" profile)
-         (concat "REMOTO_KEYS_SOCKET_DIR=" (expand-file-name "sock/" remoto-keys--dir))
-         (concat "REMOTO_KEYS_SERVER=" name))
-   (when-let* ((text (plist-get setup :authinfo)))
-     (list (concat "REMOTO_KEYS_AUTHINFO=" (remoto-keys--fixture name "authinfo" text))))
-   (when-let* ((form (plist-get setup :init)))
-     (list (concat "REMOTO_KEYS_INIT=" (prin1-to-string form))))
-   (when (and remoto-keys--token (or (null setup) (plist-get setup :token)))
-     (let ((file (expand-file-name (concat "token-" name) remoto-keys--dir)))
-       (with-file-modes #o600
-         (with-temp-file file (insert remoto-keys--token)))
-       (list (concat "REMOTO_KEYS_TOKEN_FILE=" file))))))
+never comes from the person running it: it names the account of a token
+the profile gets, since ghub uses no token without one."
+  (let ((github (and remoto-keys--token (or (null setup) (plist-get setup :token))))
+        (codeberg (and (plist-get setup :codeberg) remoto-keys--codeberg-login)))
+    (append
+     ;; An empty TMPDIR would put temporary files in the current, remoto, directory.
+     (seq-keep (lambda (var) (when-let* ((value (getenv var))) (concat var "=" value)))
+               '("HOME" "USER" "LOGNAME" "SHELL" "TMPDIR" "PATH"))
+     (list (concat "LANG=" (or (getenv "LANG") "en_US.UTF-8"))
+           ;; A screen TERM keeps Emacs from querying the terminal at startup.
+           "TERM=screen-256color"
+           "GIT_CONFIG_NOSYSTEM=1"
+           (concat "GIT_CONFIG_GLOBAL="
+                   (remoto-keys--fixture
+                    name "gitconfig"
+                    (concat (plist-get setup :gitconfig)
+                            (and github remoto-keys--github-login
+                                 (format "[github]\n\tuser = %s\n" remoto-keys--github-login))
+                            (and codeberg
+                                 (format "[forgejo]\n\tuser = %s\n" remoto-keys--codeberg-login)))))
+           (concat "REMOTO_KEYS_ELPA=" elpa)
+           (concat "REMOTO_KEYS_PROFILE=" profile)
+           (concat "REMOTO_KEYS_SOCKET_DIR=" (expand-file-name "sock/" remoto-keys--dir))
+           (concat "REMOTO_KEYS_SERVER=" name))
+     (cond (codeberg
+            (list (concat "REMOTO_KEYS_AUTHINFO=" (remoto-keys--codeberg-authinfo name))))
+           ((plist-get setup :authinfo)
+            (list (concat "REMOTO_KEYS_AUTHINFO="
+                          (remoto-keys--fixture name "authinfo" (plist-get setup :authinfo))))))
+     ;; The run's own REMOTO_KEYS_INIT, say a planted regression, when SETUP has none.
+     (when-let* ((form (if (plist-get setup :init)
+                           (prin1-to-string (plist-get setup :init))
+                         (getenv "REMOTO_KEYS_INIT"))))
+       (list (concat "REMOTO_KEYS_INIT=" form)))
+     (when github
+       (let ((file (expand-file-name (concat "token-" name) remoto-keys--dir)))
+         (with-file-modes #o600
+           (with-temp-file file (insert remoto-keys--token)))
+         (list (concat "REMOTO_KEYS_TOKEN_FILE=" file)))))))
 
 (defun remoto-keys--start (name profile elpa &optional setup)
   "Start the profile NAME, a terminal Emacs of PROFILE with remoto from ELPA.
@@ -267,7 +324,8 @@ reports about itself."
   (ignore-errors (remoto-keys--eval name '(run-at-time 0.1 nil #'kill-emacs 0) 5))
   (sleep-for 0.3)
   (ignore-errors (remoto-keys--tmux "kill-session" "-t" (concat "=rk-" name)))
-  (ignore-errors (delete-file (expand-file-name (concat "token-" name) remoto-keys--dir))))
+  (dolist (file (list (concat "token-" name) (format "fixtures/%s.authinfo" name)))
+    (ignore-errors (delete-file (expand-file-name file remoto-keys--dir)))))
 
 ;;; Typing
 
@@ -398,9 +456,9 @@ A profile without golden files takes vanilla's, and evil's for ex cases."
 
 (defun remoto-keys--checks (label state expected note)
   "Return the failures of STATE, where the case LABEL ended, as strings.
-EXPECTED is the replay's state of the case or nil; NOTE the runner's note.
-The checks hold whatever the forge's data: the replay's landing, the typed
-name first among matches, no raw HTTP text, a bounded number of requests."
+EXPECTED is the replay's state or nil; NOTE the runner's.  The checks hold
+whatever the data: the replay's landing, the typed name first among
+matches, clean Dired and Embark lines, no raw HTTP text, a bound on requests."
   (let* ((typed (substring label (1+ (or (string-search " " label) -1))))
          ;; Without remoto here, TRAMP would claim a typed name with two colons.
          (leaf (let ((file-name-handler-alist nil))
@@ -418,6 +476,10 @@ name first among matches, no raw HTTP text, a bounded number of requests."
       (push (format "the typed name %s is not the first line" leaf) failures))
     (when-let* ((raw (car (plist-get state :raw))))
       (push (format "raw HTTP text in the messages: %s" (truncate-string-to-width raw 60))
+            failures))
+    (dolist (problem (plist-get state :problems))
+      (push (format "%s: %s" (if (plist-get state :dired) "Dired" (plist-get state :buffer))
+                    problem)
             failures))
     (when (< remoto-keys--max-requests requests)
       (push (format "%d requests, more than %d" requests remoto-keys--max-requests) failures))
@@ -490,6 +552,7 @@ Return a plist of the cases run, the checks failed, the DIFFs with main."
          (elpa-main (and remoto-keys--main (expand-file-name "elpa-main/" remoto-keys--dir)))
          (cases 0) (failed 0) (differ 0))
     (remoto-keys--install-checkout elpa-branch)
+    (remoto-keys--learn-logins)
     (when elpa-main
       (princ (format "origin/main %s: remoto %s\n"
                      (string-trim (remoto-keys--sh "git" "-C" remoto-keys--root
@@ -608,13 +671,13 @@ then shows the forges and the warnings."
 
 (defun remoto-keys--scenarios (port)
   "Return the scenarios that run with the mock Forgejo on PORT.
-Each is (NAME SETUP . STEPS).  SETUP has :gitconfig and :authinfo texts,
-an :init form, and :token t to need REMOTO_E2E_TOKEN.  A step is (case
-LABEL . PARTS), (step LABEL . PARTS), (probe LABEL FORM) or (fault F)."
+Each is (NAME SETUP . STEPS).  SETUP has :gitconfig and :authinfo texts, an
+:init form, :token t and :codeberg t to need either forge's token.  A step is
+\(case LABEL . PARTS), (step LABEL . PARTS), (probe LABEL FORM) or (fault F)."
   (let* ((mock (format "127.0.0.1:%d" port))
          (insecure `(progn (require 'ghub)
                            (setq ghub-insecure-hosts (list ,(concat mock "/api/v1")))))
-         (both "[github]\n\tuser = agzam\n[forgejo]\n\tuser = agzam\n"))
+         (mine (concat "/cb:" remoto-keys--codeberg-login "/")))
     `(("none" (:gitconfig "" :authinfo "")
        ,(remoto-keys--ff "/gh:") (probe "prompt" (remoto-keys-prompt))
        ,(remoto-keys--ff "/gh:agzam/remoto.el")
@@ -634,7 +697,7 @@ LABEL . PARTS), (step LABEL . PARTS), (probe LABEL FORM) or (fault F)."
              ,(kbd "RET") ,(kbd "RET"))
        (probe "logins" (remoto-keys-logins))
        (probe "auth" (remoto-keys-auth)))
-      ("lit" (:gitconfig ,both :authinfo "" :token t
+      ("lit" (:gitconfig "[forgejo]\n\tuser = agzam\n" :authinfo "" :token t
               :init (progn (global-remoto-mode 1)
                            (setopt remoto-forgejo-instances '(("gitea" "gitea.com")))))
        ,(remoto-keys--ff "/gh:agzam/remoto.el")
@@ -643,6 +706,12 @@ LABEL . PARTS), (step LABEL . PARTS), (probe LABEL FORM) or (fault F)."
        ,(remoto-keys--ff "/gitea:gitea/tea")
        (probe "auth" (remoto-keys-auth))
        (probe "logins" (remoto-keys-logins)))
+      ("cbtoken" (:gitconfig "" :codeberg t)
+       ,(remoto-keys--ff "/cb:") (probe "logins" (remoto-keys-logins))
+       (case ,(concat "dired " mine) ,(kbd "C-x d") ,mine submit)
+       ,(remoto-keys--ff "/cb:forgejo/docs")
+       ,(remoto-keys--ff "/gh:agzam/remoto.el")
+       (probe "auth" (remoto-keys-auth)))
       ("mock" (:gitconfig "" :authinfo ""
                :init (progn ,insecure (global-remoto-mode 1)
                             (setopt remoto-forgejo-instances '(("mock" ,mock)))))
@@ -689,6 +758,15 @@ LABEL . PARTS), (step LABEL . PARTS), (probe LABEL FORM) or (fault F)."
                     (error (format "error: %s" (error-message-string err))))
                   400))))
 
+(defun remoto-keys--skip (setup)
+  "Return why a scenario of SETUP cannot run, or nil."
+  (cond ((and (plist-get setup :token) (not remoto-keys--token))
+         "needs REMOTO_E2E_TOKEN")
+        ((and (plist-get setup :codeberg) (not remoto-keys--codeberg-token))
+         "needs REMOTO_E2E_CODEBERG_TOKEN")
+        ((and (plist-get setup :codeberg) (not remoto-keys--codeberg-login))
+         "Codeberg names no account for REMOTO_E2E_CODEBERG_TOKEN")))
+
 (defun remoto-keys--scenario (scenario elpa)
   "Run SCENARIO in a vanilla profile with remoto from ELPA.
 A (step ...) types where the last one ended, a (case ...) after a reset.
@@ -696,8 +774,8 @@ Return a plist of the cases run and of those that failed a check."
   (pcase-let* ((`(,name ,setup . ,steps) scenario)
                (profile (concat "sc-" name))
                (cases 0) (failed 0) (results nil))
-    (if (and (plist-get setup :token) (not remoto-keys--token))
-        (princ (format "=== %s: skip, needs REMOTO_E2E_TOKEN\n" name))
+    (if-let* ((why (remoto-keys--skip setup)))
+        (princ (format "=== %s: skip, %s\n" name why))
       (setq remoto-keys--fault "none")
       (unwind-protect
           (progn
@@ -734,6 +812,7 @@ Return a plist of the cases run and of those that failed a check."
          (only (split-string (or (getenv "REMOTO_KEYS_SCENARIOS") "") "[ ,]+" t))
          (cases 0) (failed 0))
     (remoto-keys--install-checkout elpa)
+    (remoto-keys--learn-logins)
     (princ (format "mock Forgejo on 127.0.0.1:%d\n" port))
     (unwind-protect
         (dolist (scenario (remoto-keys--scenarios port))

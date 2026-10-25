@@ -59,8 +59,7 @@
      (vertico-mode 1) (marginalia-mode 1)
      (setq completion-styles '(orderless basic))
      (remoto-embark-register)
-     (keymap-global-set "C-c a" #'embark-act)
-     (keymap-set minibuffer-local-map "C-c a" #'embark-act))
+     (remoto-e2e--embark-keys))
     ("ido" (ido-mode 1) (setq ido-enable-flex-matching t))
     ("evil-vertico"
      (require 'evil) (evil-mode 1)
@@ -76,9 +75,15 @@
      (setq completion-styles '(orderless partial-completion basic)
            completion-category-overrides '((file (styles partial-completion))))
      (remoto-embark-register)
-     (keymap-global-set "C-c a" #'embark-act)
-     (keymap-set minibuffer-local-map "C-c a" #'embark-act))
+     (remoto-e2e--embark-keys))
     (other (error "Unknown profile %s" other))))
+
+(defun remoto-e2e--embark-keys ()
+  "Bind Embark's act, collect and export where the cases type them."
+  (keymap-global-set "C-c a" #'embark-act)
+  (keymap-set minibuffer-local-map "C-c a" #'embark-act)
+  (keymap-set minibuffer-local-map "C-c c" #'embark-collect)
+  (keymap-set minibuffer-local-map "C-c e" #'embark-export))
 
 ;;; What a case looks at
 
@@ -106,6 +111,92 @@
           (push name names))
         (forward-line 1))
       (nreverse names))))
+
+(defun remoto-e2e--buffer-names ()
+  "Return the names a Dired or an Embark Collect buffer lists, or nil."
+  (cond ((derived-mode-p 'dired-mode) (remoto-e2e--dired-names))
+        ((derived-mode-p 'embark-collect-mode)
+         ;; Group titles are entries too, without an id.
+         (mapcar #'substring-no-properties (delq nil (mapcar #'car tabulated-list-entries))))))
+
+(defun remoto-e2e--stray-lines ()
+  "Return the lines of the current Dired buffer that are neither header nor entry."
+  (save-excursion
+    (goto-char (point-min))
+    (let (stray)
+      (while (not (eobp))
+        (unless (or (save-excursion (dired-move-to-filename))
+                    (looking-at-p "^  \\(?:/\\|total \\|wildcard \\)\\|^[ \t]*$"))
+          (push (buffer-substring-no-properties (point) (line-end-position)) stray))
+        (forward-line 1))
+      (nreverse stray))))
+
+(defun remoto-e2e--odd-char ()
+  "Return the first visible control character or raw byte as (LINE . CHAR), or nil.
+Dired writes a carriage return as \\015 and a backslash as \\\\, so an
+undoubled \\015 there is a carriage return too."
+  (save-excursion
+    (goto-char (point-min))
+    (catch 'found
+      ;; In a multibyte buffer \200-\377 matches the raw bytes only.
+      (while (re-search-forward "[\0-\11\13-\37\177\200-\377]" nil t)
+        (unless (invisible-p (1- (point)))
+          (throw 'found (cons (line-number-at-pos) (char-before)))))
+      (goto-char (point-min))
+      (and (derived-mode-p 'dired-mode)
+           (re-search-forward "\\(?:^\\|[^\\]\\)\\(?:\\\\\\\\\\)*\\\\015" nil t)
+           (cons (line-number-at-pos) ?\r)))))
+
+(defun remoto-e2e--annotation-start ()
+  "Return the start of the annotation on the current Embark Collect line, or nil."
+  (let ((pos (line-beginning-position)) (eol (line-end-position)) start)
+    (while (and (not start) (< pos eol))
+      ;; `text-property-any' compares with `eq', and column names are strings.
+      (if (equal (get-text-property pos 'tabulated-list-column-name) "Annotation")
+          (setq start pos)
+        (setq pos (next-single-property-change pos 'tabulated-list-column-name nil eol))))
+    (when start
+      (save-excursion
+        (goto-char start)
+        (skip-chars-forward " " eol)
+        (and (< (point) eol) (point))))))
+
+(defun remoto-e2e--embark-problems ()
+  "Return what is wrong with the entry lines of the current Embark Collect buffer.
+Each entry takes one line.  On a display the annotations of the lines in
+the window start at one column; batch Emacs has no columns to compare."
+  (let ((window (get-buffer-window (current-buffer)))
+        (lines (count-lines (point-min) (point-max)))
+        (entries (length tabulated-list-entries))
+        problems columns)
+    (unless (= lines entries)
+      (push (format "%d lines for %d entries" lines entries) problems))
+    (when (and window (not noninteractive))
+      (save-excursion
+        (goto-char (window-start window))
+        (while (< (point) (window-end window t))
+          (when-let* ((text (remoto-e2e--annotation-start))
+                      (posn (posn-at-point text window)))
+            (push (car (posn-col-row posn)) columns))
+          (forward-line 1)))
+      (when (cdr (delete-dups columns))
+        (push (format "annotations start at columns %S" (sort columns #'<)) problems)))
+    problems))
+
+(defun remoto-e2e--buffer-problems ()
+  "Return what is wrong with the lines of the current Dired or Embark buffer.
+Each line is a header or an entry, no visible character is a control
+character or a raw byte, and Embark's annotations line up."
+  (when (or (derived-mode-p 'dired-mode) (derived-mode-p 'embark-collect-mode))
+    (append (when-let* ((odd (remoto-e2e--odd-char)))
+              (list (format "line %d holds U+%04X" (car odd) (cdr odd))))
+            (if (derived-mode-p 'dired-mode)
+                (mapcar (lambda (line)
+                          (concat "not an entry: "
+                                  (replace-regexp-in-string
+                                   "[\0-\37\177]" "?" (truncate-string-to-width line 50))))
+                        (seq-take (remoto-e2e--stray-lines) 2))
+              (remoto-e2e--embark-problems)))))
 
 (defun remoto-e2e-goto (name)
   "Move to the Dired line of NAME, as a person would look for it."
@@ -182,7 +273,7 @@
     "https://codeberg.org/forgejo/forgejo/pulls/14989"
     "https://codeberg.org/forgejo/forgejo/issues/14991"
     "git@codeberg.org:forgejo/docs.git" "codeberg.org/forgejo/docs"
-    "/cb:Freeyourgadget/Gadgetbridge" "/gh:Freeyourgadget/Gadgetbridge")
+    "/cb:Freeyourgadget/Gadgetbridge" "/gh:Freeyourgadget/Gadgetbridge" "/cb:technomancy/")
   "Names typed against Codeberg, live only: no recorded answers replay them.
 The account root comes after a repository: as the first Codeberg request
 of a session it asks /user anonymously and url.el prompts for a password.")
@@ -209,7 +300,12 @@ An ex command line ends with RET whatever completes the file prompts."
 
 (defun remoto-e2e--codeberg-cases (profile)
   "Return the Codeberg cases of PROFILE, with `remoto-e2e--only' applied."
-  (remoto-e2e--selected (remoto-e2e--open-cases profile remoto-e2e--codeberg-names)))
+  (remoto-e2e--selected
+   (append (remoto-e2e--open-cases profile remoto-e2e--codeberg-names)
+           (and (member profile '("embark" "full"))
+                ;; technomancy/sokobelt's description spans lines.
+                (remoto-e2e--embark-buffer-cases
+                 '("/cb:technomancy/" "/cb:forgejo/forgejo#" "/cb:forgejo/docs@next:/docs/"))))))
 
 (defun remoto-e2e--tab-cases ()
   "Return the cases that complete a name with TAB."
@@ -275,7 +371,16 @@ An ex command line ends with RET whatever completes the file prompts."
       ("embark y on a file candidate" nil
        ,(kbd "C-x C-f") "/gh:agzam/remoto.el@main:/test/" ,act "y")
       ("embark y on an issue candidate" nil
-       ,(kbd "C-x C-f") "/gh:agzam/remoto.el#" ,act "y"))))
+       ,(kbd "C-x C-f") "/gh:agzam/remoto.el#" ,act "y")
+      ,@(remoto-e2e--embark-buffer-cases
+         '("/gh:agzam/" "/gh:agzam/remoto.el#" "/gh:agzam/remoto.el@main:/test/")))))
+
+(defun remoto-e2e--embark-buffer-cases (names)
+  "Return the cases that collect, and export, the candidates at each of NAMES."
+  (cl-loop for name in names
+           nconc (cl-loop for (command . key) in '(("collect" . "C-c c") ("export" . "C-c e"))
+                          collect `(,(format "embark %s at %s" command name) nil
+                                    ,(kbd "C-x C-f") ,name pause ,(kbd key)))))
 
 (defun remoto-e2e--cases (profile)
   "Return the cases of PROFILE, each (NAME BINDINGS . KEYS)."

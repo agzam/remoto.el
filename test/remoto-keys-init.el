@@ -151,7 +151,7 @@ ENDPOINT); GitHub's go unprefixed, so the two compare."
                            (minibuffer-contents-no-properties)))))
     (with-current-buffer (window-buffer (or (minibuffer-selected-window) (selected-window)))
       (let* ((dired (derived-mode-p 'dired-mode))
-             (names (and dired (remoto-e2e--dired-names))))
+             (names (remoto-e2e--buffer-names)))
         (cl-loop for (key value) on
                  (list :buffer (unless (or dired buffer-file-name) (buffer-name))
                        :mode major-mode
@@ -159,6 +159,7 @@ ENDPOINT); GitHub's go unprefixed, so the two compare."
                                              (car dired-directory)
                                            dired-directory))
                        :matches (and dired (consp dired-directory))
+                       :problems (remoto-e2e--buffer-problems)
                        :names (seq-take names 10)
                        :count (and names (length names))
                        :point (and dired (remoto-e2e--line-name))
@@ -190,7 +191,7 @@ ENDPOINT); GitHub's go unprefixed, so the two compare."
                     ((derived-mode-p 'dired-mode) dired-directory)
                     (buffer-file-name buffer-file-name)
                     (t major-mode))
-              (length (and (derived-mode-p 'dired-mode) (remoto-e2e--dired-names)))
+              (length (remoto-e2e--buffer-names))
               (length remoto-keys--calls)
               (truncate-string-to-width messages 200)))))
 
@@ -237,7 +238,7 @@ ENDPOINT); GitHub's go unprefixed, so the two compare."
            collect (list (buffer-name buffer)
                          (buffer-local-value 'remoto-topic--repo-path buffer))))
 
-;; A scenario's own setup, such as its servers and the mode.
+;; A scenario's setup, such as its servers, or the run's, such as a planted regression.
 (when-let* ((form (getenv "REMOTO_KEYS_INIT")))
   (with-demoted-errors "REMOTO_KEYS_INIT: %S"
     (eval (car (read-from-string form)) t)))
