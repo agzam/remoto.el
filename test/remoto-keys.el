@@ -118,20 +118,48 @@ Return nil, or a note when it still worked after SECONDS."
       (sleep-for 0.25))
     (and (<= end (float-time)) (format "still busy after %ss" seconds))))
 
+(defvar remoto-keys--no-curl-said nil
+  "Non-nil once the run said what it does without curl.")
+
+(defun remoto-keys--curl-p ()
+  "Non-nil when curl is at hand; else say once what the run skips for want of it."
+  (or (executable-find "curl")
+      (progn
+        (unless remoto-keys--no-curl-said
+          (setq remoto-keys--no-curl-said t)
+          (princ (concat "No curl: web URLs go unchecked, and the run asks no forge"
+                         " for a token's account or for GitHub's search budget\n")))
+        nil)))
+
+(defun remoto-keys--curl (address &optional token &rest args)
+  "Return (EXIT . OUTPUT) of curl asking ADDRESS with ARGS, and TOKEN if any.
+curl reads the token on its standard input, so no process listing shows
+it.  A batch Emacs exits on an error in a process sentinel, so no url.el."
+  (with-temp-buffer
+    (let ((exit (apply #'call-process-region
+                       (if token (concat "Authorization: token " token "\n") "")
+                       nil "curl" nil t nil "-s" "-S" "--max-time" "15"
+                       (append (and token '("-H" "@-")) args (list address)))))
+      (cons exit (buffer-string)))))
+
+(defun remoto-keys--ask (address token)
+  "Return the JSON that ADDRESS answers, asked with TOKEN if any.
+Signal an error that says why when no answer of status 2xx comes."
+  (unless (remoto-keys--curl-p)
+    (error "No curl"))
+  (pcase-let ((`(,exit . ,output) (remoto-keys--curl address token "-w" "\n%{http_code}")))
+    (unless (eql exit 0)
+      (error "%s" (string-trim output)))
+    (let* ((end (string-match "\n\\([0-9]+\\)\\'" output))
+           (status (if end (string-to-number (match-string 1 output)) 0))
+           (body (substring output 0 end)))
+      (unless (<= 200 status 299)
+        (error "HTTP %d: %s" status (truncate-string-to-width (string-trim body) 100)))
+      (json-parse-string body :object-type 'alist))))
+
 (defun remoto-keys--json (address token)
   "Return the JSON that ADDRESS answers, asked with TOKEN if any, or nil."
-  (ignore-errors
-    (let ((url-request-extra-headers
-           (and token `(("Authorization" . ,(concat "token " token)))))
-          (url-show-status nil))
-      (when-let* ((buffer (url-retrieve-synchronously address t t 10)))
-        (with-current-buffer buffer
-          (unwind-protect
-              ;; url.el leaves point past the headers.
-              (progn (goto-char (point-min))
-                     (and (re-search-forward "\n\n" nil t)
-                          (json-parse-buffer :object-type 'alist)))
-            (kill-buffer buffer)))))))
+  (ignore-errors (remoto-keys--ask address token)))
 
 (defun remoto-keys--search-left ()
   "Return GitHub's search requests left and the time they come back, or nil."
@@ -158,9 +186,6 @@ Codeberg answers any other client its bot check, a 200, whatever the path."
            (let ((code (string-to-number (buffer-string))))
              (and (< 0 code) code))))))
 
-(defvar remoto-keys--no-curl-said nil
-  "Non-nil once the run said that it checks no web URL, for want of curl.")
-
 (defun remoto-keys--dead-urls (state)
   "Return (URL . STATUS) for the web URLs STATE copied or browsed that fail to load.
 Without curl no URL is checked, which the run says once."
@@ -169,11 +194,7 @@ Without curl no URL is checked, which the run says once."
                                              (copy-sequence (plist-get state :browsed)))))))
     (cond
      ((null urls) nil)
-     ((not (executable-find "curl"))
-      (unless remoto-keys--no-curl-said
-        (setq remoto-keys--no-curl-said t)
-        (princ "No curl: the web URLs that cases copy or browse go unchecked\n"))
-      nil)
+     ((not (remoto-keys--curl-p)) nil)
      (t (seq-keep (lambda (url)
                     (let ((status (remoto-keys--url-status url)))
                       (unless (and status (< status 400)) (cons url status))))
@@ -361,6 +382,8 @@ reports about itself."
     (make-directory init-dir t)
     (ignore-errors (delete-file (expand-file-name name sockets)))
     (ignore-errors (remoto-keys--tmux "kill-session" "-t" (concat "=rk-" name)))
+    ;; A tmux server that outlives the run holds make's jobserver pipe: make -j never exits.
+    (add-hook 'kill-emacs-hook #'remoto-keys--kill-server)
     (apply #'remoto-keys--tmux "new-session" "-d" "-s" (concat "rk-" name)
            "-x" (car remoto-keys--size) "-y" (cadr remoto-keys--size) "-c" home
            "env" "-i" (append (remoto-keys--env name profile elpa setup)
@@ -384,6 +407,32 @@ reports about itself."
   (ignore-errors (remoto-keys--tmux "kill-session" "-t" (concat "=rk-" name)))
   (dolist (file (list (concat "token-" name) (format "fixtures/%s.authinfo" name)))
     (ignore-errors (delete-file (expand-file-name file remoto-keys--dir)))))
+
+(defun remoto-keys--kill-server ()
+  "Kill the tmux server of the run, unless REMOTO_KEYS_KEEP is set."
+  (unless remoto-keys--keep
+    (ignore-errors (remoto-keys--tmux "kill-server"))))
+
+(defconst remoto-keys--revive-seconds 60
+  "How long an Emacs that failed a case has to answer again before a restart.")
+
+(defun remoto-keys--answers-p (name seconds)
+  "Non-nil when the Emacs of NAME answers within SECONDS."
+  (let ((end (+ (float-time) seconds))
+        answered)
+    (while (and (not answered) (< (float-time) end))
+      (unless (setq answered (ignore-errors (remoto-keys--eval name t 5)))
+        (sleep-for 1)))
+    answered))
+
+(defun remoto-keys--revive (name profile elpa)
+  "Restart the Emacs of NAME, PROFILE with remoto from ELPA, unless it answers.
+An Emacs blocked in a host lookup answers when the lookup ends; meanwhile
+macOS refuses connections past the server's backlog of five."
+  (unless (remoto-keys--answers-p name remoto-keys--revive-seconds)
+    (princ (format "%s gives no answer in %ss, restarting it\n" name remoto-keys--revive-seconds))
+    (remoto-keys--stop name)
+    (princ (format "start %s: %S\n" name (remoto-keys--start name profile elpa)))))
 
 ;;; Typing
 
@@ -477,6 +526,19 @@ Return a plist of the label, seconds, a note, the line and the state."
         (list :label label :seconds seconds :note note
               :line (remoto-keys--eval name '(remoto-keys-line))
               :state (if dead (append state (list :dead dead)) state))))))
+
+(defun remoto-keys--run-safely (name case profile elpa)
+  "Run CASE in the profile NAME of PROFILE as `remoto-keys--run' does.
+When the case signals, return a result without a state whose note says
+why, and give the Emacs of NAME, remoto from ELPA, a chance to recover."
+  (let ((start (float-time)))
+    (condition-case err
+        (remoto-keys--run name case profile)
+      (error
+       (let ((why (format "no state: %s" (error-message-string err)))
+             (seconds (round (- (float-time) start))))
+         (remoto-keys--revive name profile elpa)
+         (list :label (car case) :seconds seconds :note why :line why))))))
 
 ;;; Runs
 
@@ -634,52 +696,79 @@ EXPECTED is the replay's state of the case, or nil."
   "Run the cases of PROFILE under the remoto in ELPA-BRANCH.
 With ELPA-MAIN, run each GitHub case also under origin/main's remoto
 there; Codeberg cases run on the branch only, main has no Codeberg.
-Return a plist of the cases run, the checks failed, the DIFFs with main."
+Return a plist of the cases run, the checks failed, the DIFFs with main.
+An Emacs that cannot start stops the profile with a failure that says
+why; the results so far are written all the same."
   (let ((names (cons profile (and elpa-main (list (concat profile "-main")))))
         (cases 0) (failed 0) (differ 0)
         branch main)
     (unwind-protect
-        (progn
-          (princ (format "start %s: %S\n" profile (remoto-keys--start profile profile elpa-branch)))
-          (when elpa-main
-            (princ (format "start %s-main: %S\n" profile
-                           (remoto-keys--start (concat profile "-main") profile elpa-main))))
-          (dolist (case (append (mapcar (lambda (c) (cons 'github c)) (remoto-e2e--cases profile))
-                                (mapcar (lambda (c) (cons 'codeberg c))
-                                        (remoto-e2e--codeberg-cases profile))))
-            (let ((forge (car case)) (case (cdr case)))
-              (if (nth 1 case)
-                  (princ (format "%-16s %-58s skip: needs the replay's fake answers\n"
-                                 profile (car case)))
-                (let ((result (remoto-keys--run profile case profile)))
-                  (cl-incf cases)
-                  (remoto-keys--print profile result)
-                  (push result branch)
-                  (when (remoto-keys--check profile result
-                                            (remoto-keys--expected-state profile (car case)))
-                    (cl-incf failed))
-                  (when (and elpa-main (eq forge 'github))
-                    (let* ((other (remoto-keys--run (cadr names) case profile))
-                           (diff (remoto-e2e--diff (plist-get other :state)
-                                                   (plist-get result :state))))
-                      (remoto-keys--print (cadr names) other)
-                      (push other main)
-                      (when diff
-                        (cl-incf differ)
-                        (princ (format "DIFF %s | %s\n%s" profile (car case)
-                                       (pp-to-string diff)))))))))))
+        (condition-case err
+            (progn
+              (princ (format "start %s: %S\n" profile
+                             (remoto-keys--start profile profile elpa-branch)))
+              (when elpa-main
+                (princ (format "start %s-main: %S\n" profile
+                               (remoto-keys--start (concat profile "-main") profile elpa-main))))
+              (dolist (case (append (mapcar (lambda (c) (cons 'github c))
+                                            (remoto-e2e--cases profile))
+                                    (mapcar (lambda (c) (cons 'codeberg c))
+                                            (remoto-e2e--codeberg-cases profile))))
+                (let ((forge (car case)) (case (cdr case)))
+                  (if (nth 1 case)
+                      (princ (format "%-16s %-58s skip: needs the replay's fake answers\n"
+                                     profile (car case)))
+                    (let ((result (remoto-keys--run-safely profile case profile elpa-branch)))
+                      (cl-incf cases)
+                      (remoto-keys--print profile result)
+                      (push result branch)
+                      (when (remoto-keys--check profile result
+                                                (remoto-keys--expected-state profile (car case)))
+                        (cl-incf failed))
+                      (when (and elpa-main (eq forge 'github))
+                        (let* ((other (remoto-keys--run-safely (cadr names) case profile
+                                                               elpa-main))
+                               (diff (and (plist-get other :state) (plist-get result :state)
+                                          (remoto-e2e--diff (plist-get other :state)
+                                                            (plist-get result :state)))))
+                          (remoto-keys--print (cadr names) other)
+                          (push other main)
+                          (cond (diff
+                                 (cl-incf differ)
+                                 (princ (format "DIFF %s | %s\n%s" profile (car case)
+                                                (pp-to-string diff))))
+                                ((not (plist-get other :state))
+                                 (cl-incf differ)
+                                 (princ (format "DIFF %s | %s: origin/main has %s\n" profile
+                                                (car case) (plist-get other :note))))))))))))
+          (error
+           (cl-incf failed)
+           (princ (format "FAIL %s | stopped: %s\n" profile (error-message-string err)))))
       (unless remoto-keys--keep
-        (mapc #'remoto-keys--stop names)))
-    (remoto-keys--write (expand-file-name (concat "results/" profile ".eld") remoto-keys--dir)
-                        (reverse branch))
-    (when main
-      (remoto-keys--write (expand-file-name (concat "results/" profile "-main.eld")
-                                            remoto-keys--dir)
-                          (reverse main)))
+        (mapc #'remoto-keys--stop names))
+      (remoto-keys--write (expand-file-name (concat "results/" profile ".eld") remoto-keys--dir)
+                          (reverse branch))
+      (when main
+        (remoto-keys--write (expand-file-name (concat "results/" profile "-main.eld")
+                                              remoto-keys--dir)
+                            (reverse main))))
     (list :cases cases :failed failed :differ differ)))
+
+(defun remoto-keys--exit (what thunk)
+  "Exit with the status from THUNK; on an error, say why WHAT stopped and exit 1.
+A batch Emacs exits 255 on an error nothing catches, before any results."
+  (kill-emacs (condition-case err
+                  (funcall thunk)
+                (error (princ (format "remoto-keys %s: stopped: %s\n" what
+                                      (error-message-string err)))
+                       1))))
 
 (defun remoto-keys-main ()
   "Run the profiles of REMOTO_KEYS_PROFILES and exit."
+  (remoto-keys--exit (string-join remoto-keys--profiles " ") #'remoto-keys--run-profiles))
+
+(defun remoto-keys--run-profiles ()
+  "Run the profiles of REMOTO_KEYS_PROFILES; return the exit status."
   (unless (executable-find "tmux")
     (error "The test-keys targets need tmux"))
   (make-directory remoto-keys--dir t)
@@ -694,14 +783,11 @@ Return a plist of the cases run, the checks failed, the DIFFs with main."
                      (string-trim (remoto-keys--sh "git" "-C" remoto-keys--root
                                                    "log" "-1" "--format=%h %s" "origin/main"))
                      (remoto-keys--install (remoto-keys--main-source) elpa-main))))
-    (unwind-protect
-        (dolist (profile remoto-keys--profiles)
-          (let ((counts (remoto-keys--profile profile elpa-branch elpa-main)))
-            (cl-incf cases (plist-get counts :cases))
-            (cl-incf failed (plist-get counts :failed))
-            (cl-incf differ (plist-get counts :differ))))
-      (unless remoto-keys--keep
-        (ignore-errors (remoto-keys--tmux "kill-server"))))
+    (dolist (profile remoto-keys--profiles)
+      (let ((counts (remoto-keys--profile profile elpa-branch elpa-main)))
+        (cl-incf cases (plist-get counts :cases))
+        (cl-incf failed (plist-get counts :failed))
+        (cl-incf differ (plist-get counts :differ))))
     (princ (format "remoto-keys %s: %d cases, %d failed%s, %.0f s, results in %s\n"
                    (string-join remoto-keys--profiles " ") cases failed
                    (if elpa-main (format ", %d differ from origin/main" differ) "")
@@ -718,7 +804,7 @@ Return a plist of the cases run, the checks failed, the DIFFs with main."
                        (abbreviate-file-name (expand-file-name (concat "sock/" name)
                                                                remoto-keys--dir))
                        tmux))))
-    (kill-emacs (if (< 0 failed) 1 0))))
+    (if (< 0 failed) 1 0)))
 
 ;;; Mock Forgejo
 
@@ -742,7 +828,7 @@ Return a plist of the cases run, the checks failed, the DIFFs with main."
             "Connection: close\r\n\r\n" body)))
 
 (defun remoto-keys--relay ()
-  "Return the answer in the current url.el buffer as the mock Forgejo passes it on.
+  "Return the HTTP answer in the current buffer as the mock Forgejo passes it on.
 The pages of a listing link to codeberg.org itself, as they did upstream."
   (goto-char (point-min))
   (let* ((status (if (looking-at "HTTP/[0-9.]+ \\([0-9]+\\)")
@@ -751,8 +837,9 @@ The pages of a listing link to codeberg.org itself, as they did upstream."
          (end (if (re-search-forward "\r?\n\r?\n" nil t) (point) (point-max)))
          (head (buffer-substring-no-properties (point-min) end))
          (field (lambda (name)
-                  (and (string-match (format "^%s: *\\([^\r\n]*\\)" name) head)
-                       (match-string 1 head)))))
+                  (let ((case-fold-search t))
+                    (and (string-match (format "^%s: *\\([^\r\n]*\\)" name) head)
+                         (match-string 1 head))))))
     (apply #'remoto-keys--answer status
            (or (funcall field "Content-Type") "application/json")
            (buffer-substring-no-properties end (point-max))
@@ -766,23 +853,41 @@ The pages of a listing link to codeberg.org itself, as they did upstream."
     (process-send-string process answer)
     (delete-process process)))
 
+(defun remoto-keys--upstream (path)
+  "Return codeberg.org's answer to PATH as the mock Forgejo passes it on.
+When none comes, return a 502 that says why."
+  (pcase-let ((`(,exit . ,output)
+               (if (remoto-keys--curl-p)
+                   (let ((coding-system-for-read 'binary))
+                     (remoto-keys--curl (concat "https://codeberg.org" path) nil
+                                        "-i" "--http1.1" "-H" "Accept: application/json"))
+                 '(nil . "No curl"))))
+    (if (eql exit 0)
+        (with-temp-buffer
+          (insert output)
+          (remoto-keys--relay))
+      (remoto-keys--answer 502 "text/plain"
+                           (format "mock Forgejo upstream: %s\n" (string-trim output))))))
+
 (defun remoto-keys--mock-filter (process chunk)
-  "Answer the request that CHUNK completes on PROCESS with `remoto-keys--fault'."
-  (let ((head (concat (process-get process :head) chunk)))
-    (process-put process :head head)
-    (when (and (string-search "\r\n\r\n" head)
-               (string-match "\\`[A-Z]+ \\([^ ]+\\)" head))
-      (let ((path (match-string 1 head)))
-        (princ (format "  [mock Forgejo, fault %s: %s]\n" remoto-keys--fault path))
-        (if-let* ((canned (assoc remoto-keys--fault remoto-keys--faults)))
-            (remoto-keys--mock-send process (apply #'remoto-keys--answer (cdr canned)))
-          (let ((url-request-extra-headers '(("Accept" . "application/json"))))
-            (url-retrieve (concat "https://codeberg.org" path)
-                          (lambda (_status)
-                            (let ((answer (remoto-keys--relay)))
-                              (kill-buffer)
-                              (remoto-keys--mock-send process answer)))
-                          nil t t)))))))
+  "Answer the request that CHUNK completes on PROCESS with `remoto-keys--fault'.
+An error answers 502, since one that left a filter would end the batch run."
+  (condition-case err
+      (let ((head (concat (process-get process :head) chunk)))
+        (process-put process :head head)
+        (when (and (string-search "\r\n\r\n" head)
+                   (string-match "\\`[A-Z]+ \\([^ ]+\\)" head))
+          (let ((path (match-string 1 head)))
+            (princ (format "  [mock Forgejo, fault %s: %s]\n" remoto-keys--fault path))
+            (remoto-keys--mock-send
+             process
+             (if-let* ((canned (assoc remoto-keys--fault remoto-keys--faults)))
+                 (apply #'remoto-keys--answer (cdr canned))
+               (remoto-keys--upstream path))))))
+    (error (remoto-keys--mock-send
+            process (remoto-keys--answer 502 "text/plain"
+                                         (format "mock Forgejo: %s\n"
+                                                 (error-message-string err)))))))
 
 (defun remoto-keys--mock-start ()
   "Start the mock Forgejo on a free port of 127.0.0.1 and return its process."
@@ -920,7 +1025,8 @@ Each is (NAME SETUP . STEPS).  SETUP has :gitconfig and :authinfo texts, an
 (defun remoto-keys--scenario (scenario elpa)
   "Run SCENARIO in a vanilla profile with remoto from ELPA.
 A (step ...) types where the last one ended, a (case ...) after a reset.
-Return a plist of the cases run and of those that failed a check."
+Return a plist of the cases run and of those that failed a check.  A step
+that signals stops the scenario with a failure that says why."
   (pcase-let* ((`(,name ,setup . ,steps) scenario)
                (profile (concat "sc-" name))
                (cases 0) (failed 0) (results nil))
@@ -928,31 +1034,39 @@ Return a plist of the cases run and of those that failed a check."
         (princ (format "=== %s: skip, %s\n" name why))
       (setq remoto-keys--fault "none")
       (unwind-protect
-          (progn
-            (princ (format "=== %s\nstart %s: %S\n" name profile
-                           (remoto-keys--start profile "vanilla" elpa setup)))
-            (dolist (step steps)
-              (pcase step
-                (`(fault ,fault) (setq remoto-keys--fault fault))
-                (`(probe ,label ,form) (remoto-keys--probe profile label form))
-                (`(,(and kind (or 'case 'step)) ,label . ,parts)
-                 (let ((result (remoto-keys--run profile `(,label nil ,@parts) "vanilla"
-                                                 (eq kind 'step))))
-                   (cl-incf cases)
-                   (push result results)
-                   (remoto-keys--print profile result)
-                   (when (remoto-keys--check profile result nil)
-                     (cl-incf failed))))
-                (_ (error "Unknown step %S" step)))))
+          (condition-case err
+              (progn
+                (princ (format "=== %s\nstart %s: %S\n" name profile
+                               (remoto-keys--start profile "vanilla" elpa setup)))
+                (dolist (step steps)
+                  (pcase step
+                    (`(fault ,fault) (setq remoto-keys--fault fault))
+                    (`(probe ,label ,form) (remoto-keys--probe profile label form))
+                    (`(,(and kind (or 'case 'step)) ,label . ,parts)
+                     (let ((result (remoto-keys--run profile `(,label nil ,@parts) "vanilla"
+                                                     (eq kind 'step))))
+                       (cl-incf cases)
+                       (push result results)
+                       (remoto-keys--print profile result)
+                       (when (remoto-keys--check profile result nil)
+                         (cl-incf failed))))
+                    (_ (error "Unknown step %S" step)))))
+            (error
+             (cl-incf failed)
+             (princ (format "FAIL %s | stopped: %s\n" profile (error-message-string err)))))
         (setq remoto-keys--fault "none")
         (unless remoto-keys--keep
-          (remoto-keys--stop profile)))
-      (remoto-keys--write (expand-file-name (concat "results/" profile ".eld") remoto-keys--dir)
-                          (nreverse results)))
+          (remoto-keys--stop profile))
+        (remoto-keys--write (expand-file-name (concat "results/" profile ".eld") remoto-keys--dir)
+                            (reverse results))))
     (list :cases cases :failed failed)))
 
 (defun remoto-keys-scenarios-main ()
   "Run the scenarios of REMOTO_KEYS_SCENARIOS, all by default, and exit."
+  (remoto-keys--exit "scenarios" #'remoto-keys--run-scenarios))
+
+(defun remoto-keys--run-scenarios ()
+  "Run the scenarios of REMOTO_KEYS_SCENARIOS, all by default; return the exit status."
   (unless (executable-find "tmux")
     (error "The test-keys targets need tmux"))
   (make-directory remoto-keys--dir t)
@@ -964,18 +1078,15 @@ Return a plist of the cases run and of those that failed a check."
     (remoto-keys--install-checkout elpa)
     (remoto-keys--learn-logins)
     (princ (format "mock Forgejo on 127.0.0.1:%d\n" port))
-    (unwind-protect
-        (dolist (scenario (remoto-keys--scenarios port))
-          (when (or (null only) (member (car scenario) only))
-            (let ((counts (remoto-keys--scenario scenario elpa)))
-              (cl-incf cases (plist-get counts :cases))
-              (cl-incf failed (plist-get counts :failed)))))
-      (unless remoto-keys--keep
-        (ignore-errors (remoto-keys--tmux "kill-server"))))
+    (dolist (scenario (remoto-keys--scenarios port))
+      (when (or (null only) (member (car scenario) only))
+        (let ((counts (remoto-keys--scenario scenario elpa)))
+          (cl-incf cases (plist-get counts :cases))
+          (cl-incf failed (plist-get counts :failed)))))
     (princ (format "remoto-keys scenarios %s: %d cases, %d failed, %.0f s, results in %s\n"
                    (if only (string-join only " ") "all") cases failed (- (float-time) start)
                    (abbreviate-file-name (expand-file-name "results/" remoto-keys--dir))))
-    (kill-emacs (if (< 0 failed) 1 0))))
+    (if (< 0 failed) 1 0)))
 
 ;;; The running Emacs
 
@@ -1140,6 +1251,11 @@ Return a plist of the cases run and of those that failed a check."
 
 (defun remoto-keys-live-main ()
   "Type the file and Dired cases into the running Emacs, restore it, and exit."
+  (remoto-keys--exit "live" #'remoto-keys--run-live))
+
+(defun remoto-keys--run-live ()
+  "Type the file and Dired cases into the running Emacs and restore it; return 0.
+The results so far are written, and the Emacs restored, when a case signals."
   (let* ((start (float-time))
          (cases (remoto-e2e--selected (remoto-e2e--matrix "vanilla")))
          results)
@@ -1154,13 +1270,13 @@ Return a plist of the cases run and of those that failed a check."
               (push result results)))
         (princ (format "running Emacs %s\n"
                        (condition-case err (remoto-keys--live remoto-keys--live-restore)
-                         (error (format "NOT restored: %s" (error-message-string err))))))))
-    (setq results (nreverse results))
-    (remoto-keys--write (expand-file-name "results/live.eld" remoto-keys--dir) results)
+                         (error (format "NOT restored: %s" (error-message-string err))))))
+        (remoto-keys--write (expand-file-name "results/live.eld" remoto-keys--dir)
+                            (reverse results))))
     (princ (format "remoto-keys live: %d cases, %.0f s, results in %s\n"
                    (length results) (- (float-time) start)
                    (abbreviate-file-name (expand-file-name "results/" remoto-keys--dir))))
-    (kill-emacs 0)))
+    0))
 
 (provide 'remoto-keys)
 ;;; remoto-keys.el ends here

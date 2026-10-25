@@ -335,26 +335,47 @@
         (delete-directory remoto-keys--dir t)))))
 
 (describe "remoto-keys--json"
-  :var (answer)
+  :var (answer exit curl-args curl-input)
   (before-each
-    ;; url.el hands the buffer over with point past the headers.
-    (spy-on 'url-retrieve-synchronously
-            :and-call-fake (lambda (&rest _)
-                             (with-current-buffer (generate-new-buffer " *http test*")
-                               (insert "HTTP/1.1 200 OK\nContent-Type: application/json\n\n" answer)
-                               (current-buffer)))))
-  (it "reads the account of a token, wherever url.el leaves point"
-    (setq answer "{\"login\":\"someone\",\"id\":1}")
+    (setq exit 0 curl-args nil curl-input nil)
+    (spy-on 'executable-find :and-return-value "/usr/bin/curl")
+    (spy-on 'url-retrieve-synchronously)
+    ;; curl writes the body, then the status that -w asks for on a line of its own.
+    (spy-on 'call-process-region
+            :and-call-fake (lambda (start _end _program _delete _buffer _display &rest args)
+                             (setq curl-input start curl-args args)
+                             (insert answer)
+                             exit)))
+  (it "reads the account of a token"
+    (setq answer "{\"login\":\"someone\",\"id\":1}\n200")
     (expect (remoto-keys--login "https://example.org/user" "not-a-token") :to-equal "someone"))
+  (it "gives curl the token on its standard input, never as an argument"
+    (setq answer "{\"login\":\"someone\"}\n200")
+    (remoto-keys--login "https://example.org/user" "not-a-token")
+    (expect curl-input :to-equal "Authorization: token not-a-token\n")
+    (expect (seq-find (lambda (arg) (string-search "not-a-token" arg)) curl-args) :to-be nil)
+    (expect (last curl-args) :to-equal '("https://example.org/user")))
   (it "reads GitHub's search requests left"
-    (setq answer "{\"resources\":{\"search\":{\"remaining\":5,\"reset\":100}}}")
+    (setq answer "{\"resources\":{\"search\":{\"remaining\":5,\"reset\":100}}}\n200")
     (expect (remoto-keys--search-left) :to-equal '(5 . 100)))
   (it "answers nil for an answer without the field"
-    (setq answer "{\"message\":\"Bad credentials\"}")
+    (setq answer "{\"message\":\"Bad credentials\"}\n200")
     (expect (remoto-keys--login "https://example.org/user" "not-a-token") :to-be nil)
     (expect (remoto-keys--search-left) :to-be nil)
-    (setq answer "[1, 2]")
-    (expect (remoto-keys--login "https://example.org/user" "not-a-token") :to-be nil)))
+    (setq answer "[1, 2]\n200")
+    (expect (remoto-keys--login "https://example.org/user" "not-a-token") :to-be nil))
+  (it "answers nil, and runs no url.el, when no host answers"
+    ;; A batch Emacs exits 255 on an error in url.el's process sentinel.
+    (setq answer "curl: (6) Could not resolve host: api.github.com" exit 6)
+    (expect (remoto-keys--search-left) :to-be nil)
+    (expect 'url-retrieve-synchronously :not :to-have-been-called))
+  (it "signals why when an answer is no success"
+    (setq answer "{\"message\":\"Bad credentials\"}\n401")
+    (expect (remoto-keys--ask "https://example.org/user" "not-a-token")
+            :to-throw 'error '("HTTP 401: {\"message\":\"Bad credentials\"}"))
+    (setq answer "curl: (6) Could not resolve host: example.org" exit 6)
+    (expect (remoto-keys--ask "https://example.org/user" nil)
+            :to-throw 'error '("curl: (6) Could not resolve host: example.org"))))
 
 (describe "remoto-keys--dead-urls"
   (it "asks each web URL a case copied or browsed once, and keeps those that fail"
@@ -378,7 +399,8 @@
         (expect (remoto-keys--dead-urls '(:kill "git@codeberg.org:a/b.git")) :to-be nil))
       (expect 'remoto-keys--url-status :not :to-have-been-called)
       (expect (concat (nreverse printed))
-              :to-equal "No curl: the web URLs that cases copy or browse go unchecked\n"))))
+              :to-equal (concat "No curl: web URLs go unchecked, and the run asks no forge"
+                                " for a token's account or for GitHub's search budget\n")))))
 
 (describe "remoto-e2e--embark-action-cases"
   (it "keeps GitHub's labels and tags Codeberg's, with the same actions"
@@ -442,6 +464,24 @@
                           (text "(setopt remoto-forgejo-instances '((\"gitea\" \"gitea.com\")))")
                           (key "Enter"))))))
 
+(defun remoto-keys-tests--mock-get (path)
+  "Return (STATUS . BODY) that a fresh mock Forgejo answers for PATH."
+  (let* ((remoto-keys--fault "none")
+         (standard-output #'ignore)
+         ;; remoto-tests.el points url.el at a dead proxy; this server is local.
+         (url-proxy-services nil)
+         (server (remoto-keys--mock-start))
+         (buffer (url-retrieve-synchronously
+                  (format "http://127.0.0.1:%d%s" (process-contact server :service) path)
+                  t t 10)))
+    (unwind-protect
+        (with-current-buffer buffer
+          (goto-char (point-min))
+          (re-search-forward "\r?\n\r?\n")
+          (cons url-http-response-status (buffer-substring (point) (point-max))))
+      (kill-buffer buffer)
+      (delete-process server))))
+
 (describe "the mock Forgejo"
   (it "counts the bytes of an answer's body, not its characters"
     (expect (remoto-keys--answer 200 "text/plain" "é" '("X-A" . "1"))
@@ -471,7 +511,129 @@
             (goto-char (point-min))
             (expect (search-forward "<h1>502 Bad Gateway</h1>" nil t) :to-be-truthy))
         (kill-buffer buffer)
-        (delete-process server)))))
+        (delete-process server))))
+  (it "asks codeberg.org through curl and passes its answer on, whatever the header case"
+    (spy-on 'remoto-keys--curl-p :and-return-value t)
+    (spy-on 'remoto-keys--curl
+            :and-return-value (cons 0 (concat "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n"
+                                              "x-total-count: 3\r\n\r\n[1]")))
+    (expect (remoto-keys--upstream "/api/v1/repos/forgejo/docs")
+            :to-equal (remoto-keys--answer 200 "application/json" "[1]" '("X-Total-Count" . "3")))
+    (expect (car (spy-calls-args-for 'remoto-keys--curl 0))
+            :to-equal "https://codeberg.org/api/v1/repos/forgejo/docs"))
+  (it "answers 502 when codeberg.org gives no answer"
+    (spy-on 'remoto-keys--curl-p :and-return-value t)
+    (spy-on 'remoto-keys--curl :and-return-value '(6 . "curl: (6) Could not resolve host\n"))
+    (expect (remoto-keys-tests--mock-get "/api/v1/repos/forgejo/docs")
+            :to-equal '(502 . "mock Forgejo upstream: curl: (6) Could not resolve host\n")))
+  (it "answers 502 when the relay fails, and keeps the run alive"
+    ;; An error that leaves a process filter ends a batch Emacs with 255.
+    (spy-on 'remoto-keys--upstream :and-call-fake (lambda (_) (error "Relay broke")))
+    (expect (remoto-keys-tests--mock-get "/api/v1/repos/forgejo/docs")
+            :to-equal '(502 . "mock Forgejo: Relay broke\n"))))
+
+(describe "remoto-keys--profile"
+  :var (counts output written)
+  (before-each
+    (setq counts nil output nil written nil)
+    (spy-on 'remoto-keys--start :and-return-value '(:lib "remoto"))
+    (spy-on 'remoto-keys--stop)
+    (spy-on 'remoto-keys--answers-p :and-return-value t)
+    (spy-on 'remoto-keys--expected-state)
+    (spy-on 'remoto-e2e--cases :and-return-value '(("ff /gh:a" nil "a") ("ff /gh:b" nil "b")))
+    (spy-on 'remoto-e2e--codeberg-cases)
+    (spy-on 'remoto-keys--write
+            :and-call-fake (lambda (file results)
+                             (push (cons (file-name-nondirectory file)
+                                         (mapcar (lambda (r) (plist-get r :label)) results))
+                                   written)))
+    ;; The case ff /gh:a loses the Emacs it types into; ff /gh:b passes.
+    (spy-on 'remoto-keys--run
+            :and-call-fake (lambda (name case &rest _)
+                             (if (equal (car case) "ff /gh:a")
+                                 (signal 'file-error (list "make client process failed"
+                                                           "Connection refused"))
+                               (list :label (car case) :seconds 1 :line name
+                                     :state '(:mode dired-mode))))))
+
+  (it "fails a case whose Emacs gives no state, says why, and goes on"
+    (setq output (with-output-to-string
+                   (setq counts (remoto-keys--profile "vanilla" "/elpa/" nil))))
+    (expect counts :to-equal '(:cases 2 :failed 1 :differ 0))
+    (expect output :to-match (concat "^FAIL vanilla | ff /gh:a: no state: make client process"
+                                     " failed: Connection refused$"))
+    (expect written :to-equal '(("vanilla.eld" "ff /gh:a" "ff /gh:b")))
+    (expect 'remoto-keys--start :to-have-been-called-times 1))
+
+  (it "restarts an Emacs that gives no answer after the failed case"
+    (spy-on 'remoto-keys--answers-p :and-return-value nil)
+    (with-output-to-string
+      (setq counts (remoto-keys--profile "vanilla" "/elpa/" nil)))
+    (expect (plist-get counts :cases) :to-equal 2)
+    (expect 'remoto-keys--start :to-have-been-called-times 2)
+    (expect (spy-calls-args-for 'remoto-keys--start 1) :to-equal '("vanilla" "vanilla" "/elpa/")))
+
+  (it "stops with why when the Emacs cannot start again, and writes the results so far"
+    (spy-on 'remoto-keys--answers-p :and-return-value nil)
+    (let ((starts 0))
+      (spy-on 'remoto-keys--start
+              :and-call-fake (lambda (&rest _)
+                               (when (< 1 (cl-incf starts))
+                                 (error "No answer from vanilla in 30s"))
+                               '(:lib "remoto"))))
+    (setq output (with-output-to-string
+                   (setq counts (remoto-keys--profile "vanilla" "/elpa/" nil))))
+    (expect counts :to-equal '(:cases 0 :failed 1 :differ 0))
+    (expect output :to-match "^FAIL vanilla | stopped: No answer from vanilla in 30s$")
+    (expect written :to-equal '(("vanilla.eld"))))
+
+  (it "names a DIFF where origin/main's Emacs gives no state"
+    (spy-on 'remoto-keys--run
+            :and-call-fake (lambda (name case &rest _)
+                             (if (string-suffix-p "-main" name)
+                                 (error "No answer from vanilla-main in 30s")
+                               (list :label (car case) :seconds 1 :line name
+                                     :state '(:mode dired-mode)))))
+    (setq output (with-output-to-string
+                   (setq counts (remoto-keys--profile "vanilla" "/elpa/" "/elpa-main/"))))
+    (expect counts :to-equal '(:cases 2 :failed 0 :differ 2))
+    (expect output :to-match (concat "^DIFF vanilla | ff /gh:a: origin/main has no state:"
+                                     " No answer from vanilla-main in 30s$"))
+    (expect (spy-calls-args-for 'remoto-keys--answers-p 0) :to-equal '("vanilla-main" 60))))
+
+(describe "remoto-keys--exit"
+  (it "exits with the status the run returns"
+    (spy-on 'kill-emacs)
+    (remoto-keys--exit "vanilla" (lambda () 0))
+    (expect 'kill-emacs :to-have-been-called-with 0))
+  (it "exits 1, not 255, and says why when the run signals"
+    (spy-on 'kill-emacs)
+    (expect (with-output-to-string
+              (remoto-keys--exit "vanilla" (lambda () (error "No answer from vanilla in 30s"))))
+            :to-equal "remoto-keys vanilla: stopped: No answer from vanilla in 30s\n")
+    (expect 'kill-emacs :to-have-been-called-with 1)))
+
+(describe "remoto-keys--start"
+  (it "kills the tmux server of the run whenever the run exits"
+    ;; A server left behind keeps make's jobserver pipe open, so make -j never exits.
+    (let ((remoto-keys--dir (file-name-as-directory (make-temp-file "remoto-keys" t)))
+          (remoto-keys--keep nil)
+          (kill-emacs-hook nil))
+      (spy-on 'remoto-keys--tmux
+              :and-call-fake (lambda (&rest args)
+                               (when (equal (car args) "new-session")
+                                 (with-temp-file (expand-file-name "sock/vanilla"
+                                                                   remoto-keys--dir)))
+                               ""))
+      (spy-on 'remoto-keys--wait-idle)
+      (spy-on 'remoto-keys--eval :and-return-value '(:lib "remoto"))
+      (unwind-protect
+          (progn
+            (remoto-keys--start "vanilla" "vanilla" "/elpa/")
+            (spy-calls-reset 'remoto-keys--tmux)
+            (run-hooks 'kill-emacs-hook)
+            (expect 'remoto-keys--tmux :to-have-been-called-with "kill-server"))
+        (delete-directory remoto-keys--dir t)))))
 
 (describe "remoto-e2e--diff"
   (it "lists the keys whose values differ, both ways"
