@@ -3160,6 +3160,16 @@ using unauthenticated access until M-x remoto-reset-auth")
             :to-equal "127.0.0.1:8899")
     (expect (remoto--prefix-of "/gs:o/r") :to-be nil))
 
+  (it "refuses a prefix that names a TRAMP method"
+    ;; remoto's handler goes first in the alist: /ssh: would stop reaching TRAMP.
+    (spy-on 'display-warning)
+    (remoto-forgejo--register-instances '(("ssh" "example.org") ("gitea" "gitea.com")))
+    (expect 'display-warning :to-have-been-called-times 1)
+    (expect (mapcar #'car remoto-forgejo--instances) :to-equal '("gitea"))
+    (expect (remoto--prefix-of "/ssh:host:/tmp/x") :to-be nil)
+    (expect (find-file-name-handler "/ssh:host:/tmp/x" 'file-exists-p)
+            :not :to-be 'remoto-file-name-handler))
+
   (it "applies the option when it is set through custom"
     (customize-set-variable 'remoto-forgejo-instances '(("gitea" "gitea.com")))
     (expect (remoto-forge-host (cdr (remoto--prefix-of "/gitea:o/r")))

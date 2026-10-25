@@ -21,6 +21,8 @@
 (require 'remoto)
 (require 'remoto-github)
 
+(defvar tramp-methods)
+
 (cl-defstruct (remoto-forgejo (:include remoto-github)
                               (:constructor remoto-forgejo-create)
                               (:copier nil))
@@ -353,8 +355,8 @@ The login stays while another forge asks the same API host."
 (defun remoto-forgejo--register-instances (instances)
   "Register one forge per (PREFIX HOST) of INSTANCES, and drop the rest.
 A server that stays keeps its forge and its buffers.  A PREFIX that
-another forge owns or that holds a colon or a slash, and a HOST with a
-scheme or a path, are refused with a warning."
+another forge owns, that names a TRAMP method or that holds a colon or a
+slash, and a HOST with a scheme or a path, are refused with a warning."
   (let ((kept nil))
     (pcase-dolist (`(,prefix . ,forge) remoto-forgejo--instances)
       (if (member (list prefix (remoto-forge-host forge)) instances)
@@ -374,18 +376,22 @@ holds a scheme or a path; give the host alone, as \"gitea.com\"" host)))
      ((assoc prefix remoto--forges)
       (display-warning 'remoto (format "the prefix %s belongs to another forge; \
 remove it from `remoto-forgejo-instances'" prefix)))
+     ;; remoto's handler goes first: the prefix would take the method from TRAMP.
+     ((and (require 'tramp nil t) (assoc prefix tramp-methods))
+      (display-warning 'remoto (format "the prefix %s is a TRAMP method; \
+remove it from `remoto-forgejo-instances'" prefix)))
      (t
       (push (cons prefix (remoto-forgejo-register (intern prefix) (list prefix) host))
             remoto-forgejo--instances)))))
 
 (defcustom remoto-forgejo-instances nil
   "Forgejo and Gitea servers to browse besides Codeberg, as (PREFIX HOST) pairs.
-PREFIX is the path prefix without slash or colon, so (\"gitea\"
-\"gitea.com\") makes /gitea:OWNER/REPO paths work; HOST is the web host
-of the server, whose API answers at HOST/api/v1 and whose token
-auth-source holds under that host.  The forges exist once this file is
-loaded: turn `global-remoto-mode' on in the init file to use them from
-the first path on."
+PREFIX is the path prefix without slash or colon, and no TRAMP method
+such as ssh, so (\"gitea\" \"gitea.com\") makes /gitea:OWNER/REPO paths
+work; HOST is the web host of the server, whose API answers at
+HOST/api/v1 and whose token auth-source holds under that host.  The
+forges exist once this file is loaded: turn `global-remoto-mode' on in
+the init file to use them from the first path on."
   :type '(repeat (list (string :tag "Prefix") (string :tag "Host")))
   :set (lambda (symbol value)
          (set-default symbol value)
