@@ -2476,7 +2476,32 @@ using unauthenticated access until M-x remoto-reset-auth")
 
   (it "names the prefixes of the built-in forges in the spelling of the cookies"
     (expect remoto--handler-regexp
-            :to-equal "\\`/\\(?:github\\|gh\\|codeberg\\|cb\\):")))
+            :to-equal "\\`/\\(?:github\\|gh\\|codeberg\\|cb\\):"))
+
+  (it "kills the buffers of a forge it unregisters, under any of its prefixes"
+    (let ((remoto--forges (copy-alist remoto--forges))
+          (remoto--handler-regexp remoto--handler-regexp)
+          (file-name-handler-alist (copy-alist file-name-handler-alist))
+          (fake (remoto-forge-create :name 'fake :prefixes '("fake" "fk")
+                                     :host "fake.example" :delimiters '(?@)))
+          (buffers (list (generate-new-buffer "x.el") (generate-new-buffer "x.el")
+                         (generate-new-buffer "x.el"))))
+      (spy-on 'message)
+      (unwind-protect
+          (progn
+            (remoto-register-forge fake)
+            (cl-mapc (lambda (buffer name)
+                       (with-current-buffer buffer (setq buffer-file-name name)))
+                     buffers '("/fake:o/r@main:/x.el" "/fk:o/r@main:/x.el" "/tmp/x.el"))
+            (remoto-unregister-forge fake)
+            (expect (mapcar #'buffer-live-p buffers) :to-equal '(nil nil t))
+            (expect (remoto--prefix-of "/fake:o/r") :to-be nil)
+            (expect 'message :to-have-been-called-with
+                    "Remoto: killed %d buffer%s of %s" 2 "s" "/fake:"))
+        (dolist (buffer buffers)
+          (when (buffer-live-p buffer)
+            (with-current-buffer buffer (setq buffer-file-name nil))
+            (kill-buffer buffer)))))))
 
 (describe "the forge contract"
   :var ((fake (remoto-forge-create :name 'fake :prefixes '("fake") :delimiters '(?@))))
@@ -3140,7 +3165,72 @@ using unauthenticated access until M-x remoto-reset-auth")
     (expect (remoto-forge-host (cdr (remoto--prefix-of "/gitea:o/r")))
             :to-equal "gitea.com")
     (customize-set-variable 'remoto-forgejo-instances nil)
-    (expect (remoto--prefix-of "/gitea:o/r") :to-be nil)))
+    (expect (remoto--prefix-of "/gitea:o/r") :to-be nil))
+
+  (it "kills the buffers of a removed server, says so, and keeps the others"
+    ;; A buffer whose name no handler serves breaks uniquify for its namesakes.
+    (remoto-test-with-cache
+      (remoto-forgejo--register-instances '(("gitea" "gitea.com")))
+      (puthash "/gitea:testowner/testrepo@main"
+               (gethash "/github:testowner/testrepo@main" remoto--tree-cache)
+               remoto--tree-cache)
+      (spy-on 'message)
+      (let ((dired (dired-noselect "/gitea:testowner/testrepo@main:/"))
+            (file (generate-new-buffer "README.md"))
+            (topic (generate-new-buffer "*remoto: /gitea:o/r#7*"))
+            (other (generate-new-buffer "README.md")))
+        (unwind-protect
+            (progn
+              (with-current-buffer file
+                (setq buffer-file-name "/gitea:testowner/testrepo@main:/README.md"))
+              (with-current-buffer topic
+                (setq-local remoto-topic--repo-path "/gitea:o/r"))
+              (with-current-buffer other
+                (setq buffer-file-name "/codeberg:o/r@main:/README.md"))
+              (remoto-forgejo--register-instances nil)
+              (expect (mapcar #'buffer-live-p (list dired file topic other))
+                      :to-equal '(nil nil nil t))
+              (expect 'message :to-have-been-called-with
+                      "Remoto: killed %d buffer%s of %s" 3 "s" "/gitea:"))
+          (dolist (buffer (list dired file topic other))
+            (when (buffer-live-p buffer)
+              (kill-buffer buffer)))))))
+
+  (it "keeps a server that stays, its forge and its buffers, when the list changes"
+    (remoto-forgejo--register-instances '(("gitea" "gitea.com")))
+    (let ((forge (cdr (remoto--prefix-of "/gitea:o/r")))
+          (file (generate-new-buffer "README.md")))
+      (unwind-protect
+          (progn
+            (with-current-buffer file
+              (setq buffer-file-name "/gitea:o/r@main:/README.md"))
+            (remoto-forgejo--register-instances '(("gitea" "gitea.com")
+                                                  ("cf" "code.forgejo.org")))
+            (expect (cdr (remoto--prefix-of "/gitea:o/r")) :to-be forge)
+            (expect (buffer-live-p file) :to-be t)
+            (expect (remoto-forge-host (cdr (remoto--prefix-of "/cf:o/r")))
+                    :to-equal "code.forgejo.org")
+            ;; A new host behind the prefix is a new server.
+            (spy-on 'message)
+            (remoto-forgejo--register-instances '(("gitea" "try.gitea.io")))
+            (expect (remoto-forge-host (cdr (remoto--prefix-of "/gitea:o/r")))
+                    :to-equal "try.gitea.io")
+            (expect (buffer-live-p file) :to-be nil)
+            (expect (remoto--prefix-of "/cf:o/r") :to-be nil))
+        (when (buffer-live-p file)
+          (kill-buffer file)))))
+
+  (it "forgets the web URL templates and the login of a removed server"
+    (let ((remoto--logins (remoto-test--logins)))
+      (remoto-forgejo--register-instances '(("gitea" "gitea.com") ("cbx" "codeberg.org")))
+      (remoto--login "gitea.com/api/v1")
+      (remoto-forgejo--register-instances nil)
+      (expect (assq 'gitea remoto-forge-url-templates) :to-be nil)
+      (expect (assq 'cbx remoto-forge-url-templates) :to-be nil)
+      (expect (gethash "gitea.com/api/v1" remoto--logins) :to-be nil)
+      ;; Codeberg itself still asks the host the second server shared.
+      (expect (gethash "codeberg.org/api/v1" remoto--logins) :to-be-truthy)
+      (expect (assq 'codeberg remoto-forge-url-templates) :to-be-truthy))))
 
 ;;; Partial path file operations
 

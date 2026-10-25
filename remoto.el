@@ -100,8 +100,26 @@ Register the delimiters of FORGE with `remoto-register-delimiter' first."
                 "\\):"))
   (remoto--refresh-handler))
 
+(defun remoto--forge-buffers (forge)
+  "Return the buffers of FORGE: its files, its Dired directories, its topics."
+  (let ((regexp (concat "\\`/" (regexp-opt (remoto-forge-prefixes forge)) ":")))
+    (seq-filter (lambda (buffer)
+                  (when-let* ((name (with-current-buffer buffer
+                                      (or buffer-file-name
+                                          (and (derived-mode-p 'dired-mode)
+                                               default-directory)
+                                          (bound-and-true-p remoto-topic--repo-path)))))
+                    (string-match-p regexp name)))
+                (buffer-list))))
+
 (defun remoto-unregister-forge (forge)
-  "Remove FORGE from the registry and refresh the handler regexp."
+  "Remove FORGE from the registry and refresh the handler regexp.
+The buffers of FORGE are killed first: once no handler serves their
+names, `uniquify' fails to kill any buffer that shares their name."
+  (when-let* ((killed (seq-count #'kill-buffer (remoto--forge-buffers forge)))
+              ((< 0 killed)))
+    (message "Remoto: killed %d buffer%s of %s" killed (if (= killed 1) "" "s")
+             (remoto--prefix forge)))
   (setq remoto--forges (seq-remove (lambda (entry) (eq (cdr entry) forge))
                                    remoto--forges))
   (setq remoto--handler-regexp

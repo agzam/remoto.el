@@ -528,7 +528,7 @@ Forgejo (and Gitea, and Codeberg, which runs Forgejo) cloned GitHub's REST API, 
 | An organization's name | `login` | `username` |
 | Web URLs | `blob/REF/PATH`, `tree/REF/PATH` | `src/branch/REF/PATH`, `src/tag/REF/PATH`, `src/commit/SHA/PATH`; `%k` in the templates is the kind, from the cached refs |
 
-Other Forgejo and Gitea servers come from `remoto-forgejo-instances`, `(PREFIX HOST)` pairs; each registers a `remoto-forgejo` whose API is at `HOST/api/v1`, with URL templates for `HOST` under the prefix's name.
+Other Forgejo and Gitea servers come from `remoto-forgejo-instances`, `(PREFIX HOST)` pairs; each registers a `remoto-forgejo` whose API is at `HOST/api/v1`, with URL templates for `HOST` under the prefix's name. Setting the option keeps the servers that stay as they are. A server that goes is unregistered, and its URL templates and its login go too, unless another forge shares its API host. `remoto-unregister-forge` kills the buffers of the forge first, file, Dired and topic buffers alike: a buffer whose name no handler serves makes `uniquify` fail to kill any buffer of the same name.
 
 ### Login per host
 

@@ -337,15 +337,34 @@ canonical.  The web URL templates of HOST go under NAME."
 (defvar remoto-forgejo--instances nil
   "The forges that `remoto-forgejo-instances' registered, by prefix.")
 
+(defun remoto-forgejo--drop (forge)
+  "Unregister the server FORGE, and forget its web URL templates and login.
+The login stays while another forge asks the same API host."
+  (remoto-unregister-forge forge)
+  (setq remoto-forge-url-templates
+        (assq-delete-all (remoto-forge-name forge) remoto-forge-url-templates))
+  (let ((host (remoto--api-host forge)))
+    (unless (seq-some (lambda (entry)
+                        (and (remoto-github-p (cdr entry))
+                             (equal host (remoto--api-host (cdr entry)))))
+                      remoto--forges)
+      (remhash host remoto--logins))))
+
 (defun remoto-forgejo--register-instances (instances)
   "Register one forge per (PREFIX HOST) of INSTANCES, and drop the rest.
-A PREFIX that another forge owns, or that holds a colon or a slash, and
-a HOST with a scheme or a path are refused with a warning."
-  (dolist (entry remoto-forgejo--instances)
-    (remoto-unregister-forge (cdr entry)))
-  (setq remoto-forgejo--instances nil)
+A server that stays keeps its forge and its buffers.  A PREFIX that
+another forge owns or that holds a colon or a slash, and a HOST with a
+scheme or a path, are refused with a warning."
+  (let ((kept nil))
+    (pcase-dolist (`(,prefix . ,forge) remoto-forgejo--instances)
+      (if (member (list prefix (remoto-forge-host forge)) instances)
+          (push (cons prefix forge) kept)
+        (remoto-forgejo--drop forge)))
+    (setq remoto-forgejo--instances (nreverse kept)))
   (pcase-dolist (`(,prefix ,host) instances)
     (cond
+     ((when-let* ((kept (cdr (assoc prefix remoto-forgejo--instances))))
+        (equal host (remoto-forge-host kept))))
      ((not (and (stringp prefix) (string-match-p "\\`[^:/]+\\'" prefix)))
       (display-warning 'remoto (format "the prefix %S of `remoto-forgejo-instances' \
 holds a colon or a slash; give it bare, as \"gitea\"" prefix)))
