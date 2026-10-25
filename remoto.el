@@ -906,11 +906,10 @@ without any setup via unauthenticated fallback."
     (if (eq auth 'none)
         (remoto--anonymous-get forge endpoint)
       (condition-case err
-          ;; Only apply the auth timeout on the first call (before we
-          ;; know whether auth works).  Once the authenticated user is
-          ;; cached, auth-source won't block, so skip the timeout to
-          ;; avoid aborting slow HTTP responses.
-          (if (remoto--login-user login)
+          ;; The timeout guards ghub's own token lookup, which a nil AUTH
+          ;; leaves to it.  With the token in hand no lookup is left, and
+          ;; a slow answer is no lookup that hangs.
+          (if (or (stringp auth) (remoto--login-user login))
               (remoto--ghub-get forge resource auth endpoint)
             (let ((result (with-timeout (remoto-auth-timeout 'remoto--timed-out)
                             (remoto--ghub-get forge resource auth endpoint))))

@@ -1901,6 +1901,25 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
       (expect (remoto--api remoto--github "repos/owner/repo") :to-equal '((name . "test-repo")))
       (expect (remoto--login-failed (remoto-test--github-login)) :to-be nil)))
 
+  (it "waits out a slow request once the login holds its token, whatever the forge"
+    ;; The timeout guards ghub's own token lookup; with the token in hand
+    ;; none is left, and a slow answer is no lookup that hangs.
+    (let ((remoto--logins (remoto-test--logins))
+          (remoto-auth-timeout 0.1)
+          (auths nil))
+      (setf (remoto--login-token (remoto--login "codeberg.org/api/v1")) "cb_token")
+      (spy-on 'remoto--find-token :and-return-value "ghp_found")
+      (spy-on 'message)
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource &optional _params &rest args)
+                (push (plist-get args :auth) auths)
+                (sleep-for 0.3)
+                '((name . "docs"))))
+      (expect (remoto--api remoto--codeberg "repos/o/r") :to-equal '((name . "docs")))
+      (expect (remoto--api remoto--github "repos/o/r") :to-equal '((name . "docs")))
+      (expect (nreverse auths) :to-equal '("cb_token" "ghp_found"))
+      (expect 'message :not :to-have-been-called)))
+
   (it "asks no endpoint of the token's account anonymously after a timed-out lookup"
     (let ((remoto--logins (remoto-test--logins :failed nil))
           (remoto-github-auth nil)
