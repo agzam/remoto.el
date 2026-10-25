@@ -463,15 +463,17 @@ waiting for keys that batch Emacs never gets."
 (defun remoto-e2e--expected-file (&optional version)
   "Return the file of the expected states of the profile.
 With VERSION, an Emacs major version, the file of the states that differ
-there from those of Emacs 30 and later."
+there from those of Emacs 31 and later."
   (expand-file-name (format (if version "expected/emacs-%2$d/%1$s.eld"
                               "expected/%s.eld")
                             remoto-e2e-profile version)
                     remoto-e2e--dir))
 
 (defconst remoto-e2e--version
-  (and (< emacs-major-version 30) emacs-major-version)
-  "The Emacs major version whose states differ, or nil from Emacs 30 on.")
+  (and (< emacs-major-version 31) emacs-major-version)
+  "The Emacs major version whose states differ, or nil from Emacs 31 on.
+Emacs 31's partial-completion merges the suffix its candidates share,
+such as the slash of every repository at OWNER/, where 30 does not.")
 
 (defun remoto-e2e--read-expected ()
   "Return the expected states of the profile on this Emacs."
