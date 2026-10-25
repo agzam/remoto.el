@@ -16,8 +16,9 @@ EMACS_SANDBOX = emacs -Q --init-directory $(SANDBOX) \
 
 E2E_PROFILES = vanilla fido vertico orderless evil embark
 E2E = $(EMACS_BATCH) --directory . -l test/remoto-e2e.el
+KEYS = $(EMACS_BATCH) --directory . -l test/remoto-keys.el -f remoto-keys-main
 
-.PHONY: help test test-embark test-integration test-all deps lint check-autoloads check-compile compile clean sandbox test-e2e test-e2e-update test-e2e-record test-fixtures-codeberg
+.PHONY: help test test-embark test-integration test-all deps lint check-autoloads check-compile compile clean sandbox test-e2e test-e2e-update test-e2e-record test-fixtures-codeberg test-keys test-keys-live
 
 help:
 	@echo "Available commands:"
@@ -28,6 +29,9 @@ help:
 	@echo "  make test-e2e-PROFILE  The same in one profile: $(E2E_PROFILES)"
 	@echo "  make test-e2e-update   Rewrite test/e2e/expected from a run (-j6 too)"
 	@echo "  make test-e2e-record   Record the GitHub answers test/e2e/fixtures.jsonl lacks (needs REMOTO_E2E_TOKEN and network)"
+	@echo "  make test-keys         Type the E2E cases into emacs -nw -q under tmux, against GitHub (needs tmux and network)"
+	@echo "  make test-keys-PROFILE The same in one profile; REMOTO_KEYS_MAIN=1 adds origin/main beside it"
+	@echo "  make test-keys-live    Type the C-x C-f and C-x d cases into the running Emacs, through its server"
 	@echo "  make test-fixtures-codeberg  Record test/fixtures/codeberg.jsonl from codeberg.org (needs network)"
 	@echo "  make test-integration  Run integration tests (needs network)"
 	@echo "  make test-all          Run all tests"
@@ -66,6 +70,7 @@ test: $(ELPA_DIR)
 	$(EMACS_BATCH) --directory . \
 	--eval "(setq buttercup-stack-frame-style 'omit)" \
 	-l test/remoto-tests.el \
+	-l test/remoto-keys-tests.el \
 	--funcall buttercup-run
 
 test-embark: $(ELPA_DIR)
@@ -100,6 +105,17 @@ test-e2e-record: $(ELPA_DIR)
 	for p in $(E2E_PROFILES); do \
 	  REMOTO_E2E_PROFILE=$$p REMOTO_E2E_UPDATE=1 $(E2E) || exit 1; \
 	done
+
+# Each profile in .keys/PROFILE, so -j runs them side by side; they share
+# GitHub's rate limits.
+test-keys: $(addprefix test-keys-,$(E2E_PROFILES))
+
+test-keys-%: $(ELPA_DIR)
+	REMOTO_KEYS_PROFILES=$* REMOTO_KEYS_DIR=.keys/$* $(KEYS)
+
+# The running Emacs, through its server: keep off the keyboard while it types.
+test-keys-live: $(ELPA_DIR)
+	$(EMACS_BATCH) --directory . -l test/remoto-keys.el -f remoto-keys-live-main
 
 lint: $(ELPA_DIR)
 	$(EMACS_BATCH) --directory . \
@@ -144,4 +160,4 @@ compile: $(ELPA_DIR)
 clean:
 	@echo "Cleaning compiled files..."
 	rm -f *.elc test/*.elc
-	rm -rf $(ELPA_DIR) $(SANDBOX)
+	rm -rf $(ELPA_DIR) $(SANDBOX) .keys

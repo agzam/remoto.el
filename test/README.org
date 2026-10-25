@@ -1,0 +1,67 @@
+#+title: Testing remoto
+
+| Target                | Types into                                | Answers from                                                 | Needs                  |
+|-----------------------+-------------------------------------------+--------------------------------------------------------------+------------------------|
+| =make test=           | nothing: unit specs                       | fakes                                                        | Emacs                  |
+| =make test-e2e=       | batch Emacs, through =execute-kbd-macro=  | =test/e2e/fixtures.jsonl=, compared with =test/e2e/expected= | Emacs                  |
+| =make test-keys=      | =emacs -nw -q=, one per profile, in tmux  | GitHub                                                       | Emacs, tmux, network   |
+| =make test-keys-live= | the Emacs you work in, through its server | GitHub                                                       | a running Emacs server |
+
+Run =make deps= once: it installs the packages of every profile into =.elpa=.
+
+* The cases
+
+=test/remoto-e2e-cases.el= holds what a person types and the six completion profiles: vanilla, fido, vertico, orderless, evil, embark.  Both E2E targets run these cases.  =REMOTO_E2E_ONLY=, a regexp matched against the case name, runs some of them.
+
+* make test-keys
+
+Each profile is an =emacs -nw -q= with remoto installed by package.el from a tar of the checkout, under a private tmux server.  Everything lives in =.keys/PROFILE/=.  No window opens and nothing takes focus, on macOS or Linux.
+
+The answers come from the real GitHub, so no golden file holds them.  Read the results, or compare them with origin/main:
+
+#+begin_src sh
+make test-keys-vertico                                    # one profile
+make -j6 test-keys                                        # all six side by side; they share GitHub's rate limits
+REMOTO_KEYS_MAIN=1 make test-keys-vanilla                 # origin/main's remoto too, with a DIFF wherever the two end apart
+REMOTO_E2E_TOKEN=$(gh auth token) make test-keys-vanilla  # signed in
+REMOTO_E2E_ONLY='^ff /gh:agzam' make test-keys-vanilla    # some cases
+#+end_src
+
+- Each case prints one line: profile, case, seconds, then ~BUFFER | DIRECTORY, FILE or MODE | n=NAMES | calls=REQUESTS | MESSAGES~.  The whole states go to =.keys/PROFILE/results/=.
+- A token reaches each profile through a file only you can read, which the profile deletes on start.  Without a token remoto reads anonymously; a =github.user= in your git config then makes it ask for one, as it would ask you.
+- The run waits whenever GitHub has fewer than 8 searches left.
+- ~REMOTO_KEYS_SIZE=COLSxLINES~ sets the terminal, 100x40 by default.
+
+** Watching and exploring by hand
+
+Watch a profile while it runs, without disturbing it:
+
+#+begin_src sh
+tmux -S .keys/vertico/tmux.sock attach -r -f ignore-size -t =rk-vertico
+#+end_src
+
+~REMOTO_KEYS_KEEP=1~ leaves the profiles running after the cases; the run prints how to reach them:
+
+#+begin_src sh
+tmux -S .keys/vertico/tmux.sock attach -t =rk-vertico                  # type into it yourself
+tmux -S .keys/vertico/tmux.sock send-keys -t =rk-vertico: C-x C-f       # or send keys by name
+tmux -S .keys/vertico/tmux.sock send-keys -t =rk-vertico: -l -- /gh:agzam/
+emacsclient -s .keys/vertico/sock/vertico --eval '(remoto-keys-line)'   # where it ended, in one line
+emacsclient -s .keys/vertico/sock/vertico --eval '(remoto-keys-state)'  # and in full
+tmux -S .keys/vertico/tmux.sock kill-server                            # stop
+#+end_src
+
+* make test-keys-live
+
+Types the =C-x C-f= and =C-x d= cases into the Emacs you work in, through its server (=M-x server-start=; =REMOTO_KEYS_SERVER= names another one).  It tests remoto in your configuration, so results differ from person to person.  It tests the remoto your Emacs has loaded: reload it after a change.
+
+Keep off the keyboard while it runs: what you type joins the case.  The cases run in a =*remoto-keys*= buffer.  At the end the run puts back your windows, the minibuffer histories, =recentf-list= and =save-place-alist=, removes its advice, and kills only the buffers the cases opened.
+
+* Looking further
+
+The targets above check mechanically.  A person, or an agent with a shell, looks further:
+
+1. Run a profile with ~REMOTO_KEYS_MAIN=1~ and read each DIFF: a fix, a regression, or GitHub's data that changed in between.
+2. Keep a profile with ~REMOTO_KEYS_KEEP=1~ and try what the cases miss: the feature under review, odd names, a slow network, a second forge.
+3. Run =make test-keys-live= to see the change in a real configuration.
+4. Turn each confirmed regression into a case in =test/remoto-e2e-cases.el=, record its answers with =make test-e2e-record=, and the replay suite catches it from then on.
