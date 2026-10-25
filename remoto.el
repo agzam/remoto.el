@@ -3538,8 +3538,12 @@ remoto was loaded some other way and the mode never turned on."
 (provide 'remoto)
 
 ;; The forges that come with remoto load after the core they extend, as
-;; magit's own libraries do; each registers itself when loaded.
-(require 'remoto-github)
-(require 'remoto-forgejo)
+;; magit's own libraries do; each registers itself when loaded.  They load
+;; from this file's directory: an upgrade by package.el reloads this file
+;; before that directory is on `load-path'.
+(require 'remoto-github
+         (expand-file-name "remoto-github" (file-name-directory (macroexp-file-name))))
+(require 'remoto-forgejo
+         (expand-file-name "remoto-forgejo" (file-name-directory (macroexp-file-name))))
 
 ;;; remoto.el ends here

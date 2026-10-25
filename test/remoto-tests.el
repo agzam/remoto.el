@@ -8009,13 +8009,14 @@ every source older than an existing output file, so it must not exist."
   "Run FORM in a child Emacs that has loaded only AUTOLOADS; return its value.
 The child is `emacs -Q --batch' with a throwaway init directory and this
 process's `load-path', so remoto and ghub resolve when the autoload
-fires.  FORM is read back from the child's standard output; a child that
-fails yields (:error ...), an unreadable child (:unreadable OUT ERR)."
+fires; nil AUTOLOADS loads nothing.  FORM is read back from the child's
+standard output; a child that fails yields (:error ...), an unreadable
+child (:unreadable OUT ERR)."
   (let* ((init-dir (make-temp-file "remoto-fresh" t))
          (stderr (make-temp-file "remoto-fresh-stderr"))
          (script `(progn
                     (setq load-path ',load-path)
-                    (load ,autoloads nil t)
+                    ,@(and autoloads `((load ,autoloads nil t)))
                     (prin1 (condition-case err ,form (error (list :error err))))))
          (print-length nil)
          (print-level nil)
@@ -8203,7 +8204,30 @@ with what the same call does once the mode is on."
                                            t))))))
         (expect (plist-get result :loaded) :to-be nil)
         (expect (plist-get result :global) :to-be nil)
-        (expect (plist-get result :hooked) :to-be nil)))))
+        (expect (plist-get result :hooked) :to-be nil))))
+
+  (it "loads the forges from the directory of remoto.el when that is off load-path"
+    ;; package.el reloads an upgrade's files by name before their new
+    ;; directory joins `load-path'.
+    (let ((source (file-name-directory (locate-library "remoto")))
+          (dir (file-name-as-directory (make-temp-file "remoto-upgrade" t))))
+      (unwind-protect
+          (progn
+            (dolist (file '("remoto.el" "remoto-github.el" "remoto-forgejo.el"))
+              (copy-file (expand-file-name file source) dir))
+            (let ((result (remoto-test--fresh-session
+                           nil
+                           `(progn
+                              (setq load-path (seq-remove (lambda (d) (file-equal-p d ,source))
+                                                          load-path))
+                              (load ,(expand-file-name "remoto.el" dir) nil t)
+                              (list :github (symbol-file 'remoto--fetch-tree)
+                                    :forgejo (symbol-file 'remoto-forgejo-register)
+                                    :codeberg (and (assoc "codeberg" remoto--forges) t))))))
+              (expect (file-name-directory (or (plist-get result :github) "")) :to-equal dir)
+              (expect (file-name-directory (or (plist-get result :forgejo) "")) :to-equal dir)
+              (expect (plist-get result :codeberg) :to-be t)))
+        (delete-directory dir t)))))
 
 (describe "remoto-inhibited-functions in a fresh session"
   (it "advises nothing when remoto is only required"
