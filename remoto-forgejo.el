@@ -42,6 +42,25 @@
   "A Forgejo server has no token option: `remoto-github-auth' is GitHub's."
   nil)
 
+(cl-defmethod remoto-forge-title ((forge remoto-forgejo))
+  "Codeberg by name, any other Forgejo FORGE by its host."
+  (if (equal (remoto-forge-host forge) "codeberg.org")
+      "Codeberg"
+    (remoto-forge-host forge)))
+
+(cl-defmethod remoto--anonymous-limit ((_forge remoto-forgejo))
+  "No hint: 2,000 anonymous requests per 10 minutes seldom run out."
+  nil)
+
+(cl-defmethod remoto--token-url ((forge remoto-forgejo))
+  "The page of applications of the Forgejo FORGE; its address fills in nothing."
+  (format "https://%s/user/settings/applications" (remoto-forge-host forge)))
+
+(cl-defmethod remoto--token-prompt ((forge remoto-forgejo))
+  "Name the permissions to tick on FORGE, whose page ticks none."
+  (format "%s token (Read: repository, issue, organization, user): "
+          (remoto-forge-title forge)))
+
 (cl-defmethod remoto--page-params ((_forge remoto-forgejo) count &optional page)
   "Forgejo's query for COUNT items, those of PAGE: it spells the size `limit'."
   (concat (format "limit=%d" count)

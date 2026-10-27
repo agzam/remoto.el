@@ -23,30 +23,7 @@ Sometimes you just want to look at code. Check a function signature, read a READ
 
 * Where
 
-GitHub, under ~/github:~ and ~/gh:~, and Codeberg, under ~/codeberg:~ and ~/cb:~. The core asks a forge for its data through a small set of generic functions; GitHub answers them in ~remoto-github.el~, and ~remoto-forgejo.el~ reuses those answers for Forgejo and Gitea servers, Codeberg among them. Support for other forges - gists, GitLab - builds on that.
-
-** Codeberg and other Forgejo servers
-
-Everything below works the same with a Codeberg path:
-
-#+begin_example
-C-x C-f /cb:forgejo/forgejo RET          -> the tree on the default branch
-C-x C-f /cb:forgejo/forgejo@ TAB         -> branches, then tags
-C-x C-f /cb:forgejo/forgejo#14933 RET    -> a pull request, with its reviews
-C-x d   /cb:forgejo/ RET                 -> the repositories of an account
-C-x C-f https://codeberg.org/forgejo/forgejo/src/branch/forgejo/go.mod RET
-#+end_example
-
-Public repositories need no token. For private ones, and for ~/cb:~ alone, which lists your account and organizations in Dired and, a moment after you reach it, in completion, set up a token the way ~ghub~ wants it for Forgejo: name your account in ~git config --global forgejo.user USER~ and store the token in ~auth-source~ under the host ~codeberg.org/api/v1~ with the login ~USER^ghub~ (a ~USER^forge~ token from the Forge package works as well). Without a ~forgejo.user~, remoto reads Codeberg anonymously and says so once.
-
-Other Forgejo or Gitea servers get a prefix each through ~remoto-forgejo-instances~, a list of ~(PREFIX HOST)~ pairs. A prefix that names a TRAMP method, such as ~ssh~, is refused, since it would take those paths from TRAMP. The token goes under ~HOST/api/v1~, and the account name under ~forgejo.HOST.user~, since ~ghub~ reads ~forgejo.user~ for Codeberg only:
-
-#+begin_src emacs-lisp
-(setopt remoto-forgejo-instances '(("gitea" "gitea.com")))
-;; C-x C-f /gitea:gitea/tea RET
-#+end_src
-
-The built-in prefixes load remoto on their first use; a prefix from this option exists once remoto is loaded, so turn ~global-remoto-mode~ on in your config to type it at the first prompt of a session.
+GitHub, under ~/github:~ and ~/gh:~, and Codeberg, under ~/codeberg:~ and ~/cb:~.
 
 * How
 ** use-package 
@@ -58,13 +35,41 @@ It is on [[https://melpa.org/#/remoto][MELPA]]. You can just point at it and Ema
 (use-package remoto)
 #+end_src
 
-The mode turns itself on at first use, whichever way that comes: ~M-x remoto-browse~, an Embark open action, or a ~/github:~ or ~/gh:~ path typed at ~C-x C-f~, ~C-x d~ or any other file prompt. For the last one the package autoloads register a small handler for those two prefixes, the way TRAMP loads on the first remote path; it hands over to the real handler and steps aside. Each of these says so once in the echo area. To have the mode on from the start, and skip that message, put ~(global-remoto-mode 1)~ in your config.
+The mode turns itself on at first use, whichever way that comes: ~M-x remoto-browse~, an Embark open action, or a ~/github:~, ~/gh:~, ~/codeberg:~ or ~/cb:~ path typed at ~C-x C-f~, ~C-x d~ or any other file prompt. For the last one the package autoloads register a small handler for those prefixes, the way TRAMP loads on the first remote path; it hands over to the real handler and steps aside. Each of these says so once in the echo area. To have the mode on from the start, and skip that message, put ~(global-remoto-mode 1)~ in your config.
 
-** Usage
+#+HTML: <details><summary>
+** GitHub
+#+HTML: </summary>
 
-*** remoto-browse
+*** Auth
 
-The main entry point. Accepts any GitHub URL format:
+Public repositories need no setup. A token adds private repositories, a higher rate limit (5,000 requests an hour instead of 60), and ~/gh:~ itself, which lists your account and organizations.
+
+Run ~M-x remoto-login~. It opens GitHub's page for a new token with its scopes ticked, reads the token you paste, checks it with GitHub, and stores it in the first =.gpg= file of ~auth-sources~, such as =~/.authinfo.gpg=; without one, the token lasts the session. There is no command to remember: when GitHub's limit runs out, or when you open ~/gh:~, remoto asks to log in.
+
+The page ticks ~repo~, for private repositories, and ~read:org~, to list your organizations. A fine-grained token works for the repositories it covers, but GitHub lists no organizations for it.
+
+remoto also reads the tokens you keep already, with no git config: those of [[https://github.com/magit/ghub][ghub]] and [[https://github.com/magit/forge][Forge]] (the login ~USER^ghub~ or ~USER^forge~ under ~api.github.com~), or a row of your own:
+
+#+begin_example
+machine github.com login USER password TOKEN
+#+end_example
+
+After you change auth-source by hand in a running Emacs, ~M-x remoto-reset-auth~ looks the token up again. To send no token at all, set ~remoto-github-auth~ to ~none~.
+
+*** Examples
+
+#+begin_example
+C-x C-f /gh:torvalds/linux RET           -> the tree on the default branch
+C-x C-f /gh:torvalds/linux@ TAB          -> branches, then tags
+C-x C-f /gh:agzam/remoto.el#37 RET       -> a pull request
+C-x d   /gh:torvalds/ RET                -> the repositories of an account
+C-x C-f https://github.com/torvalds/linux/blob/master/README RET
+#+end_example
+
+~/gh:~ is short for ~/github:~ and works wherever the long form does.
+
+~M-x remoto-browse~ prompts for a repository and opens its Dired. It takes any form GitHub hands out:
 
 #+begin_src emacs-lisp
 M-x remoto-browse RET https://github.com/torvalds/linux RET
@@ -73,24 +78,54 @@ M-x remoto-browse RET torvalds/linux RET
 #+end_src
 
 It reads GitHub names only; a Codeberg URL or a ~/cb:~ path opens with ~C-x C-f~.
+#+HTML: </details>
+#+HTML: <details><summary>
+** Codeberg
+#+HTML: </summary>
 
-*** C-x d / C-x C-f
+*** Auth
 
-GitHub URLs are detected automatically in ~dired~ and ~find-file~:
+Public repositories need no setup. A token adds private repositories and ~/cb:~ itself, which lists your account and organizations.
+
+Run ~M-x remoto-login~ and pick Codeberg. It opens Codeberg's page of applications, where you generate a token with Read on repository, issue, organization and user, and access to All repositories; Specific repositories cannot hold the user and organization permissions. remoto checks the token and stores it as it does GitHub's.
+
+A token you keep for Forge works as it is, and so does a row of your own:
+
+#+begin_example
+machine codeberg.org login USER password TOKEN
+#+end_example
+
+*** Examples
+
+#+begin_example
+C-x C-f /cb:forgejo/forgejo RET          -> the tree on the default branch
+C-x C-f /cb:forgejo/forgejo@ TAB         -> branches, then tags
+C-x C-f /cb:forgejo/forgejo#14933 RET    -> a pull request, with its reviews
+C-x d   /cb:forgejo/ RET                 -> the repositories of an account
+C-x C-f https://codeberg.org/forgejo/forgejo/src/branch/forgejo/go.mod RET
+#+end_example
+
+~/cb:~ is short for ~/codeberg:~.
+
+*** Other Forgejo and Gitea servers
+
+Other Forgejo or Gitea servers get a prefix each through ~remoto-forgejo-instances~, a list of ~(PREFIX HOST)~ pairs. A prefix that names a TRAMP method, such as ~ssh~, is refused, since it would take those paths from TRAMP.
 
 #+begin_src emacs-lisp
-C-x C-f /github:torvalds/linux RET
-
-;; shorthand also works
-C-x C-f /gh:torvalds/linux RET
-
-;; complete urls work too
-C-x C-f https://github.com/torvalds/linux/blob/master/README RET
+(setopt remoto-forgejo-instances '(("gitea" "gitea.com")))
+;; C-x C-f /gitea:gitea/tea RET
 #+end_src
+
+Auth works as on Codeberg: ~M-x remoto-login~ names each server by its host, and a row of your own goes under ~HOST~.
+
+The built-in prefixes load remoto on their first use; a prefix from this option exists once remoto is loaded, so turn ~global-remoto-mode~ on in your config to type it at the first prompt of a session.
+#+HTML: </details>
+
+** Usage
 
 *** find-file completion
 
-The ~/github:~ prefix (~/gh:~ shorthand works too) enables multi-level completion directly in ~find-file~ (~C-x C-f~). Three delimiters after ~owner/repo~ control the mode: ~/~ for files, ~@~ for branches/tags, ~#~ for issues/PRs.
+Every prefix enables multi-level completion directly in ~find-file~ (~C-x C-f~). Three delimiters after ~owner/repo~ control the mode: ~/~ for files, ~@~ for branches/tags, ~#~ for issues/PRs.
 
 #+begin_example
 /github:              -> your user + orgs (when authenticated)
@@ -102,7 +137,7 @@ The ~/github:~ prefix (~/gh:~ shorthand works too) enables multi-level completio
 /github:torvalds/linux#        -> issues + PRs
 #+end_example
 
-Each level shows annotations: repo descriptions, issue/PR titles and state, file commit messages, user/org type. Works with vanilla completion, Vertico, Corfu, etc. While a GitHub request is in flight, a ~⟳~ sits between the prompt and the path being typed, and once the path is chosen and opens, the same mark sits in the echo area; ~remoto-browse~ shows the same two, and ~remoto-show-fetch-indicator~ turns both off.
+Each level shows annotations: repo descriptions, issue/PR titles and state, file commit messages, user/org type. Works with vanilla completion, Vertico, Corfu, etc. While a request is in flight, a ~⟳~ sits between the prompt and the path being typed, and once the path is chosen and opens, the same mark sits in the echo area; ~remoto-browse~ shows the same two, and ~remoto-show-fetch-indicator~ turns both off.
 
 Hitting RET on ~/github:owner/repo~ opens the default branch. ~/github:owner/repo#42~ opens an issue/PR display buffer.
 
@@ -127,9 +162,11 @@ Keybindings in the display buffer: ~b~ (open in browser), ~g~ (refresh).
 | Command              | Description                                                   |
 |----------------------+---------------------------------------------------------------|
 | ~global-remoto-mode~ | Turn the file handler, URL rewriting and completion on or off |
-| ~remoto-browse~      | Prompt for a repo, open dired at root                         |
+| ~remoto-browse~      | Prompt for a GitHub repo, open dired at root                  |
 | ~remoto-refresh~     | Clear the cache of the current repo or listing, re-fetch      |
-| ~remoto-copy-url~    | Copy ~github.com~ URL for current file/line to kill ring      |
+| ~remoto-copy-url~    | Copy the forge URL for current file/line to kill ring         |
+| ~remoto-login~       | Log in to a forge with a token, and store the token           |
+| ~remoto-reset-auth~  | Forget the login state, look the token up again               |
 
 *** Language servers
 
@@ -174,7 +211,8 @@ A branch or tag offers the repository's actions as well. Run ~embark-act~ on a t
 2. Directory listings, ~file-exists-p~, completions - all served from the cached tree in memory.
 3. File contents are fetched on demand when you actually open a file.
 4. Content is cached by SHA, so re-opening the same file is instant.
-5. Authentication, SSO, private repos - all handled transparently by ~ghub~.
+5. Requests go through ~ghub~, with a token from auth-source when one is set up (see Auth under each forge).
+6. The core asks a forge for its data through a small set of generic functions; GitHub answers them in ~remoto-github.el~, and ~remoto-forgejo.el~ reuses those answers for Forgejo and Gitea servers, Codeberg among them. Support for other forges - gists, GitLab - builds on that.
 
 ** FAQ
 *** Why this isn't a [[https://www.gnu.org/software/emacs/manual/html_node/tramp/][TRAMP]] backend?
@@ -204,7 +242,7 @@ We can only imagine a world where git's transport layer gives you a browsable fi
 - No git operations (log, blame, diff).
 - Timestamps in a repository's Dired are synthetic (the tree API has no timestamps); a listing of repositories shows their last push.
 - Very large repos (100k+ files) use slower per-directory fetching.
-- Rate limit: 5,000 requests/hour on GitHub, 2,000 per 10 minutes on Codeberg (normal browsing stays well within this).
+- Rate limits: GitHub allows 5,000 requests an hour with a token and 60 without; Codeberg allows 2,000 per 10 minutes. Normal browsing stays well within them, though not within GitHub's 60.
 - Per-file commit annotations make up to 20 API calls on first directory listing (cached after).
 - Forgejo serves a repository's tree 1,000 entries a page; a large repository takes a few seconds to open the first time, and one with more than 20,000 files falls back to per-directory fetching.
 

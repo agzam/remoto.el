@@ -482,24 +482,19 @@ Two forges may host an OWNER/REPO each, so the prefix is part of the key."
   :prefix "remoto-")
 
 (defcustom remoto-github-auth nil
-  "Auth token source for GitHub API requests via ghub.
-nil means use the default ghub token (USERNAME^ghub in auth-source).
-A symbol like `forge' uses that package's token instead.
-A string is used as a literal token.
-See ghub documentation for auth-source setup."
-  :type '(choice (const :tag "Default ghub token" nil)
-                 (symbol :tag "Package token name")
+  "How remoto authenticates to GitHub.
+nil looks the token up in auth-source, where `remoto-login' stores it;
+`none' never sends a token; a string is the token itself."
+  :type '(choice (const :tag "Look the token up" nil)
+                 (const :tag "Send no token" none)
                  (string :tag "Literal token"))
   :group 'remoto)
 
 (defcustom remoto-auth-timeout 10
-  "Seconds to wait for auth-source token lookup before giving up.
-When ghub's token lookup (which may trigger GPG decryption of
-authinfo) exceeds this limit, remoto falls back to unauthenticated
-access for that request.  Use `remoto-reset-auth' to retry after
-adding a token."
+  "Unused: remoto looks its tokens up itself, without ghub's own lookup."
   :type 'number
   :group 'remoto)
+(make-obsolete-variable 'remoto-auth-timeout nil "2.5.0")
 
 (defcustom remoto-search-cache-ttl 300
   "Seconds before cached API results expire.
@@ -512,10 +507,10 @@ directory-listing caches.  Defined early so functions above the
 (cl-defstruct (remoto--login (:constructor remoto--login-create)
                              (:copier nil))
   "What remoto knows of its login at one API host.
-FAILED is non-nil once authenticated access failed for good (a missing
-or rejected token, not a timeout), so requests go unauthenticated until
-`remoto-reset-auth'; TOKEN is the token that works; USER its account."
-  failed token user)
+FAILED: anonymous reads until `remoto-reset-auth' or `remoto-login'.
+TOKEN is the token in use, ACCOUNT the name in its row, USER the account
+the forge answered for it; HINTED and DECLINED last the session."
+  failed token user account hinted declined)
 
 (defvar remoto--logins (make-hash-table :test 'equal)
   "Login state by API host, each a `remoto--login'.
@@ -545,6 +540,14 @@ In ghub's spelling, with the path of the API: \"api.github.com\",
 (defun remoto--forge-login (forge)
   "Return the `remoto--login' at the API host of FORGE."
   (remoto--login (remoto--api-host forge)))
+
+(defun remoto--ghub-username (forge auth)
+  "Return the `:username' for a request to FORGE with AUTH, or nil.
+ghub reads git config for a name it is not given, even with a token in
+hand, and uses the name for nothing then, so any name serves."
+  (and (stringp auth)
+       (let ((login (remoto--forge-login forge)))
+         (or (remoto--login-account login) (remoto--login-user login) "remoto"))))
 
 (defun remoto--json-reader (_status)
   "Parse JSON response with list-type arrays for remoto compatibility.
@@ -772,6 +775,7 @@ HOST and RESOURCE name the request in the condition data."
     (setf (remoto--request-buffer req)
           (ghub-get resource nil
                     :auth auth
+                    :username (remoto--ghub-username forge auth)
                     :reader #'remoto--json-reader
                     :host host
                     :forge (remoto--ghub-forge forge)
@@ -779,10 +783,11 @@ HOST and RESOURCE name the request in the condition data."
                                 (setf (remoto--request-value req) value
                                       (remoto--request-headers req) headers
                                       (remoto--request-status req) 'done))
-                    :errorback (lambda (err &rest _)
+                    :errorback (lambda (err &optional headers &rest _)
                                  (remhash key remoto--pending-requests)
                                  (setf (remoto--request-value req)
                                        (remoto--request-condition err host resource)
+                                       (remoto--request-headers req) headers
                                        (remoto--request-status req) 'error))))
     (puthash key req remoto--pending-requests)
     req))
@@ -810,7 +815,10 @@ Return the value or signal the condition the synchronous call would."
     (pcase (remoto--request-status req)
       ('done (setq remoto--response-headers (remoto--request-headers req))
              (remoto--request-value req))
+      ;; `remoto--ghub-get' binds these around this call and reads them
+      ;; for the message, as after a synchronous request.
       ('error (let ((err (remoto--request-value req)))
+                (setq ghub-response-headers (remoto--request-headers req))
                 (signal (car err) (cdr err))))
       (_ (error "Remoto: no reply for %s" resource)))))
 
@@ -847,6 +855,29 @@ HEADERS came with the answer; a Retry-After among them says how long to wait."
                    (format "; retry in %s seconds" wait))
                   (t (format "; retry after %s" wait))))))
 
+(defconst remoto--rate-limited " rate limited until "
+  "What a rate-limit `user-error' says between the forge and the time.
+`remoto--api' looks for it to offer a login.")
+
+(defun remoto--rate-limit-reset (headers)
+  "Return the time the rate limit HEADERS report ends, or nil.
+GitHub sends x-ratelimit-remaining and x-ratelimit-reset; a server that
+asks the client to wait sends Retry-After, in seconds."
+  (let ((remaining (cdr (assoc-string "x-ratelimit-remaining" headers t)))
+        (reset (cdr (assoc-string "x-ratelimit-reset" headers t)))
+        (wait (cdr (assoc-string "retry-after" headers t))))
+    (cond ((and wait (string-match-p "\\`[0-9]+\\'" wait))
+           (time-add nil (string-to-number wait)))
+          ((and (equal remaining "0") reset (string-match-p "\\`[0-9]+\\'" reset))
+           (string-to-number reset)))))
+
+(defun remoto--rate-limited-message (forge reset auth)
+  "Return the message for FORGE rate limiting a request with AUTH until RESET.
+Without a token it names `remoto-login', which lifts GitHub's limit."
+  (concat "Remoto: " (remoto-forge-title forge) remoto--rate-limited
+          (format-time-string "%H:%M" reset)
+          (and (eq auth 'none) (remoto--login-tail))))
+
 (defun remoto--ghub-get (forge resource auth endpoint)
   "Call `ghub-get' on RESOURCE of FORGE with AUTH, translating errors.
 ENDPOINT is used in error messages for context.  The host is always
@@ -863,6 +894,7 @@ explicit: ghub's default for a forge is its web host, which answers HTML."
                 (remoto--ghub-get-interruptible forge resource auth)
               (prog1 (ghub-get resource nil
                                :auth auth
+                               :username (remoto--ghub-username forge auth)
                                :reader #'remoto--json-reader
                                :host (remoto--api-host forge)
                                :forge (remoto--ghub-forge forge))
@@ -871,6 +903,10 @@ explicit: ghub's default for a forge is its web host, which answers HTML."
       ;; PAYLOAD); there are no per-status error symbols to match on.
       (ghub-http-error
        (pcase (cadr err)
+         ((and (or 403 429)
+               (let reset (remoto--rate-limit-reset ghub-response-headers))
+               (guard reset))
+          (user-error "%s" (remoto--rate-limited-message forge reset auth)))
          ;; A search answers 422 when its user: qualifier names no account.
          ((or 404 422) (user-error "%s%s" remoto--not-found endpoint))
          ;; Forgejo answers 400 "sha not found [REF]" to a ref it lacks.
@@ -879,93 +915,96 @@ explicit: ghub's default for a forge is its web host, which answers HTML."
           (user-error "%s%s" remoto--not-found endpoint))
          (403 (user-error "Remoto: access denied (rate limit or permissions): %s"
                           endpoint))
-         (401 (user-error "%s%s; configure a token for it in auth-source, \
-then M-x remoto-reset-auth" remoto--auth-rejected (remoto--api-host forge)))
+         (401 (user-error "%s%s%s" remoto--auth-rejected (remoto--api-host forge)
+                          (remoto--login-tail)))
          (_ (user-error "%s" (remoto--http-error-message
                               forge endpoint err ghub-response-headers)))))
       (json-error
        (user-error "Remoto: could not parse API response for %s" endpoint)))))
 
+(cl-defgeneric remoto-forge-title (_forge)
+  "Return the name of FORGE that messages show, such as \"GitHub\"."
+  "GitHub")
+
+(defun remoto--login-keys ()
+  "Return how to call `remoto-login', in the face Emacs gives keys."
+  (substitute-command-keys "\\[remoto-login]"))
+
+(defun remoto--login-tail ()
+  "Return the end of a message that names `remoto-login'."
+  (concat ". " (remoto--login-keys)))
+
 (cl-defgeneric remoto--literal-token (_forge)
-  "Return the token of FORGE from a user option, or nil."
+  "Return the auth of FORGE from a user option: a token, `none' or nil."
   nil)
 
 (cl-defmethod remoto--literal-token ((_forge remoto-github))
-  "A string `remoto-github-auth' is GitHub's token."
-  (and (stringp remoto-github-auth) remoto-github-auth))
+  "A string `remoto-github-auth' is GitHub's token, and `none' none."
+  (and (or (stringp remoto-github-auth) (eq remoto-github-auth 'none))
+       remoto-github-auth))
 
 (defun remoto--auth (forge)
-  "Return the `:auth' for a request to FORGE: a token, nil or `none'.
-nil leaves the lookup to ghub; `none' goes unauthenticated.  A token
-found here is kept in the login of the host, so later calls skip the
-auth-source search.  A failed search marks the login (see
-`remoto--find-token'), and this call goes unauthenticated at once."
+  "Return the `:auth' for a request to FORGE: a token or `none'.
+A token found once stays in the login of the host, so later calls skip
+the auth-source search; without one, the login reads anonymously until
+`remoto-reset-auth' or `remoto-login'."
   (let ((login (remoto--forge-login forge)))
     (cond ((remoto--login-failed login) 'none)
           ((remoto--login-token login))
           ((remoto--literal-token forge))
           ((when-let* ((token (remoto--find-token forge)))
              (setf (remoto--login-token login) token)))
-          ((remoto--login-failed login) 'none))))
+          (t (setf (remoto--login-failed login) t)
+             'none))))
+
+(defun remoto--account-endpoint-p (endpoint)
+  "Return non-nil when ENDPOINT is of the token's account, user and below.
+Asked without a token, those answer 401, which url.el takes for a cue to
+prompt for a password."
+  (string-match-p (rx bos "user" (or eos (in "/?"))) endpoint))
 
 (defun remoto--anonymous-get (forge endpoint)
   "GET ENDPOINT of the API of FORGE without a token.
-The endpoints of the token's account, user and below, are not asked:
-they answer 401, which url.el takes for a cue to prompt for a password."
-  (if (string-match-p (rx bos "user" (or eos (in "/?"))) endpoint)
+An endpoint of the token's account is not asked: see
+`remoto--account-endpoint-p'."
+  (if (remoto--account-endpoint-p endpoint)
       (user-error "Remoto: %s needs a token for %s" endpoint (remoto--api-host forge))
     (remoto--ghub-get forge (concat "/" endpoint) 'none endpoint)))
 
+(defun remoto--refuse-token (forge)
+  "Drop the token of FORGE that the forge refused; non-nil after a new login.
+remoto asks to log in again when it may, and otherwise says so; the
+login reads anonymously until `remoto-reset-auth' or `remoto-login'."
+  (let ((login (remoto--forge-login forge))
+        (title (remoto-forge-title forge)))
+    (setf (remoto--login-failed login) t
+          (remoto--login-token login) nil
+          (remoto--login-hinted login) t)
+    (or (remoto--offer-login forge (format "%s refused the token. Log in again? " title))
+        (progn (message "Remoto: %s refused the token. %s" title (remoto--login-keys))
+               nil))))
+
 (defun remoto--api (forge endpoint)
   "Call ENDPOINT of the REST API of FORGE via ghub, return parsed JSON.
-ENDPOINT should not have a leading slash - one is prepended
-automatically.  Auth resolution order: the token of the host's login,
-the forge's token option, `remoto--find-token', ghub's own lookup.
-When every avenue fails, signals `user-error'.  Public repositories work
-without any setup via unauthenticated fallback."
-  (let* ((resource (concat "/" endpoint))
-         (login (remoto--forge-login forge))
-         (auth (remoto--auth forge)))
+ENDPOINT has no leading slash.  A refused token, or a rate limit without
+one, offers a login when remoto may ask, and the request goes again after
+it; a refused token not replaced is dropped, and the request goes without."
+  (let ((auth (remoto--auth forge)))
     (if (eq auth 'none)
-        (remoto--anonymous-get forge endpoint)
+        (condition-case err
+            (remoto--anonymous-get forge endpoint)
+          (user-error
+           (if (remoto--offer-login-for-limit forge (cadr err))
+               (remoto--api forge endpoint)
+             (signal (car err) (cdr err)))))
       (condition-case err
-          ;; The timeout guards ghub's own token lookup, which a nil AUTH
-          ;; leaves to it.  With the token in hand no lookup is left, and
-          ;; a slow answer is no lookup that hangs.
-          (if (or (stringp auth) (remoto--login-user login))
-              (remoto--ghub-get forge resource auth endpoint)
-            (let ((result (with-timeout (remoto-auth-timeout 'remoto--timed-out)
-                            (remoto--ghub-get forge resource auth endpoint))))
-              (when (eq result 'remoto--timed-out)
-                (message "Remoto: auth lookup timed out; retrying next call (see `remoto-auth-timeout')")
-                (setq result (remoto--anonymous-get forge endpoint)))
-              result))
+          (remoto--ghub-get forge (concat "/" endpoint) auth endpoint)
         (user-error
-         (cond
-          ;; The forge refused the token: go on without it, as the GitHub
-          ;; warm-up does, until `remoto-reset-auth'.
-          ((string-prefix-p remoto--auth-rejected (cadr err))
-           (setf (remoto--login-failed login) t)
-           (message "Remoto: %s rejected the token; reading it anonymously \
-until M-x remoto-reset-auth" (remoto--api-host forge))
-           (remoto--anonymous-get forge endpoint))
-          ;; Any other answer of the API (404, 403, ...) is no auth failure.
-          ((string-prefix-p "Remoto:" (cadr err))
+         (unless (string-prefix-p remoto--auth-rejected (cadr err))
            (signal (car err) (cdr err)))
-          ;; ghub auth config error.  Every avenue exhausted - fail loudly.
-          (t
-           (setf (remoto--login-failed login) t)
-           (user-error "Remoto: authentication failed for %s; \
-configure a token for %s in auth-source, then M-x remoto-reset-auth"
-                       endpoint (remoto--api-host forge)))))
-        (error
-         ;; ghub could not resolve auth at all.  Fail loudly so the
-         ;; user knows auth is the problem, not a missing repo.
-         (setf (remoto--login-failed login) t)
-         (user-error "Remoto: authentication failed for %s (%s); \
-configure a token for %s in auth-source, then M-x remoto-reset-auth"
-                     endpoint (error-message-string err)
-                     (remoto--api-host forge)))))))
+         (if (remoto--refuse-token forge)
+             (remoto--api forge endpoint)
+           (remoto--anonymous-get forge endpoint)))))))
 
 (cl-defgeneric remoto--page-params (_forge count &optional page)
   "Return the query that asks FORGE for COUNT items, those of PAGE.
@@ -1005,8 +1044,148 @@ HOST is every host.  Use after adding a token to auth-source."
   (if host
       (remhash host remoto--logins)
     (clrhash remoto--logins))
+  ;; auth-source remembers a failed search for `auth-source-cache-expiry'.
+  (auth-source-forget-all-cached)
   (message "Remoto: login state cleared for %s; retrying the token lookup \
 on the next request" (or host "every host")))
+
+;;;; Login
+
+(defvar epa-file-encrypt-to)
+
+(cl-defgeneric remoto--token-url (_forge)
+  "Return the address of the page for a new token of FORGE, filled in.
+GitHub's classic page, with its scopes ticked: a fine-grained token lists
+no organizations."
+  "https://github.com/settings/tokens/new?scopes=repo,read:org&description=remoto")
+
+(cl-defgeneric remoto--token-prompt (forge)
+  "Return the prompt for a token of FORGE."
+  (format "%s token: " (remoto-forge-title forge)))
+
+(defun remoto--buffer-forge ()
+  "Return the forge of the remoto path of the current buffer, or nil."
+  (when-let* ((name (or buffer-file-name
+                        (and (derived-mode-p 'dired-mode) default-directory)
+                        (bound-and-true-p remoto-topic--repo-path)))
+              (parsed (remoto--parse name)))
+    (remoto-path-forge parsed)))
+
+(defun remoto--read-forge (prompt)
+  "Read a registered forge with PROMPT, the forge of the current buffer first."
+  (let* ((forges (seq-uniq (mapcar #'cdr remoto--forges)))
+         (default (remoto-forge-title (or (remoto--buffer-forge) remoto--github)))
+         (title (completing-read (format-prompt prompt default)
+                                 (mapcar #'remoto-forge-title forges)
+                                 nil t nil nil default)))
+    (seq-find (lambda (forge) (equal (remoto-forge-title forge) title)) forges)))
+
+(defun remoto--token-account (forge token)
+  "Return the account of TOKEN on FORGE, or signal that the forge refused it."
+  (condition-case err
+      (alist-get 'login (remoto--ghub-get forge "/user" token "user"))
+    (user-error
+     (if (string-prefix-p remoto--auth-rejected (cadr err))
+         (user-error "Remoto: %s refused the token" (remoto-forge-title forge))
+       (signal (car err) (cdr err))))))
+
+(defun remoto--token-file ()
+  "Return the first .gpg file of `auth-sources', or nil."
+  (seq-some (lambda (source)
+              (let ((file (if (consp source) (plist-get source :source) source)))
+                (and (stringp file) (string-suffix-p ".gpg" file)
+                     (expand-file-name file))))
+            auth-sources))
+
+(defun remoto--store-token (forge account token)
+  "Store TOKEN of ACCOUNT on FORGE in the first .gpg file of `auth-sources'.
+Return the file, or nil without one.  remoto's earlier line for the host
+goes; the file is edited as `auth-source-netrc-saver' edits it, since
+auth-source's own create keeps an existing row."
+  (when-let* ((file (remoto--token-file)))
+    (let ((host (remoto-forge-host forge)))
+      (with-temp-buffer
+        (when (file-exists-p file)
+          (insert-file-contents file))
+        (when (and (listp auth-source-gpg-encrypt-to) auth-source-gpg-encrypt-to)
+          (setq-local epa-file-encrypt-to auth-source-gpg-encrypt-to))
+        (goto-char (point-min))
+        (flush-lines (concat "^machine " (regexp-quote host) " login [^ \t\n]+\\^remoto "))
+        (goto-char (point-min))
+        (insert (format "machine %s login %s^remoto password %s\n" host account token))
+        (write-region nil nil file nil 'silent))
+      (set-file-modes file #o600)
+      (auth-source-forget-all-cached)
+      file)))
+
+;;;###autoload
+(defun remoto-login (forge)
+  "Log in to FORGE with a token that is checked and then kept.
+Interactively, read the forge, the current buffer's first; open the page
+that makes a token, read the token, ask the forge whose it is, and store
+it in the first .gpg file of `auth-sources', else for the session."
+  (interactive (list (remoto--read-forge "Remoto: log in to")))
+  (browse-url (remoto--token-url forge))
+  (let ((token (string-trim (read-passwd (remoto--token-prompt forge)))))
+    (when (string-empty-p token)
+      (user-error "Remoto: no token given"))
+    (let* ((account (remoto--token-account forge token))
+           (file (remoto--store-token forge account token))
+           (login (remoto--forge-login forge)))
+      (setf (remoto--login-token login) token
+            (remoto--login-account login) account
+            (remoto--login-user login) account
+            (remoto--login-failed login) nil
+            (remoto--login-declined login) nil
+            (remoto--login-hinted login) t)
+      (message "Remoto: logged in to %s as %s%s" (remoto-forge-title forge) account
+               (if file "" " for this session"))
+      account)))
+
+(defvar remoto--may-ask nil
+  "Non-nil while a remoto entry point runs for a command of the user's.
+Only then does remoto offer a login: never during completion, from a
+timer, or from a process filter.")
+
+(defun remoto--ask-login-p (forge)
+  "Return non-nil when remoto may ask now to log in to FORGE."
+  (and remoto--may-ask this-command (not noninteractive) (not throw-on-input)
+       (not (remoto--login-declined (remoto--forge-login forge)))))
+
+(defun remoto--offer-login (forge question)
+  "Ask QUESTION, then log in to FORGE on yes; return non-nil after a login.
+A no stands for the session: remoto asks FORGE no more, it only says."
+  (when (remoto--ask-login-p forge)
+    (if (y-or-n-p question)
+        (and (remoto-login forge) t)
+      (setf (remoto--login-declined (remoto--forge-login forge)) t)
+      nil)))
+
+(defun remoto--offer-login-for-limit (forge message)
+  "Offer a login to FORGE when MESSAGE is a rate limit without a token.
+Return non-nil after a login.  Reading without a token by choice, with
+`remoto-github-auth' set to `none', asks nothing."
+  (and (remoto--login-failed (remoto--forge-login forge))
+       (string-match (concat "\\`Remoto: \\(.+" (regexp-quote remoto--rate-limited)
+                             "[0-9:]+\\)")
+                     message)
+       (remoto--offer-login forge (concat (match-string 1 message) ". Log in now? "))))
+
+(cl-defgeneric remoto--anonymous-limit (_forge)
+  "Return the request limit of FORGE for a reader without a token, or nil.
+A forge whose limit seldom runs out answers nil, and its hint is not shown."
+  "60 requests/hour")
+
+(defun remoto--hint-login (forge)
+  "Say once a session that FORGE is read without a token, when that limits.
+A refused or declined token said so already, and marked the hint shown."
+  (when-let* ((limit (remoto--anonymous-limit forge))
+              (login (remoto--forge-login forge))
+              ((remoto--login-failed login))
+              ((not (remoto--login-hinted login))))
+    (setf (remoto--login-hinted login) t)
+    (message "Remoto: no %s token, %s. %s"
+             (remoto-forge-title forge) limit (remoto--login-keys))))
 
 (defconst remoto--dir-entry
   '((type . "tree") (size . 0) (sha . "") (mode . "040000"))
@@ -2621,26 +2800,34 @@ non-nil, is called with no arguments.  The `:host' is explicit, or ghub
 may resolve the HTML site.  The call counts toward the fetch indicator."
   (let* ((resource (concat "/" endpoint))
          (auth (remoto--auth forge)))
-    (condition-case nil
-        (let ((inhibit-message t))
-          (remoto--inflight-inc)
-          ;; ghub calls :callback as (value headers status req) and retries
-          ;; with (value) on `wrong-number-of-arguments'.  Accept the full
-          ;; arglist so the retry never fires and the in-flight counter is
-          ;; decremented exactly once.  All callers pass a 1-arg callback.
-          (ghub-get resource nil
-                    :auth auth
-                    :reader #'remoto--json-reader
-                    :host (remoto--api-host forge)
-                    :forge (remoto--ghub-forge forge)
-                    :callback (lambda (value &rest _)
-                                (remoto--inflight-dec)
-                                (funcall callback value))
-                    :errorback (lambda (&rest _)
-                                 (remoto--inflight-dec)
-                                 (when errback (funcall errback)))))
-      (error (remoto--inflight-dec)
-             (when errback (funcall errback))))))
+    (if (and (eq auth 'none) (remoto--account-endpoint-p endpoint))
+        (when errback (funcall errback))
+      (remoto--api-async-send forge resource auth callback errback))))
+
+(defun remoto--api-async-send (forge resource auth callback errback)
+  "Send the request of `remoto--api-async' for RESOURCE of FORGE with AUTH.
+CALLBACK and ERRBACK are those of `remoto--api-async'."
+  (condition-case nil
+      (let ((inhibit-message t))
+        (remoto--inflight-inc)
+        ;; ghub calls :callback as (value headers status req) and retries
+        ;; with (value) on `wrong-number-of-arguments'.  Accept the full
+        ;; arglist so the retry never fires and the in-flight counter is
+        ;; decremented exactly once.  All callers pass a 1-arg callback.
+        (ghub-get resource nil
+                  :auth auth
+                  :username (remoto--ghub-username forge auth)
+                  :reader #'remoto--json-reader
+                  :host (remoto--api-host forge)
+                  :forge (remoto--ghub-forge forge)
+                  :callback (lambda (value &rest _)
+                              (remoto--inflight-dec)
+                              (funcall callback value))
+                  :errorback (lambda (&rest _)
+                               (remoto--inflight-dec)
+                               (when errback (funcall errback)))))
+    (error (remoto--inflight-dec)
+           (when errback (funcall errback)))))
 
 (defun remoto--debounce (key fn)
   "Schedule FN after `remoto-debounce-delay' seconds of idle time.
@@ -2890,6 +3077,25 @@ and capitals sort first.  Their text properties go."
                           sorted)))
     (if exact (cons exact (delete exact sorted)) sorted)))
 
+(defun remoto--not-found-or-private (forge owner repo)
+  "Signal that FORGE has no OWNER/REPO, which may be private without a token."
+  (if (eq (remoto--auth forge) 'none)
+      (user-error "Remoto: %s/%s not found or private%s"
+                  owner repo (remoto--login-tail))
+    (user-error "%srepos/%s/%s" remoto--not-found owner repo)))
+
+(defun remoto--or-private (forge owner repo thunk)
+  "Call THUNK, and say so when FORGE has no OWNER/REPO for it.
+A forge answers 404 for a private repository read without a token, so
+the message names `remoto-login' then."
+  (condition-case err
+      (funcall thunk)
+    (user-error
+     ;; Only the repository's own endpoint: a missing ref is no private repository.
+     (if (equal (cadr err) (format "%srepos/%s/%s" remoto--not-found owner repo))
+         (remoto--not-found-or-private forge owner repo)
+       (signal (car err) (cdr err))))))
+
 (defun remoto--account-matches (name)
   "Return (/github: . LOGINS) when NAME is a bare /github:QUERY.
 LOGINS are the accounts of the search that hold each word of QUERY.  A
@@ -2929,8 +3135,10 @@ repository matches, or when OWNER is no account."
                              (signal (car err) (cdr err)))))))
       (cons dir
             (or (remoto--sorted-names dir names query)
-                (user-error "Remoto: no repository of %s matches %s"
-                            owner query))))))
+                (if (eq (remoto--auth forge) 'none)
+                    (remoto--not-found-or-private forge owner query)
+                  (user-error "Remoto: no repository of %s matches %s"
+                              owner query)))))))
 
 (defun remoto--ref-matches (name)
   "Return (DIR . REFS) when NAME, a /github:OWNER/REPO@QUERY, is no ref.
@@ -3085,11 +3293,12 @@ every Dired command calls, so each buffer gets a canonical directory."
             (dir (remoto--normalize-shorthand raw))
             ((or (remoto--url-forge dir)
                  (remoto--canonical-forge dir))))
-      (apply orig-fn
-             (if (consp dir-or-list)
-                 (cons (remoto--maybe-rewrite dir) (cdr dir-or-list))
-               (remoto--name-or-matches dir))
-             args)
+      (let ((remoto--may-ask t))
+        (apply orig-fn
+               (if (consp dir-or-list)
+                   (cons (remoto--maybe-rewrite dir) (cdr dir-or-list))
+                 (remoto--name-or-matches dir))
+               args))
     (apply orig-fn dir-or-list args)))
 
 (defun remoto--find-file-around-a (orig-fn filename &rest args)
@@ -3104,104 +3313,99 @@ nothing opens a Dired of the names that match it."
               (topic (remoto-forge-parse-topic-url forge filename)))
     (setq filename (apply #'format "%s%s/%s#%s" (remoto--prefix forge) topic)))
   ;; Check for #NUM BEFORE rewrite (rewrite would mangle the # delimiter)
-  (if-let* ((topic (remoto--topic-path filename)))
-      (progn
-        (remoto--require-topic)
-        (remoto-topic-display (cdr topic) (car topic)))
-    (let ((target (remoto--name-or-matches filename)))
-      (if (consp target)
-          (dired-noselect target)
-        (apply orig-fn target args)))))
+  (let ((remoto--may-ask t))
+    (if-let* ((topic (remoto--topic-path filename)))
+        (progn
+          (remoto--require-topic)
+          (remoto-topic-display (cdr topic) (car topic)))
+      (let ((target (remoto--name-or-matches filename)))
+        (if (consp target)
+            (dired-noselect target)
+          (apply orig-fn target args))))))
 
 ;;;; Eager auth warm-up
 
-(defun remoto--git-user-key (forge)
-  "Return the git config key, in ghub's spelling, of the account name for FORGE.
-KIND.user serves only the domain of ghub's default host for the kind of
-forge, which is api.github.com or github.com by ghub's version; any
-other host needs KIND.HOST.user."
-  (let ((kind (or (remoto--ghub-forge forge) 'github))
-        (host (remoto-forge-host forge)))
-    (if (equal (ghub--host-domain host)
-               (ghub--host-domain (alist-get kind ghub-default-host-alist)))
-        (format "%s.user" kind)
-      (format "%s.%s.user" kind host))))
+(defconst remoto--token-tags '("remoto" "forge" "ghub")
+  "The package tags of the auth-source logins remoto reads, best first.
+ghub keeps a token per package under the login ACCOUNT^PACKAGE; an
+untagged login ranks after these, a login of another package not at all.")
+
+(defun remoto--split-login (login)
+  "Split the auth-source LOGIN, ACCOUNT^PACKAGE or ACCOUNT, into a list."
+  (if-let* ((caret (and login (string-search "^" login))))
+      (list (substring login 0 caret) (substring login (1+ caret)))
+    (list login nil)))
+
+(defun remoto--token-rank (row preferred)
+  "Return the rank of the auth-source ROW as a token, lower first, or nil.
+PREFERRED is the account git config names, or nil: its rows come first
+among those of one tag."
+  (pcase-let ((`(,account ,tag) (remoto--split-login (plist-get row :user))))
+    (when-let* ((index (if tag
+                           (seq-position remoto--token-tags tag)
+                         (length remoto--token-tags))))
+      (+ (* 2 index) (if (and preferred (equal account preferred)) 0 1)))))
 
 (defun remoto--find-token (forge)
-  "Search auth-source for a token of the API host of FORGE.
-Follow ghub's conventions for the kind of forge: the user name from
-git config, under the API host or the web host, as USER^forge,
-USER^ghub or USER.  Without a user name in git config no token can be
-found, by ghub either, so the login goes unauthenticated for good."
-  (let* ((login (remoto--forge-login forge))
-         (api-host (remoto--api-host forge))
-         (web-host (remoto-forge-host forge))
-         (username (condition-case nil
-                       (ghub--username web-host (remoto--ghub-forge forge))
-                     (error nil))))
-    (if (null username)
+  "Search auth-source for a token of FORGE; return it or nil.
+Every row under its API host or web host counts, ranked by
+`remoto--token-rank'; git config only breaks ties.  The account of
+the row found goes into the login of FORGE."
+  (let ((login (remoto--forge-login forge))
+        (preferred (condition-case nil
+                       (ghub--username (remoto-forge-host forge)
+                                       (remoto--ghub-forge forge))
+                     (error nil)))
+        best best-rank)
+    (condition-case err
         (progn
-          (setf (remoto--login-failed login) t)
-          (message "Remoto: no %s in git config, reading %s anonymously"
-                   (remoto--git-user-key forge) web-host)
-          nil)
-      (catch 'found
-        (dolist (host (delete-dups (list api-host web-host)))
-          (dolist (pkg '("forge" "ghub" nil))
-            (let* ((user (if pkg (format "%s^%s" username pkg) username))
-                   (results (condition-case err
-                                (auth-source-search :host host :user user :max 1)
-                              ;; A broken backend (say, a .authinfo.gpg that
-                              ;; does not decrypt) fails the same way for
-                              ;; every combination and for every later API
-                              ;; call, which would repeat this lookup.  Report
-                              ;; it once, go unauthenticated, and leave the
-                              ;; retry to `remoto-reset-auth'.
-                              (error
-                               (setf (remoto--login-failed login) t)
-                               (message "Remoto: auth-source lookup failed (%s); \
+          (dolist (host (delete-dups (list (remoto--api-host forge)
+                                           (remoto-forge-host forge))))
+            (dolist (row (auth-source-search :host host :max 100
+                                             :require '(:secret)))
+              (when-let* ((rank (remoto--token-rank row preferred))
+                          ((or (null best-rank) (< rank best-rank))))
+                (setq best row best-rank rank))))
+          (when-let* ((secret (plist-get best :secret))
+                      (token (if (functionp secret) (funcall secret) secret))
+                      ((not (string-empty-p token))))
+            (setf (remoto--login-account login)
+                  (car (remoto--split-login (plist-get best :user))))
+            token))
+      ;; A broken backend, say a .authinfo.gpg that does not decrypt, fails
+      ;; on every later call too: say so once and leave the retry to
+      ;; `remoto-reset-auth'.
+      (error
+       (setf (remoto--login-failed login) t)
+       (message "Remoto: auth-source lookup failed (%s); \
 using unauthenticated access until M-x remoto-reset-auth"
-                                        (error-message-string err))
-                               (throw 'found nil))))
-                   (secret (plist-get (car results) :secret))
-                   (token (if (functionp secret) (funcall secret) secret)))
-              (when (and token (not (string-empty-p token)))
-                (throw 'found token)))))))))
+                (error-message-string err))
+       nil))))
 
 (defun remoto--warm-auth ()
-  "Pre-fetch the authenticated GitHub user in the background.
-Runs on an idle timer so GPG decryption happens before the user
-types anything.  Bypasses ghub's own token resolution (which may
-look up the wrong auth-source host) by searching auth-source
-directly and passing the token string to ghub.  GitHub only: the
-other forges look their token up on their first request."
+  "Learn GitHub's token and its account once Emacs is idle.
+An idle timer runs it, so a GPG passphrase prompt comes before the user
+types.  It says who the token belongs to, or that GitHub refused it."
   (let ((login (remoto--forge-login remoto--github)))
     (unless (or (remoto--login-user login) (remoto--login-failed login))
-      (if-let* ((token (or (remoto--literal-token remoto--github)
-                           (remoto--find-token remoto--github))))
-          (condition-case err
-              (when-let* ((data (let ((inhibit-message t))
-                                  (ghub-get "/user" nil
-                                            :auth token
-                                            :host (remoto--api-host remoto--github)
-                                            :reader #'remoto--json-reader)))
-                          (user (alist-get 'login data)))
-                (setf (remoto--login-user login) user
-                      (remoto--login-token login) token)
-                (message "Remoto: authenticated as %s" user))
-            (error
-             (setf (remoto--login-failed login) t)
-             (message "Remoto: token found but API call failed (%s); \
-using unauthenticated access"
-                      (error-message-string err))))
-        ;; No token found yet - don't mark the login failed, so remoto--api
-        ;; can still try ghub's own auth-source resolution on demand.
-        ;; The warm-up is opportunistic; failing here should not lock
-        ;; out the session permanently.  A failure inside the lookup has
-        ;; already marked the login and said so.
-        (unless (remoto--login-failed login)
-          (message "Remoto: no token found during warm-up; \
-will try ghub auth on first API call"))))))
+      (when-let* ((token (remoto--auth remoto--github))
+                  ((stringp token)))
+        (condition-case err
+            (when-let* ((data (let ((inhibit-message t))
+                                (ghub-get "/user" nil
+                                          :auth token
+                                          :username (remoto--ghub-username
+                                                     remoto--github token)
+                                          :host (remoto--api-host remoto--github)
+                                          :reader #'remoto--json-reader)))
+                        (user (alist-get 'login data)))
+              (setf (remoto--login-user login) user)
+              (message "Remoto: authenticated as %s" user))
+          (ghub-http-error
+           (when (eql (cadr err) 401)
+             (remoto--refuse-token remoto--github)))
+          ;; Anything else passes: the first request says what it is.
+          (error nil))))))
 
 (defvar remoto--warm-auth-timer nil
   "Pending idle timer for `remoto--warm-auth', or nil.
@@ -3261,7 +3465,9 @@ bind to a prefix of your choosing."
                          dired-directory)))))
     (when (and (stringp file)
                (string-match-p remoto--handler-regexp file))
-      (remoto-mode 1))))
+      (remoto-mode 1)
+      (when-let* ((forge (remoto--buffer-forge)))
+        (remoto--hint-login forge)))))
 
 (defun remoto--get-prop (candidate prop)
   "Get text property PROP from CANDIDATE.
