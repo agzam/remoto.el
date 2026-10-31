@@ -3,7 +3,7 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
-* [Unreleased]
+* [2.5.0] - 2026-10-30
 
 ** Added
 - ~remoto-login~: log in to a forge with a token. It opens the forge's page for a new token, GitHub's with ~repo~ and ~read:org~ ticked, reads the token, asks the forge whose it is, and stores it as ~ACCOUNT^remoto~ under the forge's web host in the first =.gpg= file of ~auth-sources~, in place of remoto's earlier row for that host; without such a file, or when GnuPG cannot write it, the token lasts the session and the message says why. A new file is encrypted with a passphrase, as auth-source encrypts one, with no list of keys to pick. The page's address goes to =*Messages*=, and into the prompt when no browser opens; a pasted token stays out of the kill ring.
