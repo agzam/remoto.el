@@ -18,7 +18,7 @@
 
 ;;; Code:
 
-(declare-function remoto--project "remoto" (dir))
+(declare-function remoto--project "remoto")
 
 ;;;###autoload
 (defun remoto-project-try (dir)

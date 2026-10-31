@@ -498,7 +498,7 @@ A directory in a repository tree is a project: `(remoto . ROOT)`, ROOT the canon
 |---|---|
 | `project-root` | ROOT |
 | `project-name` | `OWNER/REPO@REF`: ROOT after its prefix, without `:/` |
-| `project-files` | the blobs under each of DIRS, from the tree (`remoto--tree-files`): full names, sorted. A truncated tree lists what it holds and says so |
+| `project-files` | the blobs under each of DIRS, from the tree (`remoto--tree-files`): full names, sorted; relative to the one directory asked for when `project-files-relative-names` allows it. A truncated tree lists what it holds and says so |
 | `project-buffers` | project.el's default: the buffers whose `default-directory` is under ROOT |
 
 project.el's own `project-files` runs `find` through `process-file`. A repository has no local directory to run it in: `unhandled-file-name-directory` is nil, so the process runs in `~`. The same holds for the commands that run a program in the project (`project-find-regexp`, `project-shell`, `project-compile`, `project-find-file` with a prefix argument, consult-ripgrep); they stay out of reach.
