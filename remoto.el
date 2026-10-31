@@ -3806,10 +3806,31 @@ tree.  A project found before the mode is on turns it on."
   "Return OWNER/REPO@REF, the name of the remoto PROJECT."
   (string-remove-suffix ":/" (remoto--after-prefix (cdr project))))
 
+(defvar remoto--every-file nil
+  "Non-nil while a command runs that visits every file of its project.")
+
+(defun remoto--refuse-every-file (project)
+  "Signal a `user-error' when PROJECT is a remoto project."
+  (when (eq (car-safe project) 'remoto)
+    (user-error "Remoto: this visits every file of %s, a request each; search a clone"
+                (project-name project))))
+
+(defun remoto--every-file-a (function &rest args)
+  "Run FUNCTION on ARGS unless its project is remoto's: it visits every file.
+The current project is refused before the prompt, a project picked at the
+prompt once FUNCTION asks for its files."
+  (interactive (lambda (spec)
+                 (remoto--refuse-every-file (project-current))
+                 (advice-eval-interactive-spec spec)))
+  (let ((remoto--every-file t))
+    (apply function args)))
+
 (cl-defmethod project-files ((project (head remoto)) &optional dirs)
   "Return the files of the remoto PROJECT under DIRS, its root by default.
 The names are relative to the one directory asked for when
 `project-files-relative-names' allows it, as project.el's own are."
+  (when remoto--every-file
+    (remoto--refuse-every-file project))
   (let ((dirs (or dirs (list (project-root project)))))
     (if (and (bound-and-true-p project-files-relative-names) (null (cdr dirs)))
         (remoto--tree-files (car dirs) t)
@@ -3860,6 +3881,8 @@ Each step is idempotent, so a second call while on is a no-op."
   (advice-add 'find-file-noselect :around #'remoto--find-file-around-a)
   (advice-add 'read-file-name-internal :around
               #'remoto--read-file-name-internal-a)
+  (advice-add 'project-search :around #'remoto--every-file-a)
+  (advice-add 'project-query-replace-regexp :around #'remoto--every-file-a)
   (remoto--sync-inhibited remoto-inhibited-functions)
   (add-hook 'find-file-hook #'remoto--maybe-enable-mode)
   (add-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
@@ -3877,6 +3900,8 @@ Each step is idempotent, so a second call while on is a no-op."
   (advice-remove 'dired-noselect #'remoto--dired-around-a)
   (advice-remove 'find-file-noselect #'remoto--find-file-around-a)
   (advice-remove 'read-file-name-internal #'remoto--read-file-name-internal-a)
+  (advice-remove 'project-search #'remoto--every-file-a)
+  (advice-remove 'project-query-replace-regexp #'remoto--every-file-a)
   (remoto--sync-inhibited nil)
   (remove-hook 'find-file-hook #'remoto--maybe-enable-mode)
   (remove-hook 'dired-mode-hook #'remoto--maybe-enable-mode)

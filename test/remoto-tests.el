@@ -8529,6 +8529,9 @@ of `completion-all-completions'; Vertico inserts a candidate as
                              'read-file-name-internal)
             :to-be-truthy)
     (expect (advice-member-p #'remoto--inhibit-a 'eglot-ensure) :to-be-truthy)
+    (expect (advice-member-p #'remoto--every-file-a 'project-search) :to-be-truthy)
+    (expect (advice-member-p #'remoto--every-file-a 'project-query-replace-regexp)
+            :to-be-truthy)
     (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be-truthy)
     (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be-truthy)
     (expect (memq 'remoto--minibuffer-exit-cleanup minibuffer-exit-hook)
@@ -8548,6 +8551,9 @@ of `completion-all-completions'; Vertico inserts a candidate as
                                    'read-file-name-internal)
                   :to-be nil)
           (expect (advice-member-p #'remoto--inhibit-a 'eglot-ensure) :to-be nil)
+          (expect (advice-member-p #'remoto--every-file-a 'project-search) :to-be nil)
+          (expect (advice-member-p #'remoto--every-file-a 'project-query-replace-regexp)
+                  :to-be nil)
           (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be nil)
           (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be nil)
           (expect (memq 'remoto--minibuffer-exit-cleanup minibuffer-exit-hook)
@@ -9021,6 +9027,57 @@ That is where the package autoloads put it."
               (find-program "/nonexistent/find"))
           (expect (project-find-file t) :to-throw 'user-error
                   (list (format remoto-test--clone-message "find"))))))))
+
+(describe "a command that visits every file of its project"
+  ;; project-search and project-query-replace-regexp: a request per file.
+  (it "stops in a remoto project before it prompts"
+    ;; Without the advice the prompt would read the terminal in batch.
+    (expect (advice-member-p #'remoto--every-file-a 'project-search) :to-be-truthy)
+    (expect (advice-member-p #'remoto--every-file-a 'project-query-replace-regexp)
+            :to-be-truthy)
+    (remoto-test-with-project-finder
+      (spy-on 'advice-eval-interactive-spec :and-call-fake
+              (lambda (spec) (if (stringp spec) '("x") '("x" "y"))))
+      (spy-on 'remoto--api)
+      (let ((default-directory "/github:testowner/testrepo@main:/src/"))
+        (dolist (command '(project-search project-query-replace-regexp))
+          (expect (call-interactively command) :to-throw 'user-error
+                  '("Remoto: this visits every file of testowner/testrepo@main, a request each; search a clone"))))
+      (expect 'advice-eval-interactive-spec :not :to-have-been-called)
+      (expect 'remoto--api :not :to-have-been-called)))
+
+  (it "stops before it fetches a file of a remoto project picked at its prompt"
+    (remoto-test-with-project-finder
+      (let ((default-directory (file-name-as-directory (make-temp-file "remoto-none" t)))
+            (completing-read-function (lambda (&rest _) "/github:testowner/testrepo@main:/")))
+        (unwind-protect
+            (progn
+              (spy-on 'project-remember-project)
+              (spy-on 'project-known-project-roots)
+              (spy-on 'remoto--api)
+              (expect (project-search "x") :to-throw 'user-error
+                      '("Remoto: this visits every file of testowner/testrepo@main, a request each; search a clone"))
+              (expect 'remoto--api :not :to-have-been-called))
+          (delete-directory default-directory t)))))
+
+  (it "leaves a local project to project.el"
+    ;; Loaded first: loading it later would replace the spy with the real
+    ;; command, which visits the file.
+    (require 'fileloop)
+    (let* ((dir (file-name-as-directory (make-temp-file "remoto-local" t)))
+           (project-find-functions (list (lambda (d)
+                                           (and (string-prefix-p dir d) (cons 'transient dir)))))
+           (default-directory dir))
+      (unwind-protect
+          (save-current-buffer
+            (with-temp-file (expand-file-name "a.txt" dir) (insert "needle\n"))
+            (spy-on 'project-remember-project)
+            (spy-on 'fileloop-continue)
+            (project-search "needle")
+            (expect 'fileloop-continue :to-have-been-called))
+        (when-let* ((visiting (find-buffer-visiting (expand-file-name "a.txt" dir))))
+          (kill-buffer visiting))
+        (delete-directory dir t)))))
 
 ;;; The bootstrap handler of the autoloads
 
