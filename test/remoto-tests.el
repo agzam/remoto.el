@@ -719,6 +719,62 @@ PROPS are the slots of `remoto--login': :failed, :token and :user."
               (expect (seq-difference (buffer-list) before) :to-equal (list buf)))
           (kill-buffer buf))))))
 
+;;; File identity
+
+(describe "file identity"
+  ;; `find-buffer-visiting' reuses a buffer whose file number and attributes
+  ;; match the file asked for, and `file-equal-p' compares attributes, so no
+  ;; two remoto files may share an inode.
+  (it "opens the same file at another ref in a buffer of its own"
+    (remoto-test-with-cache
+      ;; v1.0 holds another README of the same size and mode as main's.
+      (let ((tag-tree (copy-hash-table
+                       (gethash "/github:testowner/testrepo@main" remoto--tree-cache))))
+        (puthash "README.md" '((type . "blob") (size . 500) (sha . "abc") (mode . "100644"))
+                 tag-tree)
+        (puthash "/github:testowner/testrepo@v1.0" tag-tree remoto--tree-cache))
+      (spy-on 'remoto--fetch-file-content
+              :and-call-fake (lambda (_forge _owner _repo _path ref)
+                               (format "README at %s\n" ref)))
+      (let* ((main (find-file-noselect "/github:testowner/testrepo@main:/README.md"))
+             (tag (find-file-noselect "/github:testowner/testrepo@v1.0:/README.md")))
+        (unwind-protect
+            (progn
+              (expect tag :not :to-be main)
+              (expect (buffer-file-name tag)
+                      :to-equal "/github:testowner/testrepo@v1.0:/README.md")
+              (expect (with-current-buffer tag (buffer-string))
+                      :to-equal "README at v1.0\n"))
+          (kill-buffer main)
+          (kill-buffer tag)))))
+
+  (it "tells apart files and directories of the same type, size and mode"
+    (remoto-test-with-cache
+      (let ((tree (gethash "/github:testowner/testrepo@main" remoto--tree-cache)))
+        (puthash "LICENSE" '((type . "blob") (size . 500) (sha . "hhh") (mode . "100644"))
+                 tree)
+        (puthash "/github:testowner/testrepo@v1.0" tree remoto--tree-cache)
+        (puthash "/github:other/testrepo@main" tree remoto--tree-cache))
+      (dolist (other '("/github:testowner/testrepo@main:/LICENSE"
+                       "/github:testowner/testrepo@v1.0:/README.md"
+                       "/github:other/testrepo@main:/README.md"))
+        (expect (file-equal-p "/github:testowner/testrepo@main:/README.md" other)
+                :to-be nil))
+      (expect (file-equal-p "/github:testowner/testrepo@main:/src/"
+                            "/github:testowner/testrepo@main:/bin/")
+              :to-be nil)))
+
+  (it "gives a file one identifier under each spelling of its name"
+    (remoto-test-with-cache
+      (expect (file-attribute-file-identifier
+               (file-attributes "/gh:testowner/testrepo@main:/src/main.el"))
+              :to-equal
+              (file-attribute-file-identifier
+               (file-attributes "/github:testowner/testrepo@main:/src/main.el")))
+      (expect (file-equal-p "/github:testowner/testrepo@main:/src"
+                            "/github:testowner/testrepo@main:/src/")
+              :to-be t))))
+
 ;;; recentf
 
 (describe "recentf keeps remoto paths"

@@ -1602,6 +1602,18 @@ this of them before it lists the names that match there."
   "Remote repos are never writable."
   nil)
 
+(defvar remoto--inodes (make-hash-table :test 'equal)
+  "Inode numbers of remoto files, by canonical name.")
+
+(defun remoto--inode (parsed)
+  "Return the inode number of the file PARSED names.
+Emacs takes two files with equal inodes and attributes for one file and
+visits both in one buffer, so each canonical name gets its own number."
+  (let ((name (concat (remoto--tree-prefix parsed) "/"
+                      (remoto--tree-lookup-key (remoto-path-path parsed)))))
+    (or (gethash name remoto--inodes)
+        (puthash name (1+ (hash-table-count remoto--inodes)) remoto--inodes))))
+
 (defun remoto--handle-file-attributes (filename &optional _id-format)
   "Return file attributes for FILENAME.
 Synthesized from tree cache - timestamps are epoch 0."
@@ -1626,7 +1638,7 @@ Synthesized from tree cache - timestamps are epoch 0."
             size                 ; size
             (format "%05o" mode) ; mode string
             nil                  ; gid-change
-            0                    ; inode
+            (remoto--inode parsed) ; inode
             0))))               ; device
 
 (defun remoto--handle-directory-files (directory &optional full match nosort count)
