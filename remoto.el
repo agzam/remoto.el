@@ -2394,8 +2394,9 @@ and without it FILENAME gets its one line, as with ls-lisp.  /github: and
                         entry classify))))))))
 
 (defun remoto--handle-file-local-copy (filename)
-  "Download remote FILENAME to a temp file, return temp path."
-  (when-let* ((parsed (remoto--parse-path filename))
+  "Download remote FILENAME to a temp file, return temp path.
+A short FILENAME, /github:OWNER/REPO/PATH, names PATH on the default branch."
+  (when-let* ((parsed (remoto--parse-path (remoto--maybe-rewrite filename)))
               (resolved (remoto--resolve-ref parsed))
               (path (remoto--relative-path (remoto-path-path resolved)))
               (content (remoto-forge-content

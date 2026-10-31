@@ -1106,6 +1106,21 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
                       :to-equal "mock file content"))
           (delete-file dest)))))
 
+  (it "copies from a short name, on the default branch"
+    (remoto-test-with-cache
+      (spy-on 'remoto--fetch-file-content :and-return-value "mock file content")
+      (let ((dest (make-temp-file "remoto-copy-test-")))
+        (unwind-protect
+            (progn
+              (copy-file "/gh:testowner/testrepo/src/main.el" dest t)
+              (expect (with-temp-buffer
+                        (insert-file-contents dest)
+                        (buffer-string))
+                      :to-equal "mock file content")
+              (expect (cdr (spy-calls-args-for 'remoto--fetch-file-content 0))
+                      :to-equal '("testowner" "testrepo" "src/main.el" "main")))
+          (delete-file dest)))))
+
   (it "signals read-only when destination is remoto"
     (remoto-test-with-cache
       (expect (copy-file "/github:testowner/testrepo@main:/src/main.el"
