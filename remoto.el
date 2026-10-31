@@ -6,7 +6,7 @@
 ;; Assisted-by: ECA:claude-opus-5
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: April 24, 2026
-;; Version: 2.5.0
+;; Version: 2.6.0
 ;; Keywords: tools vc
 ;; Homepage: https://github.com/agzam/remoto.el
 ;; Package-Requires: ((emacs "29.1") (ghub "5.3.0"))

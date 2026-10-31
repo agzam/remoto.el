@@ -3,7 +3,7 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
-* [Unreleased]
+* [2.6.0] - 2026-10-31
 
 ** Added
 - adds project.el support: a repository tree is a project - ~C-x p f~, ~C-x p d~, ~C-x p D~, ~C-x p b~, ~C-x p k~, ~C-x p p~
