@@ -10,6 +10,7 @@
 (require 'buttercup)
 (require 'loaddefs-gen)
 (require 'remoto)
+(require 'remoto-project)
 ;; Soft: present once remoto-embark.el exists; tests below fail (not error)
 ;; until then, keeping the rest of the suite runnable.
 (require 'remoto-embark nil t)
@@ -8528,6 +8529,9 @@ of `completion-all-completions'; Vertico inserts a candidate as
                              'read-file-name-internal)
             :to-be-truthy)
     (expect (advice-member-p #'remoto--inhibit-a 'eglot-ensure) :to-be-truthy)
+    (expect (advice-member-p #'remoto--every-file-a 'project-search) :to-be-truthy)
+    (expect (advice-member-p #'remoto--every-file-a 'project-query-replace-regexp)
+            :to-be-truthy)
     (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be-truthy)
     (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be-truthy)
     (expect (memq 'remoto--minibuffer-exit-cleanup minibuffer-exit-hook)
@@ -8547,6 +8551,9 @@ of `completion-all-completions'; Vertico inserts a candidate as
                                    'read-file-name-internal)
                   :to-be nil)
           (expect (advice-member-p #'remoto--inhibit-a 'eglot-ensure) :to-be nil)
+          (expect (advice-member-p #'remoto--every-file-a 'project-search) :to-be nil)
+          (expect (advice-member-p #'remoto--every-file-a 'project-query-replace-regexp)
+                  :to-be nil)
           (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be nil)
           (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be nil)
           (expect (memq 'remoto--minibuffer-exit-cleanup minibuffer-exit-hook)
@@ -8690,6 +8697,587 @@ of `completion-all-completions'; Vertico inserts a candidate as
         (setopt remoto-inhibited-functions '(remoto-test--tool))
         (fmakunbound 'remoto-test--later)))))
 
+;;; project.el
+
+;; Emacs 29's project.el lacks it, and a let of an unknown name is lexical.
+(defvar project-files-relative-names)
+
+(defmacro remoto-test-with-project-finder (&rest body)
+  "Run BODY with `remoto-project-try' ahead of `project-try-vc'.
+That is where the package autoloads put it."
+  (declare (indent 0))
+  `(let ((project-find-functions (list #'remoto-project-try #'project-try-vc)))
+     ,@body))
+
+(defconst remoto-test--project
+  '(remoto . "/github:testowner/testrepo@main:/")
+  "The project of the mock tree.")
+
+(defun remoto-test--tree (entries)
+  "Install a tree of ENTRIES, (PATH . ENTRY) pairs, as /github:o/r@main."
+  (let ((table (make-hash-table :test 'equal)))
+    (puthash "" remoto--dir-entry table)
+    (puthash "/" remoto--dir-entry table)
+    (pcase-dolist (`(,path . ,entry) entries)
+      (puthash path entry table))
+    (puthash "/github:o/r@main" table remoto--tree-cache)))
+
+(describe "remoto-project-try"
+  (it "puts a directory of a repository tree in the project of that tree"
+    (spy-on 'remoto--api)
+    (dolist (dir '("/github:o/r@main:/" "/github:o/r@main:" "/github:o/r@main:/src/"
+                   "/github:o/r@main:/src/main.el" "/gh:o/r@main:/src/"))
+      (expect (remoto-project-try dir) :to-equal '(remoto . "/github:o/r@main:/")))
+    (expect 'remoto--api :not :to-have-been-called))
+
+  (it "keeps a ref with a slash, and a canonical name without a ref"
+    (expect (remoto-project-try "/github:o/r@feature/x:/src/")
+            :to-equal '(remoto . "/github:o/r@feature/x:/"))
+    (expect (remoto-project-try "/github:o/r:/src/")
+            :to-equal '(remoto . "/github:o/r:/")))
+
+  (it "puts a Codeberg tree in a project of its own forge"
+    (expect (remoto-project-try "/cb:o/r@main:/src/")
+            :to-equal '(remoto . "/codeberg:o/r@main:/")))
+
+  (it "gives a root without the text properties of the directory"
+    ;; A completion candidate can carry them, and project.el writes the root to its list.
+    (let ((root (cdr (remoto-project-try
+                      (propertize "/github:o/r@main:/src/" 'remoto-target "/github:o")))))
+      (expect root :to-equal "/github:o/r@main:/")
+      (expect (object-intervals root) :to-be nil)))
+
+  (it "finds no project above a tree, nor in the short form of one"
+    (spy-on 'remoto--api)
+    (dolist (dir '("/github:" "/github:o/" "/github:o/r@" "/github:o/r#"
+                   "/github:o/r/src/"))
+      (expect (remoto-project-try dir) :to-be nil))
+    (expect 'remoto--api :not :to-have-been-called))
+
+  (it "finds no project for a local directory"
+    (expect (remoto-project-try temporary-file-directory) :to-be nil)
+    (expect (remoto-project-try "/tmp/github:o/r@main:/") :to-be nil))
+
+  (it "finds no project once the mode is off"
+    (unwind-protect
+        (progn
+          (global-remoto-mode -1)
+          (expect (remoto-project-try "/github:o/r@main:/") :to-be nil))
+      (global-remoto-mode 1)))
+
+  (it "turns the mode on for a directory the autoloads serve"
+    (unwind-protect
+        (progn
+          (global-remoto-mode -1)
+          (remoto-test--push-bootstrap)
+          (spy-on 'message)
+          (expect (remoto-project-try "/gh:o/r@main:/src/")
+                  :to-equal '(remoto . "/github:o/r@main:/"))
+          (expect global-remoto-mode :to-be-truthy)
+          (expect (rassq 'remoto-autoload-file-name-handler file-name-handler-alist)
+                  :to-be nil)
+          (expect 'message :to-have-been-called-with
+                  "Remoto: `global-remoto-mode' enabled"))
+      (remoto--drop-autoload-handler)
+      (global-remoto-mode 1))))
+
+(describe "project-current in a remoto directory"
+  (it "returns the remoto project and leaves project-try-vc out"
+    (remoto-test-with-project-finder
+      (spy-on 'project-try-vc :and-call-through)
+      (let ((default-directory "/github:testowner/testrepo@main:/src/"))
+        (expect (project-current) :to-equal remoto-test--project))
+      (expect 'project-try-vc :not :to-have-been-called)))
+
+  (it "leaves a local directory to project-try-vc"
+    (remoto-test-with-project-finder
+      (spy-on 'project-try-vc)
+      (expect (project-current nil temporary-file-directory) :to-be nil)
+      (expect 'project-try-vc :to-have-been-called-with temporary-file-directory))))
+
+(describe "a remoto project"
+  (it "is rooted at the root of its tree and named OWNER/REPO@REF"
+    (expect (project-root remoto-test--project)
+            :to-equal "/github:testowner/testrepo@main:/")
+    (expect (project-name remoto-test--project) :to-equal "testowner/testrepo@main")
+    (expect (project-name '(remoto . "/github:o/r@feature/x:/"))
+            :to-equal "o/r@feature/x")
+    (expect (project-name '(remoto . "/codeberg:o/r:/")) :to-equal "o/r"))
+
+  (it "lists every file of its tree by full name, in order"
+    (remoto-test-with-cache
+      (expect (project-files remoto-test--project)
+              :to-equal '("/github:testowner/testrepo@main:/README.md"
+                          "/github:testowner/testrepo@main:/bin/run"
+                          "/github:testowner/testrepo@main:/src/main.el"
+                          "/github:testowner/testrepo@main:/src/utils.el"))))
+
+  (it "lists only the files under the directories asked for"
+    (remoto-test-with-cache
+      (expect (project-files remoto-test--project
+                             '("/github:testowner/testrepo@main:/src/"))
+              :to-equal '("/github:testowner/testrepo@main:/src/main.el"
+                          "/github:testowner/testrepo@main:/src/utils.el"))
+      (expect (project-files remoto-test--project
+                             '("/github:testowner/testrepo@main:/bin"
+                               "/gh:testowner/testrepo@main:/src/"))
+              :to-equal '("/github:testowner/testrepo@main:/bin/run"
+                          "/github:testowner/testrepo@main:/src/main.el"
+                          "/github:testowner/testrepo@main:/src/utils.el"))))
+
+  (it "names its files without the text properties of the directory asked for"
+    (remoto-test-with-cache
+      (let ((files (project-files remoto-test--project
+                                  (list (propertize "/github:testowner/testrepo@main:/src/"
+                                                    'remoto-target "/github:testowner")))))
+        (expect files :to-equal '("/github:testowner/testrepo@main:/src/main.el"
+                                  "/github:testowner/testrepo@main:/src/utils.el"))
+        (expect (seq-mapcat #'object-intervals files) :to-be nil))))
+
+  (it "names its files from the one directory asked for when project.el allows"
+    (remoto-test-with-cache
+      (let ((project-files-relative-names t))
+        (expect (project-files remoto-test--project)
+                :to-equal '("README.md" "bin/run" "src/main.el" "src/utils.el"))
+        (expect (project-files remoto-test--project
+                               '("/github:testowner/testrepo@main:/src/"))
+                :to-equal '("main.el" "utils.el"))
+        ;; Two directories leave no one directory to name them from.
+        (expect (project-files remoto-test--project
+                               '("/github:testowner/testrepo@main:/bin/"
+                                 "/github:testowner/testrepo@main:/src/"))
+                :to-equal '("/github:testowner/testrepo@main:/bin/run"
+                            "/github:testowner/testrepo@main:/src/main.el"
+                            "/github:testowner/testrepo@main:/src/utils.el")))))
+
+  (it "leaves out submodules and the keys the tree keeps for itself"
+    (let ((remoto--tree-cache (make-hash-table :test 'equal)))
+      (remoto-test--tree
+       '(("a.el" . ((type . "blob") (size . 1) (sha . "a") (mode . "100644")))
+         ("lib" . ((type . "commit") (size . 0) (sha . "s") (mode . "160000")))
+         ("\0fetched:" . t)))
+      (spy-on 'remoto--api)
+      (expect (project-files '(remoto . "/github:o/r@main:/"))
+              :to-equal '("/github:o/r@main:/a.el"))
+      (expect 'remoto--api :not :to-have-been-called)))
+
+  (it "says that the file list of a partial tree is partial"
+    (let ((remoto--tree-cache (make-hash-table :test 'equal)))
+      (remoto-test--tree
+       '(("a.el" . ((type . "blob") (size . 1) (sha . "a") (mode . "100644")))
+         ("\0truncated" . t)))
+      (spy-on 'message)
+      (expect (project-files '(remoto . "/github:o/r@main:/"))
+              :to-equal '("/github:o/r@main:/a.el"))
+      (expect 'message :to-have-been-called-with
+              "Remoto: the tree of %s is partial, and so is its file list"
+              "/github:o/r@main:/")))
+
+  (it "fetches its tree the first time it is asked for its files"
+    (let ((remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (_forge endpoint)
+                (pcase endpoint
+                  ("repos/o/r/git/trees/main?recursive=1"
+                   '((tree . (((path . "README.md") (type . "blob")
+                               (size . 6) (sha . "aaa") (mode . "100644"))))))
+                  (_ (error "Unexpected request: %s" endpoint)))))
+      (expect (project-files '(remoto . "/github:o/r@main:/"))
+              :to-equal '("/github:o/r@main:/README.md"))
+      (expect 'remoto--api :to-have-been-called-times 1)))
+
+  (it "holds the buffers in its tree and no others"
+    (remoto-test-with-cache
+      (let ((buffers (mapcar (lambda (dir)
+                               (with-current-buffer (generate-new-buffer " remoto-project")
+                                 (setq default-directory dir)
+                                 (current-buffer)))
+                             '("/github:testowner/testrepo@main:/src/"
+                               "/github:testowner/testrepo@v2:/src/"
+                               "/github:testowner/other@main:/"))))
+        (unwind-protect
+            (expect (project-buffers remoto-test--project)
+                    :to-equal (list (car buffers)))
+          (mapc #'kill-buffer buffers)))))
+
+  (it "visits the file that project-find-file reads"
+    ;; `completing-read-function', not a spy on `completing-read': natively
+    ;; compiled project.el calls that primitive past any spy.
+    (remoto-test-with-cache
+      (remoto-test-with-project-finder
+        (let* ((offered nil)
+               (completing-read-function
+                (lambda (_prompt collection &rest _)
+                  (setq offered (all-completions "" collection))
+                  "src/main.el")))
+          (spy-on 'project-remember-project)
+          (spy-on 'find-file)
+          (let ((default-directory "/github:testowner/testrepo@main:/"))
+            (project-find-file))
+          (expect offered :to-equal '("README.md" "bin/run" "src/main.el" "src/utils.el"))
+          (expect 'find-file :to-have-been-called-with
+                  "/github:testowner/testrepo@main:/src/main.el")))))
+
+  (it "offers the directories of its tree to project-find-dir by relative name"
+    (remoto-test-with-cache
+      (remoto-test-with-project-finder
+        (let* ((offered nil)
+               (completing-read-function
+                (lambda (_prompt collection predicate &rest _)
+                  (setq offered (all-completions "" collection predicate))
+                  "src/")))
+          (spy-on 'project-remember-project)
+          (spy-on 'dired)
+          (let ((default-directory "/github:testowner/testrepo@main:/"))
+            (project-find-dir))
+          (expect (seq-filter #'file-name-absolute-p offered) :to-be nil)
+          (expect (member "src/" offered) :to-be-truthy)
+          (expect (member "bin/" offered) :to-be-truthy)
+          (expect 'dired :to-have-been-called-with
+                  "/github:testowner/testrepo@main:/src/"))))))
+
+;;; Programs started in a remoto directory
+
+(defconst remoto-test--clone-message
+  "Remoto: %s needs a clone; a repository has no local files"
+  "The refusal of a search started in a remoto directory.")
+
+(describe "remoto--search-program"
+  (it "names the search that a program or a shell command line runs"
+    (pcase-dolist (`(,expected ,program . ,args)
+                   '(("grep" "grep" "-rn" "x")
+                     ("rg" "/usr/bin/rg" "--null" "x")
+                     ("fd" "fd" ".")
+                     ("git grep" "git" "--no-pager" "grep" "-n" "x")
+                     ("grep" "/bin/zsh" "-c" "xargs -0 grep  -snHE -e defun")
+                     ("find" "/bin/sh" "-c" "find -H . -type f -print0")
+                     ("rg" "sh" "-c" "cd src && $(command -v rg) x|head")
+                     ("grep" "bash" "-c" "git --no-pager grep -n x")
+                     ("find" "sh" "-c" "/usr/bin/find /github:o/r@main:/ -type f")))
+      (expect (remoto--search-program program args) :to-equal expected)))
+
+  (it "names nothing for the other programs"
+    (pcase-dolist (`(,program . ,args)
+                   '(("git" "rev-parse" "--show-toplevel")
+                     ("git" "log" "--grep=find" "-S" "x")
+                     ("git" "-c" "grep.lineNumber=true" "status")
+                     ("/bin/zsh" "-c" "git status --porcelain")
+                     ("/bin/zsh" "-i")
+                     ("ls" "-la")
+                     (nil)))
+      (expect (remoto--search-program program args) :to-be nil))))
+
+(describe "a program started in a remoto directory"
+  ;; It runs in `~', so a search there would report the files of `~'.  The
+  ;; searches below name a missing directory: run by mistake, they end at once.
+  (it "stops a search however it is started"
+    (let ((default-directory "/github:o/r@main:/src/"))
+      (pcase-dolist (`(,search . ,start)
+                     `(("grep" . ,(lambda () (process-file "grep" nil nil nil "-r" "x" "/nonexistent")))
+                       ("find" . ,(lambda () (process-file-shell-command "find /nonexistent -type f")))
+                       ("rg" . ,(lambda () (start-file-process "s" nil "rg" "x" "/nonexistent")))
+                       ("grep" . ,(lambda ()
+                                    (start-file-process-shell-command
+                                     "s" nil "xargs -0 grep x /nonexistent")))
+                       ("fd" . ,(lambda ()
+                                  (make-process :name "s" :command '("fd" "." "/nonexistent")
+                                                :file-handler t)))
+                       ("grep" . ,(lambda () (shell-command "grep -rn x /nonexistent")))
+                       ("rg" . ,(lambda () (async-shell-command "rg x /nonexistent")))))
+        (expect (funcall start) :to-throw 'user-error
+                (list (format remoto-test--clone-message search))))))
+
+  (it "runs the other programs as before"
+    (let ((default-directory "/github:o/r@main:/src/"))
+      (expect (with-temp-buffer
+                (list (process-file "echo" nil t nil "hi") (buffer-string)))
+              :to-equal '(0 "hi\n"))
+      (let ((process (make-process :name "s" :command '("true") :file-handler t
+                                   :noquery t)))
+        (while (process-live-p process)
+          (accept-process-output process 0.05))
+        (expect (process-exit-status process) :to-equal 0))
+      (with-temp-buffer
+        (shell-command "echo hi" (current-buffer))
+        (expect (buffer-string) :to-equal "hi\n"))))
+
+  (it "passes git on unchanged"
+    (spy-on 'remoto--pass-on :and-return-value 0)
+    (let ((default-directory "/github:o/r@main:/src/"))
+      (expect (process-file "git" nil nil nil "rev-parse" "--show-toplevel") :to-equal 0))
+    (expect 'remoto--pass-on :to-have-been-called-with
+            #'process-file '("git" nil nil nil "rev-parse" "--show-toplevel")))
+
+  (it "stops project-find-regexp before grep runs"
+    (remoto-test-with-cache
+      (remoto-test-with-project-finder
+        (spy-on 'project-remember-project)
+        (let ((default-directory "/github:testowner/testrepo@main:/src/"))
+          (expect (project-find-regexp "defun") :to-throw 'user-error
+                  (list (format remoto-test--clone-message "grep")))))))
+
+  (it "stops project-find-file with a prefix argument before find runs"
+    (remoto-test-with-cache
+      (remoto-test-with-project-finder
+        (spy-on 'project-remember-project)
+        ;; A find that ran by mistake would walk `~'.  grep.el defines the name.
+        (require 'grep)
+        (let ((default-directory "/github:testowner/testrepo@main:/")
+              (find-program "/nonexistent/find"))
+          (expect (project-find-file t) :to-throw 'user-error
+                  (list (format remoto-test--clone-message "find"))))))))
+
+(describe "a command that visits every file of its project"
+  ;; project-search and project-query-replace-regexp: a request per file.
+  (it "stops in a remoto project before it prompts"
+    ;; Without the advice the prompt would read the terminal in batch.
+    (expect (advice-member-p #'remoto--every-file-a 'project-search) :to-be-truthy)
+    (expect (advice-member-p #'remoto--every-file-a 'project-query-replace-regexp)
+            :to-be-truthy)
+    (remoto-test-with-project-finder
+      (spy-on 'advice-eval-interactive-spec :and-call-fake
+              (lambda (spec) (if (stringp spec) '("x") '("x" "y"))))
+      (spy-on 'remoto--api)
+      (let ((default-directory "/github:testowner/testrepo@main:/src/"))
+        (dolist (command '(project-search project-query-replace-regexp))
+          (expect (call-interactively command) :to-throw 'user-error
+                  '("Remoto: this visits every file of testowner/testrepo@main, a request each; search a clone"))))
+      (expect 'advice-eval-interactive-spec :not :to-have-been-called)
+      (expect 'remoto--api :not :to-have-been-called)))
+
+  (it "stops before it fetches a file of a remoto project picked at its prompt"
+    (remoto-test-with-project-finder
+      (let ((default-directory (file-name-as-directory (make-temp-file "remoto-none" t)))
+            (completing-read-function (lambda (&rest _) "/github:testowner/testrepo@main:/")))
+        (unwind-protect
+            (progn
+              (spy-on 'project-remember-project)
+              (spy-on 'project-known-project-roots)
+              (spy-on 'remoto--api)
+              (expect (project-search "x") :to-throw 'user-error
+                      '("Remoto: this visits every file of testowner/testrepo@main, a request each; search a clone"))
+              (expect 'remoto--api :not :to-have-been-called))
+          (delete-directory default-directory t)))))
+
+  (it "leaves a local project to project.el"
+    ;; Loaded first: loading it later would replace the spy with the real
+    ;; command, which visits the file.
+    (require 'fileloop)
+    (let* ((dir (file-name-as-directory (make-temp-file "remoto-local" t)))
+           (project-find-functions (list (lambda (d)
+                                           (and (string-prefix-p dir d) (cons 'transient dir)))))
+           (default-directory dir))
+      (unwind-protect
+          (save-current-buffer
+            (with-temp-file (expand-file-name "a.txt" dir) (insert "needle\n"))
+            (spy-on 'project-remember-project)
+            (spy-on 'fileloop-continue)
+            (project-search "needle")
+            (expect 'fileloop-continue :to-have-been-called))
+        (when-let* ((visiting (find-buffer-visiting (expand-file-name "a.txt" dir))))
+          (kill-buffer visiting))
+        (delete-directory dir t)))))
+
+;;; The forge copy of a local clone
+
+(defconst remoto-test--git-environment
+  '("GIT_CONFIG_GLOBAL=/dev/null" "GIT_CONFIG_NOSYSTEM=1"
+    "GIT_AUTHOR_NAME=t" "GIT_AUTHOR_EMAIL=t@t"
+    "GIT_COMMITTER_NAME=t" "GIT_COMMITTER_EMAIL=t@t")
+  "A git that reads neither the user's configuration nor the system's.")
+
+(defun remoto-test--git (&rest args)
+  "Run git with ARGS in `default-directory'; signal an error when it fails."
+  (with-temp-buffer
+    (unless (eq 0 (apply #'call-process "git" nil t nil args))
+      (error "Git %s: %s" (string-join args " ") (buffer-string)))
+    (buffer-string)))
+
+(defmacro remoto-test-in-clone (var &rest body)
+  "Run BODY in a new git repository with one commit on main, VAR its directory.
+Remotes are added by name only, so nothing reaches the network."
+  (declare (indent 1))
+  `(progn
+     (assume (executable-find "git") "no git")
+     (let* ((process-environment (append remoto-test--git-environment process-environment))
+            (,var (file-name-as-directory (file-truename (make-temp-file "remoto-clone" t))))
+            (default-directory ,var))
+       (unwind-protect
+           (progn
+             (remoto-test--git "init" "--quiet" "--initial-branch=main")
+             (remoto-test--git "commit" "--quiet" "--allow-empty" "--message=init")
+             ,@body)
+         (delete-directory ,var t)))))
+
+(defvar remoto-test--found nil
+  "The `default-directory' that `remoto-test--find-file' saw.")
+
+(defun remoto-test--find-file ()
+  "Stand in for what C-x C-f runs: keep `default-directory'."
+  (interactive)
+  (setq remoto-test--found default-directory))
+
+(defun remoto-test--find-remote (&optional pick)
+  "Run `remoto-project-find-file' as C-x p R does, PICK as its prefix argument.
+Return the directory its C-x C-f started in."
+  (let ((overriding-local-map (define-keymap "C-x C-f" #'remoto-test--find-file))
+        (current-prefix-arg pick)
+        (remoto-test--found nil))
+    (call-interactively #'remoto-project-find-file)
+    remoto-test--found))
+
+(describe "remoto--remote-repo"
+  (it "reads every form of remote URL git takes"
+    (spy-on 'remoto--ssh-hostname)
+    (dolist (case '(("git@github.com:o/r.git" . "/github:o/r:/")
+                    ("git@github.com:o/r" . "/github:o/r:/")
+                    ("git@GitHub.com:o/r.git" . "/github:o/r:/")
+                    ("git@github.com:agzam/remoto.el.git" . "/github:agzam/remoto.el:/")
+                    ("https://github.com/o/r.git" . "/github:o/r:/")
+                    ("https://github.com/o/r.git/" . "/github:o/r:/")
+                    ("https://user:token@github.com/o/r" . "/github:o/r:/")
+                    ("http://github.com/o/r" . "/github:o/r:/")
+                    ("ssh://git@github.com/o/r.git" . "/github:o/r:/")
+                    ("ssh://git@github.com:22/o/r.git" . "/github:o/r:/")
+                    ("git+ssh://git@github.com/o/r.git" . "/github:o/r:/")
+                    ("git://github.com/o/r.git" . "/github:o/r:/")
+                    ("git@codeberg.org:forgejo/docs.git" . "/codeberg:forgejo/docs:/")
+                    ("https://codeberg.org/forgejo/docs" . "/codeberg:forgejo/docs:/")))
+      (expect (remoto--canonical-path (remoto--remote-repo (car case)))
+              :to-equal (cdr case)))
+    (expect 'remoto--ssh-hostname :not :to-have-been-called))
+
+  (it "asks ssh about a host no forge has, which can be an alias"
+    (spy-on 'remoto--ssh-hostname :and-call-fake
+            (lambda (host) (if (equal host "github-work") "github.com" host)))
+    (dolist (url '("git@github-work:o/r.git" "ssh://git@github-work/o/r.git"))
+      (expect (remoto--canonical-path (remoto--remote-repo url))
+              :to-equal "/github:o/r:/"))
+    (expect 'remoto--ssh-hostname :to-have-been-called-with "github-work")
+    (expect (remoto--remote-repo "git@gitlab.com:o/r.git") :to-be nil))
+
+  (it "names nothing for an https host no forge has, and asks ssh nothing"
+    (spy-on 'remoto--ssh-hostname)
+    (dolist (url '("https://gitlab.com/o/r.git" "https://gitlab.com/group/sub/r.git"
+                   "https://github.com/o"))
+      (expect (remoto--remote-repo url) :to-be nil))
+    (expect 'remoto--ssh-hostname :not :to-have-been-called))
+
+  (it "names nothing for a local remote"
+    (spy-on 'remoto--ssh-hostname :and-call-fake #'identity)
+    (dolist (url '("/srv/git/r.git" "../r" "file:///srv/git/r.git"))
+      (expect (remoto--remote-repo url) :to-be nil)))
+
+  (it "reads the host name out of ssh -G"
+    (let* ((bin (make-temp-file "remoto-bin" t))
+           (exec-path (cons bin exec-path)))
+      (unwind-protect
+          (progn
+            (with-temp-file (expand-file-name "ssh" bin)
+              (insert "#!/bin/sh\nprintf 'user git\\nhostname github.com\\nport 22\\n'\n"))
+            (set-file-modes (expand-file-name "ssh" bin) #o755)
+            (expect (remoto--ssh-hostname "github-work") :to-equal "github.com"))
+        (delete-directory bin t)))))
+
+(describe "remoto-project-find-file"
+  (it "opens on the remote the branch tracks, at that branch and this directory"
+    (remoto-test-in-clone dir
+      (remoto-test--git "remote" "add" "origin" "git@github.com:o/r.git")
+      (remoto-test--git "remote" "add" "upstream" "git@github.com:u/r.git")
+      (remoto-test--git "update-ref" "refs/remotes/origin/feature/x" "HEAD")
+      (remoto-test--git "checkout" "--quiet" "-b" "topic")
+      (remoto-test--git "branch" "--quiet" "--set-upstream-to=origin/feature/x")
+      (make-directory (expand-file-name "src/lib" dir) t)
+      (spy-on 'completing-read)
+      (expect (remoto-test--find-remote) :to-equal "/github:o/r@feature/x:/")
+      (let ((default-directory (expand-file-name "src/lib/" dir)))
+        (expect (remoto-test--find-remote) :to-equal "/github:o/r@feature/x:/src/lib/"))
+      (expect 'completing-read :not :to-have-been-called)))
+
+  (it "opens at the default branch once the tracked branch is gone"
+    (remoto-test-in-clone _dir
+      (remoto-test--git "remote" "add" "origin" "git@github.com:o/r.git")
+      (remoto-test--git "remote" "add" "upstream" "git@github.com:u/r.git")
+      (remoto-test--git "config" "branch.main.remote" "origin")
+      (remoto-test--git "config" "branch.main.merge" "refs/heads/merged")
+      (spy-on 'completing-read)
+      (expect (remoto-test--find-remote) :to-equal "/github:o/r:/")
+      (expect 'completing-read :not :to-have-been-called)))
+
+  (it "keeps the branch on an untracked remote that has it, else the default branch"
+    (remoto-test-in-clone _dir
+      (remoto-test--git "remote" "add" "origin" "https://codeberg.org/o/r.git")
+      (remoto-test--git "update-ref" "refs/remotes/origin/main" "HEAD")
+      (expect (remoto-test--find-remote) :to-equal "/codeberg:o/r@main:/")
+      (remoto-test--git "checkout" "--quiet" "-b" "local")
+      (expect (remoto-test--find-remote) :to-equal "/codeberg:o/r:/")))
+
+  (it "opens at the default branch from a detached HEAD"
+    (remoto-test-in-clone _dir
+      (remoto-test--git "remote" "add" "origin" "git@github.com:o/r.git")
+      (remoto-test--git "update-ref" "refs/remotes/origin/main" "HEAD")
+      (remoto-test--git "checkout" "--quiet" "--detach")
+      (expect (remoto-test--find-remote) :to-equal "/github:o/r:/")))
+
+  (it "asks for the remote when the branch tracks none and several qualify"
+    (remoto-test-in-clone _dir
+      (spy-on 'remoto--ssh-hostname :and-call-fake #'identity)
+      (remoto-test--git "remote" "add" "origin" "git@github.com:o/r.git")
+      (remoto-test--git "remote" "add" "upstream" "git@github.com:u/r.git")
+      (remoto-test--git "remote" "add" "mirror" "git@gitlab.com:o/r.git")
+      (let (annotation)
+        (spy-on 'completing-read :and-call-fake
+                (lambda (&rest _)
+                  (setq annotation (funcall (plist-get completion-extra-properties
+                                                       :annotation-function)
+                                            "origin"))
+                  "upstream"))
+        (expect (remoto-test--find-remote) :to-equal "/github:u/r:/")
+        (let ((args (spy-calls-args-for 'completing-read 0)))
+          (expect (car args) :to-equal "Remote (default origin): ")
+          (expect (mapcar #'car (nth 1 args)) :to-equal '("origin" "upstream"))
+          (expect (nth 6 args) :to-equal "origin"))
+        (expect annotation :to-equal "   /github:o/r:/"))))
+
+  (it "asks with a prefix argument, offering the tracked remote"
+    (remoto-test-in-clone _dir
+      (remoto-test--git "remote" "add" "origin" "git@github.com:o/r.git")
+      (remoto-test--git "remote" "add" "upstream" "git@github.com:u/r.git")
+      (remoto-test--git "update-ref" "refs/remotes/origin/main" "HEAD")
+      (remoto-test--git "update-ref" "refs/remotes/upstream/main" "HEAD")
+      (remoto-test--git "branch" "--quiet" "--set-upstream-to=upstream/main")
+      (spy-on 'completing-read :and-return-value "origin")
+      (expect (remoto-test--find-remote '(4)) :to-equal "/github:o/r@main:/")
+      (expect (nth 6 (spy-calls-args-for 'completing-read 0)) :to-equal "upstream")))
+
+  (it "reads a remote through the insteadOf of git's configuration"
+    (remoto-test-in-clone _dir
+      (remoto-test--git "config" "url.git@github.com:.insteadOf" "gh:")
+      (remoto-test--git "remote" "add" "origin" "gh:o/r.git")
+      (expect (remoto-test--find-remote) :to-equal "/github:o/r:/")))
+
+  (it "says why it cannot open: no repository, no remote, no forge"
+    (spy-on 'remoto--ssh-hostname :and-call-fake #'identity)
+    (let ((default-directory (file-name-as-directory (make-temp-file "remoto-none" t))))
+      (unwind-protect
+          (expect (remoto-test--find-remote) :to-throw 'user-error
+                  (list (format "Remoto: %s is not in a git repository"
+                                (abbreviate-file-name default-directory))))
+        (delete-directory default-directory t)))
+    (remoto-test-in-clone _dir
+      (expect (remoto-test--find-remote) :to-throw 'user-error
+              '("Remoto: this repository has no remote"))
+      (remoto-test--git "remote" "add" "origin" "git@gitlab.com:o/r.git")
+      (expect (remoto-test--find-remote) :to-throw 'user-error
+              '("Remoto: no remote is on a forge remoto serves: origin git@gitlab.com:o/r.git"))))
+
+  (it "is C-x C-f itself in a remoto directory"
+    (spy-on 'remoto--git)
+    (let ((default-directory "/github:o/r@main:/src/"))
+      (expect (remoto-test--find-remote) :to-equal "/github:o/r@main:/src/"))
+    (expect 'remoto--git :not :to-have-been-called)))
+
 ;;; The bootstrap handler of the autoloads
 
 (defun remoto-test--push-bootstrap ()
@@ -8767,7 +9355,53 @@ of `completion-all-completions'; Vertico inserts a candidate as
           (remoto-unload-function)
           (expect (rassq 'remoto-autoload-file-name-handler file-name-handler-alist)
                   :to-be nil))
-      (global-remoto-mode 1))))
+      (global-remoto-mode 1)))
+
+  (it "answers file-remote-p of a canonical name as the real handler does, loading nothing"
+    ;; project.el and recentf ask it of every name they keep.  Before remoto
+    ;; loads, its caches are empty: nothing is reached.
+    (let ((remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal))
+          (real-require (symbol-function 'require))
+          (results nil))
+      (spy-on 'require :and-call-fake
+              (lambda (feature &rest args)
+                (if (eq feature 'remoto)
+                    (error "Loaded remoto")
+                  (apply real-require feature args))))
+      (spy-on 'remoto--take-over)
+      (spy-on 'remoto--ensure-global-mode)
+      (dolist (name (append (mapcar #'car (remoto-test--grammar-rows))
+                            '("/github:o/r@main:/x" "/github:o/r@feature/x:/src/" "/github:o/r@:/x"
+                              "/github:o:x/r:/" "/github:o/r@a@b:/" "/github:o/r#12:x"
+                              "/github:o/r@main" "/codeberg:o/r@v1.0:/a/b.el")))
+        (dolist (connected '(nil never t))
+          (push (list name connected
+                      ;; `features' is not special: a plain let would be lexical.
+                      (dlet ((features (remq 'remoto features)))
+                        (remoto-autoload-file-name-handler 'file-remote-p name nil connected))
+                      (remoto-file-name-handler 'file-remote-p name nil connected))
+                results)))
+      (expect (seq-remove (lambda (r) (equal (nth 2 r) (nth 3 r))) results) :to-be nil)
+      (expect (seq-find (lambda (r) (equal (car r) "/github:o/r@main:/x")) results)
+              :to-be-truthy)
+      (expect 'remoto--take-over :not :to-have-been-called)
+      (expect 'remoto--ensure-global-mode :not :to-have-been-called)))
+
+  (it "loads remoto for any other question"
+    (spy-on 'require)
+    (spy-on 'remoto--take-over :and-return-value 'answer)
+    (dlet ((features (remq 'remoto features)))
+      (expect (remoto-autoload-file-name-handler 'file-remote-p "/gh:o/r@main:/x")
+              :to-be 'answer)
+      (expect (remoto-autoload-file-name-handler 'file-remote-p "/github:o/r@main:/x" 'method)
+              :to-be 'answer)
+      (expect (remoto-autoload-file-name-handler 'file-exists-p "/github:o/r@main:/x")
+              :to-be 'answer))
+    (expect 'require :to-have-been-called-with 'remoto)
+    (expect 'remoto--take-over :to-have-been-called-times 3)
+    (expect 'remoto--take-over :to-have-been-called-with
+            'file-exists-p '("/github:o/r@main:/x"))))
 
 (defmacro remoto-test-with-autoloads (var &rest body)
   "Bind VAR to a freshly generated autoloads file of the package and run BODY.
@@ -8810,18 +9444,53 @@ every source older than an existing output file, so it must not exist."
                               (string-match-p (car entry) (format "/%s:o/r" prefix)))
                             entries)
                   :to-be-truthy))
+        ;; The definition itself, not an autoload: answering `file-remote-p'
+        ;; loads nothing.
+        (expect (seq-find (lambda (f)
+                            (equal (seq-take f 2) '(defun remoto-autoload-file-name-handler)))
+                          forms)
+                :to-be-truthy)
         (expect (seq-find (lambda (f)
                             (and (eq (car-safe f) 'autoload)
                                  (equal (nth 1 f) ''remoto-autoload-file-name-handler)))
                           forms)
-                :to-be-truthy))))
+                :to-be nil))))
 
   (it "loads nothing and turns nothing on by itself"
     (remoto-test-with-autoloads file
       (let ((forms (remoto-test--autoload-forms file)))
         (expect (seq-find (lambda (f) (memq (car-safe f) '(require global-remoto-mode)))
                           forms)
-                :to-be nil)))))
+                :to-be nil))))
+
+  (it "puts remoto-project-try ahead of project-try-vc once project.el loads"
+    (remoto-test-with-autoloads file
+      (let ((forms (remoto-test--autoload-forms file)))
+        (expect (member '(with-eval-after-load 'project
+                           (add-hook 'project-find-functions #'remoto-project-try -90))
+                        forms)
+                :to-be-truthy)
+        ;; From its own small file: project.el asks it about every directory.
+        (expect (file-name-nondirectory
+                 (nth 2 (seq-find (lambda (f)
+                                    (and (eq (car-safe f) 'autoload)
+                                         (equal (nth 1 f) ''remoto-project-try)))
+                                  forms)))
+                :to-equal "remoto-project"))))
+
+  (it "binds C-x p R to remoto-project-find-file when the key is free"
+    (remoto-test-with-autoloads file
+      (let ((forms (remoto-test--autoload-forms file)))
+        (expect (member '(when (and (boundp 'project-prefix-map)
+                                    (not (keymap-lookup project-prefix-map "R")))
+                           (keymap-set project-prefix-map "R" #'remoto-project-find-file))
+                        forms)
+                :to-be-truthy)
+        (expect (seq-find (lambda (f)
+                            (and (eq (car-safe f) 'autoload)
+                                 (equal (nth 1 f) ''remoto-project-find-file)))
+                          forms)
+                :to-be-truthy)))))
 
 ;;; A fresh session: the autoloads alone, then the first remoto path
 
@@ -9082,6 +9751,107 @@ with what the same call does once the mode is on."
                                 :local (funcall armed "/home/me/api.py")))))))
         (expect (plist-get result :remoto) :to-be nil)
         (expect (plist-get result :local) :to-be t)))))
+
+(describe "project.el in a fresh session"
+  ;; A remoto project kept in the project list is looked up before any
+  ;; remoto path has loaded remoto.
+  (it "finds the project of the first remoto directory it is asked about"
+    (remoto-test-with-autoloads file
+      (let ((result (remoto-test--fresh-session
+                     file
+                     `(progn
+                        ,remoto-test--fresh-api-stub
+                        (require 'project)
+                        (let ((project (project-current nil "/gh:o/r@main:/")))
+                          (list :project project
+                                :files (and project (project-files project))
+                                :global (bound-and-true-p global-remoto-mode)))))))
+        (expect (plist-get result :project) :to-equal '(remoto . "/github:o/r@main:/"))
+        (expect (plist-get result :files) :to-equal '("/github:o/r@main:/README.md"))
+        (expect (plist-get result :global) :to-be t))))
+
+  (it "leaves remoto unloaded when it looks at a local directory"
+    (remoto-test-with-autoloads file
+      (let ((result (remoto-test--fresh-session
+                     file
+                     '(progn
+                        (require 'project)
+                        (project-current nil temporary-file-directory)
+                        (list :remoto (featurep 'remoto)
+                              :asked (featurep 'remoto-project))))))
+        (expect (plist-get result :remoto) :to-be nil)
+        (expect (plist-get result :asked) :to-be t))))
+
+  (it "reads, prunes and writes a list that holds remoto roots with remoto unloaded"
+    ;; project.el asks `file-remote-p' of every root it keeps, as recentf
+    ;; does of every file, in sessions that may never browse a repository.
+    (remoto-test-with-autoloads file
+      (let ((list-file (make-temp-file "remoto-projects"))
+            (local (file-name-as-directory (make-temp-file "remoto-local" t))))
+        (unwind-protect
+            (let ((result
+                   (progn
+                     (with-temp-file list-file
+                       (prin1 '(("/github:o/r@main:/") ("/codeberg:o/r:/")) (current-buffer)))
+                     (remoto-test--fresh-session
+                      file
+                      `(progn
+                         (require 'project)
+                         (require 'recentf)
+                         (setq project-list-file ,list-file)
+                         (let ((roots (project-known-project-roots)))
+                           (project-remember-project (cons 'transient ,local))
+                           (let ((completing-read-function (lambda (&rest _) ,local)))
+                             (project-prompt-project-dir))
+                           (list :roots roots
+                                 :written (with-temp-buffer
+                                            (insert-file-contents ,list-file)
+                                            (read (current-buffer)))
+                                 :kept (and (recentf-keep-default-predicate
+                                             "/github:o/r@main:/README.md")
+                                            t)
+                                 :remoto (featurep 'remoto)
+                                 :ghub (featurep 'ghub))))))))
+              (expect (plist-get result :roots)
+                      :to-equal '("/github:o/r@main:/" "/codeberg:o/r:/"))
+              (expect (cdr (plist-get result :written))
+                      :to-equal '(("/github:o/r@main:/") ("/codeberg:o/r:/")))
+              (expect (plist-get result :kept) :to-be t)
+              (expect (plist-get result :remoto) :to-be nil)
+              (expect (plist-get result :ghub) :to-be nil))
+          (delete-file list-file)
+          (delete-directory local t)))))
+
+  (it "has C-x p R before project.el or remoto loads, and leaves a key bound first"
+    (remoto-test-with-autoloads file
+      (expect (remoto-test--fresh-session
+               file '(list (keymap-lookup project-prefix-map "R")
+                           (featurep 'project) (featurep 'remoto)))
+              :to-equal '(remoto-project-find-file nil nil))
+      (expect (remoto-test--fresh-session
+               nil `(progn (keymap-set project-prefix-map "R" #'ignore)
+                           (load ,file nil t)
+                           (keymap-lookup project-prefix-map "R")))
+              :to-be 'ignore)))
+
+  (it "opens the forge copy of a clone at the first C-x p R"
+    (remoto-test-with-autoloads file
+      (remoto-test-in-clone dir
+        (remoto-test--git "remote" "add" "origin" "git@github.com:o/r.git")
+        (remoto-test--git "update-ref" "refs/remotes/origin/main" "HEAD")
+        (remoto-test--git "branch" "--quiet" "--set-upstream-to=origin/main")
+        (let ((result (remoto-test--fresh-session
+                       file
+                       `(let ((default-directory ,dir)
+                              (found nil))
+                          (let ((overriding-local-map
+                                 (define-keymap "C-x C-f"
+                                   (lambda () (interactive) (setq found default-directory)))))
+                            (call-interactively (keymap-lookup project-prefix-map "R")))
+                          (list :found found
+                                :global (bound-and-true-p global-remoto-mode))))))
+          (expect (plist-get result :found) :to-equal "/github:o/r@main:/")
+          (expect (plist-get result :global) :to-be t))))))
 
 ;;; Unloading
 

@@ -5,37 +5,35 @@
 [[https://github.com/agzam/remoto.el/actions/workflows/run-tests.yml][https://github.com/agzam/remoto.el/actions/workflows/run-tests.yml/badge.svg]]
 
 #+begin_quote
-El Remoto - browse any GitHub or Codeberg repository in Emacs just like any local - without cloning.
+El Remoto - browse any GitHub or Codeberg repository in Emacs just like any local - no cloning.
 #+end_quote
 
 * What
-Wouldn't it be nice to be able to ~C-x C-f~ and just browse any GitHub repo?
+Wouldn't it be nice to be able to ~C-x C-f~ and just browse any remote repo?
 
 [[./test/demo.gif]]
 
-remoto.el registers a virtual filesystem via ~file-name-handler-alist~ that translates standard Emacs file operations into calls to the forge's API via the ~ghub~ library. The result: ~find-file~, ~dired~, tab-completion, ~dired-subtree~ - all standard Emacs file tooling works against a remote repository. Read-only.
+It registers a virtual filesystem via ~file-name-handler-alist~ that translates standard file operations into calls to remote API. ~find-file~, ~dired~, tab-completion, ~dired-subtree~ - etc. seamlessly work against a remote repository.
 
-It was demoed at [[https://www.meetup.com/emacsatx/][Emacs ATX Meetup]] of July 2026. Here's the [[https://youtu.be/YV1kyVE6SvU][video]]. Link to the complete video of that meetup (~2 hrs) is in the description.
+First time it was [[https://youtu.be/YV1kyVE6SvU][demoed]] at [[https://www.meetup.com/emacsatx/][Emacs ATX Meetup]] of July 2026.
 
 * Why
 
-Sometimes you just want to look at code. Check a function signature, read a README, browse a project structure. Cloning a repo for that is overkill - it takes disk space, creates another directory to manage, and breaks your flow.
+Sometimes you just want to look at code. Check a function signature, glance over the README, browse the project structure. Cloning is overkill for that - it takes disk space, makes you think about where to put the damn folder; generally, it just breaks your flow.
 
 * Where
 
-GitHub, under ~/github:~ and ~/gh:~, and Codeberg, under ~/codeberg:~ and ~/cb:~.
+It is on [[https://melpa.org/#/remoto][MELPA]]. 
 
 * How
-** use-package 
 
-Loading the package defines things and changes nothing. ~global-remoto-mode~ is the switch: it installs the file handler, the URL rewriting in ~find-file~ and ~dired~, and the completion metadata, and removes them all when turned off. Nothing else is needed:
-
-It is on [[https://melpa.org/#/remoto][MELPA]]. You can just point at it and Emacs will fetch it (if MELPA is in the ~package-archives~) 
 #+begin_src emacs-lisp
 (use-package remoto)
 #+end_src
 
-The mode turns itself on at first use, whichever way that comes: ~M-x remoto-browse~, an Embark open action, or a ~/github:~, ~/gh:~, ~/codeberg:~ or ~/cb:~ path typed at ~C-x C-f~, ~C-x d~ or any other file prompt. For the last one the package autoloads register a small handler for those prefixes, the way TRAMP loads on the first remote path; it hands over to the real handler and steps aside. Each of these says so once in the echo area. To have the mode on from the start, and skip that message, put ~(global-remoto-mode 1)~ in your config.
+Loading the package defines things and changes nothing. ~global-remoto-mode~ is the switch: it installs the file handler, the URL rewriting in ~find-file~ and ~dired~, completion metadata; and when turned off - removes them all.
+
+The mode turns itself on at first use, whichever way that comes: ~M-x remoto-browse~, an Embark open action, or a ~/github:~ or ~/codeberg:~ path typed at ~C-x C-f~, ~C-x d~ or any other file prompt. For the last one the package autoloads register a small handler for those prefixes, hands over to the real handler and steps aside. Each of these says so once in the echo area. To skip that message, add ~(global-remoto-mode 1)~ in the config.
 
 #+HTML: <details><summary>
 ** GitHub
@@ -45,19 +43,15 @@ The mode turns itself on at first use, whichever way that comes: ~M-x remoto-bro
 
 Public repositories need no setup. A token adds private repositories, a higher rate limit (5,000 requests an hour instead of 60), and ~/gh:~ itself, which lists your account and organizations.
 
-Run ~M-x remoto-login~. It opens GitHub's page for a new token with its scopes ticked, reads the token you paste, checks it with GitHub, and stores it in the first =.gpg= file of ~auth-sources~, such as =~/.authinfo.gpg=; without one, or when GnuPG cannot write it, the token lasts the session. A new =.gpg= file asks for a passphrase twice, as auth-source does. The page's address also goes to =*Messages*=, for an Emacs with no browser at hand. There is no command to remember: when GitHub's limit runs out, or when you open ~/gh:~, remoto asks to log in.
-
-The page ticks ~repo~, for private repositories, and ~read:org~, to list your organizations. A fine-grained token works for the repositories it covers, but GitHub lists no organizations for it.
-
-remoto also reads the tokens you keep already, with no git config: those of [[https://github.com/magit/ghub][ghub]] and [[https://github.com/magit/forge][Forge]] (the login ~USER^ghub~ or ~USER^forge~ under ~api.github.com~), or a row of your own:
+Either manually add your GH token to ~auth-sources~, such as =~/.authinfo.gpg= in the form of:
 
 #+begin_example
 machine github.com login USER password TOKEN
 #+end_example
 
-When GitHub refuses a token, remoto takes the next one auth-source holds before it asks you to log in again. It reads a macOS keychain only when no other source holds a token, since macOS asks before remoto reads an item that git's credential helper saved. After you change auth-source by hand in a running Emacs, ~M-x remoto-reset-auth~ looks the token up again. To send no token at all, set ~remoto-github-auth~ to ~none~.
+Or Run ~M-x remoto-login~ and follow the instructions. 
 
-*** Examples
+*** Usage Examples
 
 #+begin_example
 C-x C-f /gh:torvalds/linux RET           -> the tree on the default branch
@@ -77,7 +71,6 @@ M-x remoto-browse RET git@github.com:torvalds/linux.git RET
 M-x remoto-browse RET torvalds/linux RET
 #+end_src
 
-It reads GitHub names only; a Codeberg URL or a ~/cb:~ path opens with ~C-x C-f~.
 #+HTML: </details>
 #+HTML: <details><summary>
 ** Codeberg
@@ -87,15 +80,15 @@ It reads GitHub names only; a Codeberg URL or a ~/cb:~ path opens with ~C-x C-f~
 
 Public repositories need no setup. A token adds private repositories and ~/cb:~ itself, which lists your account and organizations.
 
-Run ~M-x remoto-login~ and pick Codeberg. It opens Codeberg's page of applications, where you generate a token with Read on repository, issue, organization and user, and access to All repositories; Specific repositories cannot hold the user and organization permissions. remoto checks the token and stores it as it does GitHub's.
-
-A token you keep for Forge works as it is, and so does a row of your own:
+Either manually add your Codeberg token to ~auth-sources~, such as =~/.authinfo.gpg= in the form of:
 
 #+begin_example
 machine codeberg.org login USER password TOKEN
 #+end_example
 
-*** Examples
+Or Run ~M-x remoto-login~, pick Codeberg, and follow the instructions. 
+
+*** Usage Examples
 
 #+begin_example
 C-x C-f /cb:forgejo/forgejo RET          -> the tree on the default branch
@@ -118,55 +111,29 @@ Other Forgejo or Gitea servers get a prefix each through ~remoto-forgejo-instanc
 
 Auth works as on Codeberg: ~M-x remoto-login~ names each server by its host, and a row of your own goes under ~HOST~.
 
-The built-in prefixes load remoto on their first use; a prefix from this option exists once remoto is loaded, so turn ~global-remoto-mode~ on in your config to type it at the first prompt of a session.
 #+HTML: </details>
 
-** Usage
+** Features
 
 *** find-file completion
 
 Every prefix enables multi-level completion directly in ~find-file~ (~C-x C-f~). Three delimiters after ~owner/repo~ control the mode: ~/~ for files, ~@~ for branches/tags, ~#~ for issues/PRs.
 
 #+begin_example
-/github:              -> your user + orgs (when authenticated)
-/github:tor           -> users/orgs matching "tor"
-/github:torvalds/     -> repos (with descriptions)
-/github:torvalds/linux/        -> files on default branch (with last commit messages)
-/github:torvalds/linux@        -> branches + tags (grouped)
-/github:torvalds/linux@master: -> file-level completion
-/github:torvalds/linux#        -> issues + PRs
+/gh:                       -> your user + orgs (when authenticated)
+/gh:tor                    -> users/orgs matching "tor"
+/gh:torvalds/              -> repos (with descriptions)
+/gh:torvalds/linux/        -> files on default branch (with last commit messages)
+/gh:torvalds/linux@        -> branches + tags (grouped)
+/gh:torvalds/linux@master: -> file-level completion
+/gh:torvalds/linux#        -> issues + PRs
 #+end_example
-
-Each level shows annotations: repo descriptions, issue/PR titles and state, file commit messages, user/org type. Works with vanilla completion, Vertico, Corfu, etc. While a request is in flight, a ~⟳~ sits between the prompt and the path being typed, and once the path is chosen and opens, the same mark sits in the echo area; ~remoto-browse~ shows the same two, and ~remoto-show-fetch-indicator~ turns both off.
-
-Hitting RET on ~/github:owner/repo~ opens the default branch. ~/github:owner/repo#42~ opens an issue/PR display buffer.
-
-*** Canonical paths
-
-The virtual filesystem uses paths of the form:
-
-#+begin_example
-/github:OWNER/REPO@REF:/PATH
-#+end_example
-
-~REF~ is optional - omitting it uses the repo's default branch.
 
 *** Issue/PR display
 
 Opening ~/github:owner/repo#42~ shows a dedicated buffer with the issue or PR content. For PRs: diff stats, branch info, merge status, and review summary. For both: body + comments.
 
 Keybindings in the display buffer: ~b~ (open in browser), ~g~ (refresh).
-
-*** Commands
-
-| Command              | Description                                                   |
-|----------------------+---------------------------------------------------------------|
-| ~global-remoto-mode~ | Turn the file handler, URL rewriting and completion on or off |
-| ~remoto-browse~      | Prompt for a GitHub repo, open dired at root                  |
-| ~remoto-refresh~     | Clear the cache of the current repo or listing, re-fetch      |
-| ~remoto-copy-url~    | Copy the forge URL for current file/line to kill ring         |
-| ~remoto-login~       | Log in to a forge with a token, and store the token           |
-| ~remoto-reset-auth~  | Forget the login state, look the token up again               |
 
 *** Language servers
 
@@ -188,24 +155,21 @@ Evil's ex commands take remoto paths: ~:e~, ~:sp~, ~:vs~, ~:view~ and ~:new~ ope
 
 In a name that starts with ~/gh:~ or ~/github:~, ~#~ and ~%~ are literal: they do not name Evil's alternate and current file. A relative name keeps Evil's meaning, so in a remoto Dired, ~:e C\#/Program.cs~ opens ~C#/Program.cs~.
 
-** Embark integration
+*** project.el
 
-Optional [[https://github.com/oantolin/embark][Embark]] integration lives in ~remoto-embark.el~. Embark is not a hard dependency; when it is installed the integration activates automatically, with nothing to configure. With it active, ~embark-act~ offers forge-agnostic actions on remoto targets in remoto file buffers, ~dired~, and ~/github:~ minibuffer completion (including ~embark-collect~).
+A remoto repository is a project: ~C-x p f~, ~C-x p d~, ~C-x p D~, ~C-x p b~, ~C-x p k~ and ~C-x p p~ - just work.
 
-Each target type has its own keymap of actions that reuse remoto's forge-agnostic URL layer (copy or browse the web URL, clone, blame, permalink, open an issue/PR, and so on):
+Commands that require local items obviously wouldn't - ~project-shell~, ~project-compile~, ~project-find-regexp~, ~consult-ripgrep~.
 
-| Target        | Example                               | Keymap                   |
-|---------------+---------------------------------------+--------------------------|
-| ~remoto-owner~  | ~/github:torvalds~                      | ~remoto-embark-owner-map~  |
-| ~remoto-repo~   | ~/github:torvalds/linux:/~              | ~remoto-embark-repo-map~   |
-| ~remoto-branch~ | ~/github:torvalds/linux@master:/~       | ~remoto-embark-branch-map~ |
-| ~remoto-issue~  | ~/github:torvalds/linux#42~             | ~remoto-embark-issue-map~  |
-| ~remoto-dir~    | ~/github:torvalds/linux@master:/fs~     | ~remoto-embark-dir-map~    |
-| ~remoto-file~   | ~/github:torvalds/linux@master:/README~ | ~remoto-embark-file-map~   |
+With ~C-x p R~ (~remoto-project-find-file~) browse project's remote; with ~C-u~ you get to pick which one.
 
-A branch or tag offers the repository's actions as well. Run ~embark-act~ on a target to see its actions and keys. Cloning honors ~remoto-clone-url-type~ and opens the clone's Magit status buffer when it finishes (~dired~ without Magit), and Embark's built-in ~url~ target gains ~R~ to open a forge URL at point as a remoto path.
+*** Embark
 
-** How does it work
+Optional [[https://github.com/oantolin/embark][Embark]] integration, which is not a hard dependency; when it is installed it activates automatically. Then, ~embark-act~ offers forge-agnostic actions on remoto targets everywhere - ~dired~, minibuffer completion, ~embark-collect~ buffer.
+
+Each target type has its own keymap of actions. Run ~embark-act~ on a target to see its actions and keys. Cloning honors ~remoto-clone-url-type~ and opens the clone's Magit status buffer when it finishes. Embark's built-in ~url~ target gains ~R~ to open a forge URL at point.
+
+** How does it all work
 
 1. On first access to any file in a repo, the full directory tree is fetched via the Git Trees API (one HTTP call).
 2. Directory listings, ~file-exists-p~, completions - all served from the cached tree in memory.
@@ -240,6 +204,7 @@ We can only imagine a world where git's transport layer gives you a browsable fi
 
 - Read-only. No commits, no pushes, no file modifications. You still can copy them out.
 - No git operations (log, blame, diff).
+- No programs run against a repository: grep, ripgrep, compile and ~project-find-regexp~ need a clone. In-buffer search (isearch, occur) works on opened files.
 - Timestamps in a repository's Dired are synthetic (the tree API has no timestamps); a listing of repositories shows their last push.
 - Very large repos (100k+ files) use slower per-directory fetching.
 - Rate limits: GitHub allows 5,000 requests an hour with a token and 60 without; Codeberg allows 2,000 per 10 minutes. Normal browsing stays well within them, though not within GitHub's 60.

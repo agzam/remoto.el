@@ -49,6 +49,7 @@
 (require 'format-spec)
 (require 'ghub)
 (require 'iso8601)
+(require 'project)
 
 ;;;; Forges
 
@@ -1503,13 +1504,16 @@ resolved handler receives only canonical paths."
       (if-let* ((handler (intern-soft (format "remoto--handle-%s" operation)))
                 ((fboundp handler)))
           (apply handler args)
-        ;; Fall through to default handler
-        (let ((inhibit-file-name-handlers
-               (cons #'remoto-file-name-handler
-                     (and (eq inhibit-file-name-operation operation)
-                          inhibit-file-name-handlers)))
-              (inhibit-file-name-operation operation))
-          (apply operation args))))))
+        (remoto--pass-on operation args)))))
+
+(defun remoto--pass-on (operation args)
+  "Run OPERATION on ARGS with remoto's handler out of the way."
+  (let ((inhibit-file-name-handlers
+         (cons #'remoto-file-name-handler
+               (and (eq inhibit-file-name-operation operation)
+                    inhibit-file-name-handlers)))
+        (inhibit-file-name-operation operation))
+    (apply operation args)))
 
 ;;;; Read operations
 
@@ -2447,6 +2451,58 @@ too, or Dired adds a line for the repository that `+' did not create."
 (defun remoto--handle-unhandled-file-name-directory (_filename)
   "Return nil - no local equivalent for remote paths."
   nil)
+
+;;;; Programs
+
+;; A program started in a remoto directory runs in `~', which is what a nil
+;; `unhandled-file-name-directory' gives it.  The searches among them would
+;; report the files there as the repository's, so they stop with a message.
+
+(defconst remoto--search-programs
+  '("grep" "egrep" "fgrep" "rg" "ugrep" "ag" "ack" "find" "fd" "fdfind")
+  "Programs that search the files of the directory they run in.")
+
+(defun remoto--search-program (program args)
+  "Return the search that PROGRAM with ARGS would start, or nil.
+That is PROGRAM itself, git with its grep subcommand, or for a shell a
+word of the command line after its -c."
+  (when (stringp program)
+    ;; Words of a command line can look like remote names; they are only split.
+    (let* ((file-name-handler-alist nil)
+           (name (file-name-nondirectory program))
+           (line (cadr (or (member shell-command-switch args) (member "-c" args)))))
+      (cond ((member name remoto--search-programs) name)
+            ((and (equal name "git") (member "grep" args)) "git grep")
+            ((stringp line)
+             (seq-find (lambda (word) (member word remoto--search-programs))
+                       (mapcar #'file-name-nondirectory
+                               (split-string line "[][ \t\n|;&()<>`'\"$]+" t))))))))
+
+(defun remoto--refuse-search (program args)
+  "Signal a `user-error' when PROGRAM with ARGS is a search."
+  (when-let* ((search (remoto--search-program program args)))
+    (user-error "Remoto: %s needs a clone; a repository has no local files" search)))
+
+(defun remoto--handle-process-file (program &optional infile buffer display &rest args)
+  "Run PROGRAM with ARGS unless it is a search; INFILE, BUFFER, DISPLAY as usual."
+  (remoto--refuse-search program args)
+  (remoto--pass-on #'process-file (append (list program infile buffer display) args)))
+
+(defun remoto--handle-start-file-process (name buffer program &rest args)
+  "Start PROGRAM with ARGS as process NAME in BUFFER unless it is a search."
+  (remoto--refuse-search program args)
+  (remoto--pass-on #'start-file-process (append (list name buffer program) args)))
+
+(defun remoto--handle-make-process (&rest args)
+  "Make the process that ARGS describe unless its command is a search."
+  (let ((command (plist-get args :command)))
+    (remoto--refuse-search (car command) (cdr command)))
+  (remoto--pass-on #'make-process args))
+
+(defun remoto--handle-shell-command (command &rest args)
+  "Run the shell COMMAND with ARGS unless it is a search."
+  (remoto--refuse-search shell-file-name (list shell-command-switch command))
+  (remoto--pass-on #'shell-command (cons command args)))
 
 ;;;; Write operations (all read-only)
 
@@ -3729,6 +3785,202 @@ Args: ORIG, STRING, PRED, ACTION."
            (remoto--sync-inhibited value)))
   :group 'remoto)
 
+;;;; project.el
+
+(defun remoto--project (dir)
+  "Return the project of DIR, a directory in a repository tree, or nil.
+The project is (remoto . ROOT), ROOT the /PREFIX:OWNER/REPO@REF:/ of the
+tree.  A project found before the mode is on turns it on."
+  ;; DIR can carry a completion candidate's text properties, and project.el
+  ;; writes the root to `project-list-file'.
+  (when-let* ((parsed (remoto--parse-path
+                       (remoto--normalize-shorthand (substring-no-properties dir)))))
+    (remoto--ensure-global-mode)
+    (cons 'remoto (concat (remoto--tree-prefix parsed) "/"))))
+
+(cl-defmethod project-root ((project (head remoto)))
+  "Return the root of the remoto PROJECT."
+  (cdr project))
+
+(cl-defmethod project-name ((project (head remoto)))
+  "Return OWNER/REPO@REF, the name of the remoto PROJECT."
+  (string-remove-suffix ":/" (remoto--after-prefix (cdr project))))
+
+(defvar remoto--every-file nil
+  "Non-nil while a command runs that visits every file of its project.")
+
+(defun remoto--refuse-every-file (project)
+  "Signal a `user-error' when PROJECT is a remoto project."
+  (when (eq (car-safe project) 'remoto)
+    (user-error "Remoto: this visits every file of %s, a request each; search a clone"
+                (project-name project))))
+
+(defun remoto--every-file-a (function &rest args)
+  "Run FUNCTION on ARGS unless its project is remoto's: it visits every file.
+The current project is refused before the prompt, a project picked at the
+prompt once FUNCTION asks for its files."
+  (interactive (lambda (spec)
+                 (remoto--refuse-every-file (project-current))
+                 (advice-eval-interactive-spec spec)))
+  (let ((remoto--every-file t))
+    (apply function args)))
+
+(cl-defmethod project-files ((project (head remoto)) &optional dirs)
+  "Return the files of the remoto PROJECT under DIRS, its root by default.
+The names are relative to the one directory asked for when
+`project-files-relative-names' allows it, as project.el's own are."
+  (when remoto--every-file
+    (remoto--refuse-every-file project))
+  (let ((dirs (or dirs (list (project-root project)))))
+    (if (and (bound-and-true-p project-files-relative-names) (null (cdr dirs)))
+        (remoto--tree-files (car dirs) t)
+      (mapcan #'remoto--tree-files dirs))))
+
+(defun remoto--tree-files (dir &optional relative)
+  "Return the names of the files under DIR, a directory in a repository tree.
+RELATIVE names them from DIR.  They come from the tree: the default
+`project-files' runs find, and a repository has no local directory to
+run it in."
+  (when-let* ((parsed (remoto--parse-path
+                       (remoto--normalize-shorthand (substring-no-properties dir)))))
+    (let* ((tree (remoto--ensure-tree parsed))
+           (key (remoto--tree-lookup-key (remoto-path-path parsed)))
+           (under (if (string-empty-p key) "" (concat key "/")))
+           (root (concat (remoto--tree-prefix parsed) "/"))
+           (head (if relative "" (concat root under)))
+           (files nil))
+      (when (gethash "\0truncated" tree)
+        (message "Remoto: the tree of %s is partial, and so is its file list" root))
+      (maphash (lambda (path entry)
+                 (when (and (not (string-prefix-p "\0" path))
+                            (string-prefix-p under path)
+                            (equal (alist-get 'type entry) "blob"))
+                   (push (concat head (substring path (length under))) files)))
+               tree)
+      (sort files #'string<))))
+
+(defun remoto--git (&rest args)
+  "Return what git prints for ARGS in `default-directory', or nil if it fails."
+  (with-temp-buffer
+    (when (eq 0 (ignore-errors (apply #'process-file "git" nil '(t nil) nil args)))
+      (string-remove-suffix "\n" (buffer-string)))))
+
+(defun remoto--forge-of-host (host)
+  "Return the forge whose web host is HOST, or nil."
+  (and host
+       (seq-find (lambda (forge) (string-equal-ignore-case host (remoto-forge-host forge)))
+                 (seq-uniq (mapcar #'cdr remoto--forges)))))
+
+(defun remoto--ssh-hostname (host)
+  "Return the name that ssh connects to for HOST, which may be an alias."
+  (with-temp-buffer
+    (when (eq 0 (ignore-errors (process-file "ssh" nil '(t nil) nil "-G" host)))
+      (goto-char (point-min))
+      (and (re-search-forward "^hostname \\(.+\\)$" nil t)
+           (match-string 1)))))
+
+(defun remoto--remote-repo (url)
+  "Return the root of the repository that the git remote URL names, or nil.
+The root is a `remoto-path'.  An ssh host that is no forge's can be an
+alias of the ssh configuration, which ssh -G resolves."
+  (when (string-match
+         (rx bos (or (seq (group-n 1 (+ (in "a-z+"))) "://"
+                          (? (* (not (in "@/"))) "@")
+                          (group-n 2 (+ (not (in "/:"))))
+                          (? ":" (* digit)) (+ "/"))
+                     (seq (? (* (not (in "@/"))) "@")
+                          (group-n 2 (+ (not (in "/:")))) ":" (? "/")))
+             (group-n 3 (+ (not "/"))) "/"
+             (group-n 4 (+? (not "/"))) (? ".git") (* "/") eos)
+         url)
+    (let* ((scheme (match-string 1 url))
+           (host (match-string 2 url))
+           (owner (match-string 3 url))
+           (repo (match-string 4 url))
+           (forge (or (remoto--forge-of-host host)
+                      (and (not (member scheme '("http" "https")))
+                           (remoto--forge-of-host (remoto--ssh-hostname host))))))
+      (and forge
+           (remoto-path-create :forge forge :owner owner :repo repo :path "/")))))
+
+(defun remoto--git-remotes ()
+  "Return (NAME . URL) for each remote of the repository, as git lists them."
+  (seq-uniq
+   (seq-keep (lambda (line)
+               (and (string-match "\\`\\([^\t]+\\)\t\\(.+\\) (fetch)\\'" line)
+                    (cons (match-string 1 line) (match-string 2 line))))
+             (split-string (or (remoto--git "remote" "-v") "") "\n" t))))
+
+(defun remoto--git-upstream (branch)
+  "Return (REMOTE REMOTE-BRANCH) that BRANCH tracks, or nil.
+REMOTE-BRANCH is nil once its remote-tracking branch is gone."
+  (when-let* ((line (remoto--git "for-each-ref"
+                                 "--format=%(upstream:remotename)%09%(upstream:remoteref)%09%(upstream:track)"
+                                 (concat "refs/heads/" branch)))
+              (fields (split-string line "\t"))
+              ((not (string-empty-p (car fields)))))
+    (list (car fields)
+          (and (not (equal (nth 2 fields) "[gone]"))
+               (string-prefix-p "refs/heads/" (nth 1 fields))
+               (string-remove-prefix "refs/heads/" (nth 1 fields))))))
+
+(defun remoto--read-remote (remotes default)
+  "Ask for one of REMOTES, (NAME . ROOT) pairs; DEFAULT names the one offered."
+  (let* ((width (apply #'max (mapcar (lambda (remote) (length (car remote))) remotes)))
+         (completion-extra-properties
+          (list :annotation-function
+                (lambda (name)
+                  (concat (make-string (- (1+ width) (length name)) ?\s)
+                          (remoto--canonical-path (cdr (assoc name remotes))))))))
+    (assoc (completing-read (format-prompt "Remote" default) remotes nil t nil nil default)
+           remotes)))
+
+(defun remoto--forge-directory (pick)
+  "Return the remoto directory of `default-directory', a directory of a clone.
+The remote is the one the branch tracks; PICK, or several remotes and
+none tracked, asks for it.  The ref is the tracked branch, else the
+branch's own name when the remote has it, else the default branch."
+  (let* ((prefix (or (remoto--git "rev-parse" "--show-prefix")
+                     (user-error "Remoto: %s is not in a git repository"
+                                 (abbreviate-file-name default-directory))))
+         (remotes (or (remoto--git-remotes)
+                      (user-error "Remoto: this repository has no remote")))
+         (served (or (seq-keep (lambda (remote)
+                                 (when-let* ((root (remoto--remote-repo (cdr remote))))
+                                   (cons (car remote) root)))
+                               remotes)
+                     (user-error "Remoto: no remote is on a forge remoto serves: %s"
+                                 (mapconcat (lambda (remote) (concat (car remote) " " (cdr remote)))
+                                            remotes ", "))))
+         (branch (remoto--git "symbolic-ref" "--quiet" "--short" "HEAD"))
+         (upstream (and branch (remoto--git-upstream branch)))
+         (tracked (assoc (car upstream) served))
+         (remote (if (or pick (and (not tracked) (cdr served)))
+                     (remoto--read-remote served (car (or tracked (assoc "origin" served)
+                                                          (car served))))
+                   (or tracked (car served))))
+         (root (cdr remote)))
+    (setf (remoto-path-ref root)
+          (cond ((eq remote tracked) (nth 1 upstream))
+                ((and branch (remoto--git "show-ref" "--verify" "--quiet"
+                                          (format "refs/remotes/%s/%s" (car remote) branch)))
+                 branch)))
+    (concat (remoto--tree-prefix root) "/" prefix)))
+
+;;;###autoload
+(defun remoto-project-find-file (&optional pick)
+  "Find a file in the forge copy of this clone, starting from this directory.
+The prompt is on the remote the branch tracks, at that branch when the
+remote has it, else at its default branch.  PICK, a prefix argument, or
+several remotes and none tracked, asks for the remote."
+  (interactive "P")
+  (let ((default-directory (if (string-match-p remoto--handler-regexp default-directory)
+                               default-directory
+                             (remoto--forge-directory pick)))
+        (command (key-binding (kbd "C-x C-f"))))
+    (remoto--ensure-global-mode)
+    (call-interactively (if (commandp command) command #'find-file))))
+
 ;;;; Global mode
 
 (defun remoto--drop-autoload-handler ()
@@ -3751,6 +4003,8 @@ Each step is idempotent, so a second call while on is a no-op."
   (advice-add 'find-file-noselect :around #'remoto--find-file-around-a)
   (advice-add 'read-file-name-internal :around
               #'remoto--read-file-name-internal-a)
+  (advice-add 'project-search :around #'remoto--every-file-a)
+  (advice-add 'project-query-replace-regexp :around #'remoto--every-file-a)
   (remoto--sync-inhibited remoto-inhibited-functions)
   (add-hook 'find-file-hook #'remoto--maybe-enable-mode)
   (add-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
@@ -3768,6 +4022,8 @@ Each step is idempotent, so a second call while on is a no-op."
   (advice-remove 'dired-noselect #'remoto--dired-around-a)
   (advice-remove 'find-file-noselect #'remoto--find-file-around-a)
   (advice-remove 'read-file-name-internal #'remoto--read-file-name-internal-a)
+  (advice-remove 'project-search #'remoto--every-file-a)
+  (advice-remove 'project-query-replace-regexp #'remoto--every-file-a)
   (remoto--sync-inhibited nil)
   (remove-hook 'find-file-hook #'remoto--maybe-enable-mode)
   (remove-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
@@ -3806,28 +4062,44 @@ file-name handler for as long as they live, so the mode has to stay on."
     (global-remoto-mode 1)
     (message "Remoto: `global-remoto-mode' enabled")))
 
-;;;###autoload
-(defun remoto-autoload-file-name-handler (operation &rest args)
+(defun remoto--take-over (operation args)
   "Turn on `global-remoto-mode' for the first remoto path, then run OPERATION.
-ARGS are the arguments of OPERATION.  The package autoloads register
-this handler in `file-name-handler-alist', so a path of a forge that
-comes with remoto, such as `/github:' or `/cb:', typed at a file prompt
-works before remoto is loaded, the way a remote path loads TRAMP.
-Calling it loads remoto; it then leaves the alist for good, and
-`remoto--install' puts the real handler in front.
-
-The call that brings remoto in runs without the advice `remoto--install'
-adds, because the advice arrives while that call is already under way.
-`expand-file-name' is what `find-file-noselect' asks first, and what it
-gets back is the name it visits, so canonicalizing here gives that one
-call the rewrite the advice would have given it.  A file prompt asks
-`substitute-in-file-name' first instead, and a prompt is still being
-typed into, so it is left alone."
+ARGS are its arguments.  The advice of `remoto--install' arrives while this
+call runs, so the rewrite it would give `expand-file-name', which
+`find-file-noselect' asks first, happens here."
   (remoto--drop-autoload-handler)
   (remoto--ensure-global-mode)
   (when (and (eq operation 'expand-file-name) (stringp (car args)))
     (setcar args (remoto--maybe-rewrite (car args))))
   (apply operation args))
+
+;; The definition itself goes into the autoloads: answering `file-remote-p'
+;; must not load remoto, since project.el and recentf ask it of every name
+;; they keep.  Before remoto loads no repository is reached, so a connected
+;; answer is nil, as `remoto--handle-file-remote-p' gives.
+;;;###autoload
+(progn
+  (defun remoto-autoload-file-name-handler (operation &rest args)
+    "Load remoto for a path of a forge that comes with it, then run OPERATION.
+ARGS are the arguments of OPERATION.  The package autoloads register this
+handler, so such a path works before remoto loads, as a remote path loads
+TRAMP; `file-remote-p' of a canonical name is answered without loading."
+    (if-let* (((eq operation 'file-remote-p))
+              ((not (featurep 'remoto)))
+              (name (car args))
+              ((stringp name))
+              ((null (nth 1 args)))
+              ((string-match-p "\\`/\\(?:github\\|codeberg\\):" name)))
+        (and (memq (nth 2 args) '(nil never))
+             (save-match-data
+               (if (string-match
+                    "\\`\\(/[^/:]+:[^/]+/[^/:@#]+\\)\\(?:@\\([^:]+\\)\\|@\\)?:" name)
+                   (concat (match-string 1 name)
+                           (and (match-beginning 2) (concat "@" (match-string 2 name)))
+                           ":")
+                 (substring name 0 (1+ (string-search ":" name))))))
+      (require 'remoto)
+      (remoto--take-over operation args))))
 
 ;;;; Issue display (see remoto-topic.el for full implementation)
 

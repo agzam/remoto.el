@@ -3,399 +3,324 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [Unreleased]
+
+** Added
+- adds project.el support: a repository tree is a project - ~C-x p f~, ~C-x p d~, ~C-x p D~, ~C-x p b~, ~C-x p k~, ~C-x p p~
+- adds ~remoto-project-find-file~ - ~C-x p R~
+- searches in a remoto directory (~C-x p g~, ~consult-ripgrep~, ~grep~, ~find~) stop with a message
+- ~project-search~ and ~project-query-replace-regexp~ refuse remoto projects
+
+** Changed
+- remoto paths in ~project-list-file~ or ~recentf-list~ no longer load remoto at startup
+
 * [2.5.0] - 2026-10-30
 
 ** Added
-- ~remoto-login~: log in to a forge with a token. It opens the forge's page for a new token, GitHub's with ~repo~ and ~read:org~ ticked, reads the token, asks the forge whose it is, and stores it as ~ACCOUNT^remoto~ under the forge's web host in the first =.gpg= file of ~auth-sources~, in place of remoto's earlier row for that host; without such a file, or when GnuPG cannot write it, the token lasts the session and the message says why. A new file is encrypted with a passphrase, as auth-source encrypts one, with no list of keys to pick. The page's address goes to =*Messages*=, and into the prompt when no browser opens; a pasted token stays out of the kill ring.
-- remoto offers a login when a command of yours needs a token: GitHub's limit for requests without one runs out ("GitHub rate limited until 14:32. Log in now?"), the forge refuses the token, or ~/github:~ or ~/codeberg:~ lists your account. After "n" it only says so for the rest of the session, and during completion, from timers and from process filters it never asks.
-- Without a token, the first remoto buffer of a session says that GitHub is read anonymously, 60 requests an hour, and names ~remoto-login~. Codeberg's limit, 2,000 requests per 10 minutes, gets no such line.
+- adds ~remoto-login~ - log in to a forge with a token, stored in ~auth-sources~
+- offers a login when a command needs a token: rate limit, refused token
+- the first remoto buffer without a token says GitHub is read anonymously
 
 ** Changed
-- remoto needs no git config. It reads every auth-source row under a forge's API host or web host and takes remoto's own (~ACCOUNT^remoto~), Forge's, ghub's and an untagged one, in that order, with the account git config names first among rows of one tag. It hands ghub the row's account, so ghub never asks git for one; ~github.user~ and ~forgejo.user~ only break ties now.
-- Without a token, remoto reads a forge anonymously from the first request on and says nothing then. With an account name in git config and no token, the first request failed with ghub's "Required Github token" error, and without the name remoto said "no github.user in git config".
-- A rate limit says until when: "Remoto: GitHub rate limited until 14:32", from ~x-ratelimit-reset~ or a Retry-After in seconds, and names ~remoto-login~ when the request went without a token. A 403 said "access denied (rate limit or permissions)", and a 429 how long to wait. The headers of a request that completion started reach the message too.
-- A repository that answers 404 without a token, at ~find-file~, ~dired~ or ~remoto-browse~, says "OWNER/REPO not found or private" and names ~remoto-login~.
-- A token the forge refuses gives way to the next one auth-source holds, a refused ~remoto-github-auth~ to the stored login; with none left, remoto says "Remoto: GitHub refused the token" and names ~remoto-login~.
-- remoto reads a macOS keychain only when no other source holds a token: macOS asks before a program reads an item that git's credential helper saved.
-- Loading remoto again in a running Emacs, as an upgrade does, forgets the logins of the older version, whose fewer slots failed every request with a token.
-- ~remoto-reset-auth~ also forgets auth-source's cache, which kept a failed search for two hours.
-- ~remoto-auth-timeout~ is obsolete: it guarded ghub's own token lookup, which remoto no longer leaves to ghub.
+- no git config needed: tokens come from auth-source rows by host
+- without a token, remoto reads anonymously from the first request
+- rate limit messages say until when
+- a 404 without a token suggests ~remoto-login~
+- a refused token falls back to the next stored one
+- the macOS keychain is read only when nothing else has a token
+- ~remoto-reset-auth~ also clears auth-source's cache
+- ~remoto-auth-timeout~ is obsolete
 
 ** Fixed
-- ~remoto-github-auth~ set to ~none~ sends no token, as the documentation said; it was ignored, and so was a package symbol such as ~forge~. The option takes nil, ~none~ or a token string.
-- An error that was no answer of the forge, such as a failed host lookup, marked the login failed for the session, as if the token had been refused, and so did any failure of the idle warm-up. Only a 401 drops the token now.
+- ~remoto-github-auth~ set to ~none~ sends no token
+- a network error no longer drops the token for the session
 
 * [2.4.0] - 2026-10-25
 
 ** Added
-- Codeberg. ~/codeberg:OWNER/REPO~ and ~/cb:OWNER/REPO~ browse a Codeberg repository the way ~/github:~ browses one on GitHub: the tree, ~@~ for branches and tags, ~#~ for issues and pull requests, the listings above a repository, completion with searches at every level, the web URLs out and in (~https://codeberg.org/OWNER/REPO/src/branch/REF/PATH~, ~src/tag/~, ~src/commit/~, ~raw/~, ~issues/N~, ~pulls/N~, the ssh remote), Embark's actions, and ~remoto-topic~ for a pull request with its reviews. Public repositories work without a token. The new ~remoto-forgejo.el~ holds it: Forgejo's API copies GitHub's, so ~remoto-forgejo~ is a ~remoto-github~ against another host, with its own methods only where the two differ - the paged recursive tree, the search endpoints, the ref lookup, the review states, the web URLs, which spell the kind of a ref in the path. The token follows ~ghub~'s conventions for Forgejo: ~forgejo.user~ in git config and a secret under ~codeberg.org/api/v1~.
-- ~remoto-forgejo-instances~: ~(PREFIX HOST)~ pairs that give any Forgejo or Gitea server a prefix of its own, ~(("gitea" "gitea.com"))~ for ~/gitea:OWNER/REPO~. A prefix with a colon or a slash or that names a TRAMP method, such as ~ssh~, and a host with a scheme or a path, are refused with a warning. A server that leaves the list takes its buffers, its web URL templates and its login with it; the servers that stay keep theirs.
-- The login state is kept per API host: a token for GitHub and one for Codeberg, each looked up under its host; ~remoto-reset-auth~ with a prefix argument forgets one host, or every host when the answer is empty. Without a ~github.user~ or ~forgejo.user~ in git config (~forgejo.HOST.user~ for a server other than Codeberg, as ~ghub~ reads it) no token can be found, so remoto says so once, naming the key, and reads that forge anonymously, instead of failing the first request. The endpoints of the token's own account are never asked without a token: they answer 401, and url.el would prompt for a password.
-- Every cache is keyed by forge: an ~OWNER/REPO~ that exists on two forges has two trees, two default branches, two sets of refs.
-- A conformance run of the Codeberg forge against the level table, from answers recorded at codeberg.org (~test/fixtures/codeberg.jsonl~, ~make test-fixtures-codeberg~ records them again), the grammar invariants over the prefixes of both forges, and specs for the transport per host, the login table, the Forgejo methods, the URL forms and the instances option.
-- ~%k~ in ~remoto-forge-url-templates~: the kind of the ref, ~branch~, ~tag~ or ~commit~, for a forge that spells it in its URLs; and a ~pr~ kind for the page of a pull request, which ~b~ in a topic buffer opens on either forge.
-- ~remoto-unregister-forge~. It kills the forge's file, Dired and topic buffers and says how many: once no handler serves their names, killing any buffer that shares a name with one fails in ~uniquify~.
+- adds Codeberg - ~/codeberg:~ and ~/cb:~
+- adds ~remoto-forgejo-instances~ - other Forgejo and Gitea servers
+- one login per forge host; ~C-u M-x remoto-reset-auth~ forgets one
+- adds ~%k~, the ref kind, to ~remoto-forge-url-templates~
+- adds ~remoto-unregister-forge~
 
 ** Changed
-- ~remoto--api~ and every GitHub function take the forge they speak for, so a forge whose API copies GitHub's inherits them against its own host. ~ghub~ 5.3.0 or later is required: it knows Forgejo, and takes ~github.user~ or ~forgejo.user~ for the domain of the forge's web host.
-- The autoload cookie that loads remoto for a ~/github:~ path lives in ~remoto-github.el~; ~remoto-forgejo.el~ carries its own for ~/codeberg:~ and ~/cb:~.
-- A token that the forge refuses with a 401 marks the login of its host failed: remoto says so, naming the host, and asks again without the token, until ~remoto-reset-auth~. GitHub's login used to fall back only from the idle warm-up, and until then every request failed with "Remoto: authentication failed; configure ghub token in auth-source".
-- A topic buffer is named after the topic's canonical name, ~*remoto: /github:OWNER/REPO#N*~, so the same ~OWNER/REPO#N~ on two forges opens two buffers.
-- A forge contract. The core asks a forge for data through 28 generic functions, the default ref, a tree, a file's bytes, branches and tags, topics, the listings above a repository, account and repository search, URL parsing, and turns the data into file operations, Dired lines and completion candidates itself. GitHub answers them in the new ~remoto-github.el~, which holds every REST endpoint, the URL parsers and ~remoto-browse~; ~remoto.el~ has no GitHub request left in it. A forge is a ~remoto-forge~ registered with ~remoto-register-forge~: its path prefixes, the first one canonical, its host and the delimiters it supports. The default of a data method signals ~remoto-unsupported~, the URL methods answer nil, so a forge that lacks a method fails cleanly and every forge can be asked about a URL in turn.
-- A delimiter registry. ~@~ and ~#~ come from ~remoto-register-delimiter~, each with a kind the core keys its behavior on: after a ~ref~ delimiter a colon starts the tree, a ~topic~ delimiter picks something that opens in a buffer. A forge lists the delimiters it supports; the others are plain characters in its paths.
-- Refs with a slash. ~/github:OWNER/REPO@release/2026.5.0:/~ parses: the ref ends at the colon. The Dired of branches and tags lists such refs, which it used to drop, and ~RET~ on one opens its tree. Before a colon, everything after ~@~ is the ref: ~/github:o/r@dev/sub~ names the ref ~dev/sub~, not a path under ~dev~.
-- Specs that walk the grammar: every shape a remoto name can take, built from the delimiter registry, checked for what holds whatever the data. The directory part is a prefix and joins with the rest into the name, parse and unparse invert, ~expand-file-name~ is a fixed point and ~..~ names the level above, a directory exists unless ~RET~ must ask first, and every completion candidate joins into a name one level down whose ~remoto-target~ is canonical.
-- Specs of the forge contract: the defaults, the dispatch to GitHub, the routing of a URL to the forge that reads it; and a conformance suite that asserts the level table, what each level is and does, against GitHub's recorded answers, the ones ~make test-e2e~ replays. A new forge runs the same suite with its own fixture kit.
-- One parser. ~remoto--parse~ reads any name with a registered prefix, partial or canonical, into its level, the directory it is in, and the query after it; every file operation branches on the level. The nine shape regexps of ~file-exists-p~, the six of ~file-name-directory~ and the rest, 90 fragments, are gone.
-- The synchronous search that completion at ~/github:OWNER/~ falls back to answers from the cache its first call filled. A keystroke there cost up to four identical search requests; it costs one.
+- requires ~ghub~ 5.3.0
+- refs with a slash work: ~/github:o/r@release/2026.5.0:/~
+- topic buffers are named by path: ~*remoto: /github:OWNER/REPO#N*~
+- forges plug in through a contract: ~remoto-register-forge~
+- caches are per forge
+- a refused token switches its forge to anonymous until ~remoto-reset-auth~
+- owner completion sends one search per keystroke, not up to four
 
 ** Fixed
-- A request with a token in hand ran under ~remoto-auth-timeout~ until the login knew its user, which a Codeberg login learned only from the ~/codeberg:~ Dired: a slower answer was dropped with "auth lookup timed out" and asked again without the token, so a private repository answered 404. The timeout guards only the token lookup that ~ghub~ does itself.
-- With a Codeberg token, completion at ~/codeberg:~ offered nothing until the ~/codeberg:~ Dired had run in the session, the one thing that asked Codeberg whose token it is. The completion at a forge's root asks it itself, after ~remoto-debounce-delay~ of idle time, and refreshes with your account and organizations; without a token it asks nothing.
-- Upgrading from 2.3.0 by package.el in a running session failed with "Error in package--load-files-for-activation: (file-missing ... remoto-forgejo)", and ~remoto-embark~ and ~remoto-topic~ kept their old definitions until a restart, so Embark's ~y~ on a Codeberg topic said "forge ‘nil’ has no ‘issue’ URL": package.el reloads ~remoto.el~ before the new directory is on ~load-path~. ~remoto.el~ loads its forges from its own directory.
-- Codeberg's branches, tags and organizations came 50 a page, one page after another: the 306 tags of forgejo/forgejo took seven round trips before ~@~ completed. The pages after the first are asked for at once, as many as the first answer's ~X-Total-Count~ says, as the pages of a tree are.
-- A Codeberg account's repositories cost a ~users/NAME~ request for the account's id before their search, also for an account that the account search had just found with its id; partial-completion asks for the repositories of every account a name expands to. The accounts a search finds keep their ids.
-- ~M-x remoto-browse~ with ~codeberg.org/OWNER/REPO~ asked GitHub for an owner named ~codeberg.org~, and with a Codeberg URL or a ~/cb:~ path it said "cannot parse input". It says it reads GitHub names and to open the name with ~find-file~, and its completion asks GitHub nothing for such a name.
-- An API error other than 404, 422, 403 and 401 printed the raw condition, such as "Remoto: API error: HTTP Error: 502, nil, "https://...", nil". It names the host and the status now, with the message of the body when it has one; a 429 says rate limited, and both say how long the Retry-After of the answer asks to wait.
-- Topic completion under Vertico failed with ~(wrong-type-argument listp t)~ when a key arrived while it fetched the topic whose number was typed, at ~/github:OWNER/REPO#~ and at ~remoto-browse~. It lists the topics it has instead.
-- A GitHub URL whose branch or tag holds a slash, such as ~https://github.com/OWNER/REPO/tree/release/2026.5.0~, opened the ref ~release~ at the path ~2026.5.0~, since a URL does not mark where the ref ends. remoto asks GitHub for the branches, then the tags, that start with the first segment and takes the longest one the URL starts with: one request, two for a tag, none for a full commit SHA or a URL that ends at the ref. A query string or a fragment, such as the ~?tab=readme-ov-file~ a browser adds to a repository URL, ended up in the repository name or the path, and percent escapes stayed encoded.
-- A description over several lines, which Forgejo allows, split its Dired line in two and showed a ~^M~ in completion annotations. Its line breaks read as spaces now.
-- The commit annotations of the files in a subdirectory asked for ~test//demo.gif~ and showed nothing. They ask for ~test/demo.gif~ now.
-- Embark's actions on a file prompt's candidate failed without Vertico's directory tidying: the candidate arrives joined to the default directory, ~~/dir//gh:o/r#5~, and remoto read neither a file nor an issue there. It reads the name after the ~//~, as the prompt does.
-- The Dired of your own Codeberg account listed your organizations' repositories as yours: Forgejo's ~user/repos~ ignores GitHub's ~affiliation=owner~. A listing keeps the repositories its owner owns.
-- A repository without a commit failed with "Remoto: not found: repos/OWNER/REPO/git/trees/main..." on Codeberg, or GitHub's 409. It opens as an empty directory and says the repository is empty.
+- slow answers with a token no longer fall back to anonymous
+- ~/codeberg:~ completion works before the ~/codeberg:~ listing is opened
+- upgrading from 2.3.0 in a running session works
+- Codeberg pages load in parallel
+- fewer requests for a Codeberg account's repositories
+- ~remoto-browse~ says it reads GitHub names only
+- API errors name the host and the status
+- topic completion under Vertico no longer errors
+- GitHub URLs with slashed refs or query strings open the right place
+- multi-line Forgejo descriptions stay on one line
+- commit annotations work in subdirectories
+- Embark actions work without Vertico's directory tidying
+- your Codeberg listing shows only your own repositories
+- an empty repository opens as an empty directory
 
 * [2.3.0] - 2026-10-20
 
 ** Added
-- Dired lists the two levels above a repository, which used to open an empty buffer. ~/github:~ lists the account of your GitHub token and its organizations, each with its type and description. ~/github:OWNER/~ lists OWNER's repositories with their size, their last push as the date, ~drwx------~ for a private one and ~dr-xr-xr-x~ for an archived one, then the description, with ~fork~ in front of a fork's. ~RET~ on a repository opens its root at the default branch, which the listing already knows, so only the tree is fetched. ~-t~ in the switches puts the latest push first, and ~dired-hide-details-mode~ hides the descriptions along with the details.
-- ~remoto-listing-cap~: the most repositories an owner listing holds (1000), the most recently pushed. The first 100 arrive before Dired shows the listing; the later pages load in the background one at a time, as GitHub asks of clients, and the buffer reverts once they are in. Until then the ~.~ line says how many are listed so far, and it says so too when the cap or a failed page ends the listing. The account of the token and its organizations list their private repositories as well; any other account lists its public ones. Without a token ~/github:~ says why it lists nothing and opens no buffer.
-- ~remoto-refresh~ in a listing fetches it again.
-- ~C-x C-f~ or ~C-x d~ on ~/github:OWNER/NAME~, where OWNER has no repository NAME, opens a Dired of OWNER's repositories that match NAME: the ones the completion at ~/github:OWNER/~ found while it was typed, so a query typed there and submitted as is (~M-RET~ in Vertico) lists its results. Each line has the data of a listing line, and ~RET~ on one opens it with only the tree request. A name that is a repository opens as before, a name that nothing matches says so, and an OWNER that is no account says that. It used to fail with "Remoto: not found: repos/OWNER/NAME".
-- The same works at the other levels. ~/github:NAME~ lists the accounts whose login holds each word of NAME, from a search for NAME itself: completion's hits can be a shorter query's top 30 narrowed down, which may lack NAME. ~/github:OWNER/REPO@REF~, where REF has no tree, lists the branches and tags that hold it, with ~branch~ or ~tag~ as the note, and a bare ~@~ lists them all. A file name that its directory lacks, such as ~/github:OWNER/REPO/foo~, lists the entries of the directory that hold it. ~RET~ on a line opens it. A ref or a commit whose tree loads opens as before, and so does an existing file; a file name that nothing matches visits a new file, as a local one does.
-- Embark's Dired target finder offers the repository actions on a repository line and the account actions on an account line or on an owner listing itself. On a line of a Dired of branches and tags it offers the branch actions: copy or browse the ref's URL, the compare view, a new pull request.
-- A branch or tag target, there or at the ~@~ prompt, keeps the repository actions too: clone, the clone URLs, the history.
-- A Dired of matches puts the name you typed first, ignoring case: ~/gh:agzam~ listed ~agzam~ below every login that starts with a capital.
-- ~make test-e2e~ types names and keys into the real commands under six completion setups (default, fido, Vertico, Vertico with Orderless, Evil, Embark) in batch Emacs, against GitHub answers recorded from public data, and compares where each case ends with ~test/e2e/expected~. CI runs it for every push and pull request. ~make test-e2e-update~ rewrites the expected states; ~make test-e2e-record~ records the answers a new case needs.
-- Specs for both listings: names under ~-al~ and ~-alF~, sorting, notes, the endpoint for each kind of account, background pages, the cap, a failed page, a refresh during a fetch, and Embark on listing lines. Specs for the matches at each level: accounts, repositories, refs and files, each with its search, its lines, ~RET~ on a line, and no match.
+- Dired lists accounts at ~/github:~ and repositories at ~/github:OWNER/~
+- adds ~remoto-listing-cap~ - repositories per listing, 1000
+- ~remoto-refresh~ refetches a listing
+- a name with no exact match opens a Dired of matches: accounts, repositories, refs, files
+- Embark actions on listing lines and on branch and tag lines
+- adds ~make test-e2e~
 
 ** Changed
-- ~..~ at a repository root goes up to the owner's listing, and ~..~ there goes up to ~/github:~; it used to stay at the root. ~expand-file-name~ resolves a ~..~ above a root the same way, so ~(expand-file-name "/github:o/r@main:/..")~ is ~/github:o/~. ~^~ still stays at a repository root.
-- ~file-exists-p~ of a bare ~/github:OWNER~ or ~/github:OWNER/REPO~ answers t once a cached listing holds the name, so ~RET~ on a listing line opens it. A name no listing holds still answers nil, which keeps the ~[Confirm]~ for a half-typed name at a file prompt.
-- ~C-x C-f /github:NAME~, typed without the slash, lists the accounts that match NAME; it used to open the listing of the account NAME. GitHub has accounts for many short words: ~/gh:qlik~ opened the listing of a user named qlik, not the qlik organizations. ~RET~ on an account line, or ~/github:NAME/~ with the slash, still opens the account.
-- ~insert-directory~ without FULL-DIRECTORY-P gives a directory its one line, as ls-lisp does, where it listed the contents. A Dired of a list of names asks so for each name, and a matching subdirectory shows as one line.
+- ~..~ at a repository root goes up to the owner listing
+- ~/github:NAME~ without a slash lists matching accounts
 
 ** Fixed
-- ~find-file~ and ~dired~ on ~/github:OWNER/..~ or ~/github:OWNER/.~ asked GitHub for a repository named ~..~ or ~.~, because the short-form rewrite read the dots as a repository name. The dots resolve first now.
-- ~(file-name-as-directory "/github:")~ gave ~/github:/~, so a Dired buffer of ~/github:~ would have named every entry ~/github:/OWNER~.
-- The Embark target finder took the ~.~ entry of a repository root for a file. It resolves ~.~ and ~..~ first now.
-- A Dired of a subdirectory such as ~/github:o/r@main:/src/~ showed a ~wildcard src~ line, and completion right after that slash offered nothing until a character was typed: ~file-name-nondirectory~ gave ~src~ for the name. It gives the empty string now, as for a local directory name.
+- ~/github:OWNER/..~ no longer asks GitHub for a repository named ~..~
+- the Dired of ~/github:~ names its entries right
+- Embark no longer takes ~.~ for a file
+- a subdirectory Dired shows no stray ~wildcard~ line
 
 * [2.2.0] - 2026-10-19
 
 ** Added
-- Evil's ex commands take remoto paths. ~:e /gh:OWNER/REPO/FILE~ and ~:e /github:OWNER/REPO@REF:/FILE~ reached ~find-file~ with the prefix twice, ~/github:/github:~, because Evil rebuilds a file argument from ~file-remote-p~ and its ~localname~, and remoto answered the prefix for ~localname~. remoto now answers the path after the prefix for the argument of the running ex command, so ~:e~, ~:sp~, ~:vs~, ~:view~ and ~:new~ open the path as ~C-x C-f~ does. Every other caller still gets the prefix: callers hand ~localname~ to local programs, and remoto runs none. Inside a remoto path, ~#~ and ~%~ stay literal instead of naming Evil's alternate and current file, so ~:e /gh:OWNER/REPO#N~ opens the issue or pull request.
-- Specs for the ~localname~ answer inside and outside an Evil ex command, without Evil loaded, under an Evil that lacks ~evil-called-from-ex-p~ (the releases on NonGNU ELPA and MELPA Stable), and for the ex command that brings remoto in.
+- Evil's ex commands open remoto paths: ~:e~, ~:sp~, ~:vs~
 
 * [2.1.1] - 2026-10-16
 
 ** Fixed
-- With ~F~ or ~--classify~ in ~dired-listing-switches~, Dired cut the last character off every directory and executable name in a remoto listing, and could not read a one-letter directory or ~.~ at all. ~src~ read as ~sr~: ~RET~ on it said the file no longer existed, and marks, ~w~, ~remoto-copy-url~ and Embark got the cut name. Under ~-F~ Dired expects ~ls~ to print a type indicator after those names and strips one character to drop it, but remoto printed none. remoto now puts the ~dired-filename~ text property on each name, as ~ls --dired~ and ls-lisp do, so Dired reads the name exactly under any switches, and under ~-F~ it prints the ~/~, ~*~ and ~@~ indicators too.
-- A symbolic link left its line in a remoto listing unreadable to Dired, which looks for ~ -> TARGET~ after a link name, so ~RET~ on it said "No file on this line", and a Dired hook that reads every name, such as treemacs-icons-dired, failed the whole listing with ~(wrong-type-argument stringp nil)~: the root of ~magit/magit~ did not open. With the ~dired-filename~ property the name reads without a target.
-- ~RET~ on ~.~ or ~..~ in a remoto Dired said the file no longer existed, and ~file-exists-p~ and the other file primitives failed on a remoto path through ~.~ or ~..~, because ~expand-file-name~ kept those components in an absolute remoto name. It now drops them, as it does for a local name; ~..~ at the repository root stays at the root.
-- A file operation on a remoto name could change the caller's match data. Primitives such as ~expand-file-name~ and ~file-exists-p~ leave it alone for a local name, but on a remoto name they run remoto's handler, which matches regexps of its own, so a caller that read its match groups after such a call got remoto's. The handler now saves and restores the match data, as TRAMP's does.
-
-** Added
-- Specs for remoto listings under ~-al~ and ~-alF~ over a tree with a one-letter directory, an executable and a symlink: every name reads exactly, ~RET~ on ~.~ and ~..~ lands in the right buffer, and the indicators appear under ~-F~ only.
-- A spec that the caller's match data survives ~expand-file-name~, ~file-exists-p~ and ~file-name-directory~ on remoto names.
+- Dired reads names under ~-F~ (~--classify~)
+- symlinks no longer break a listing
+- ~RET~ on ~.~ and ~..~ works
+- file operations on remoto names keep the caller's match data
 
 * [2.1.0] - 2026-10-04
 
 ** Added
-- ~remoto-inhibited-functions~: functions that do nothing in remoto buffers. The default, ~(lsp eglot-ensure)~, keeps lsp-mode and Eglot out, because LSP makes no sense on a remote Git path. Before, lsp-mode listed ~-tramp~ servers it could not start, and Eglot warned about missing server executables.
+- adds ~remoto-inhibited-functions~ - keeps lsp-mode and Eglot out of remoto buffers
 
 * [2.0.0] - 2026-09-13
 
 ** Changed
-- Loading remoto no longer changes Emacs. The file-name handler, the URL rewriting in ~find-file~ and ~dired~, the completion metadata, the hooks that turn on ~remoto-mode~ in remoto buffers, and the auth warm-up timer are now installed by ~global-remoto-mode~ and removed when it is turned off. This follows the Emacs Lisp coding convention that loading a package must not change editing behaviour, raised in the MELPA review. The mode turns itself on at first use: ~remoto-browse~, ~remoto-embark-open-in-remoto~ and ~remoto-embark-open-issue~ do it themselves, and for a ~/github:~ or ~/gh:~ path typed at ~C-x C-f~, ~C-x d~ or any other file prompt the package autoloads register ~remoto-autoload-file-name-handler~ for those two prefixes, the way TRAMP loads on the first remote path: it loads remoto, turns the mode on, hands the operation to the real handler and leaves ~file-name-handler-alist~. Each says so once in the echo area; ~(global-remoto-mode 1)~ in the init file turns the mode on ahead of time. A session that never touches a remoto path is left alone.
-- The fetch indicator is now a single ~⟳~ in front of the input, and it shows for every GitHub request, in ~find-file~ completion as much as in ~remoto-browse~. It used to read ~[fetching...]~ after the input, where it dragged the cursor three columns right and back on every keystroke: Emacs draws the cursor after any string that follows point, and Vertico claims the ~cursor~ property that used to hold it in place. The mark now sits between the prompt and the path, in a slot that stays blank between requests, so neither the cursor nor the input moves. It also used to show only for the background searches, and only when the minibuffer text began with ~/github:~, so the ~/gh:~ shorthand, a path typed after the shadowed default directory (~~/x//gh:o/r~), and every blocking fetch (branches, tags, issues, the default branch, a cold owner listing) showed nothing. A blocking fetch now draws the same mark while a remoto prompt is up, and in the echo area once the chosen path opens, which is what ~remoto-browse~ already did for its own fetch.
-- ~remoto-unload-function~ turns the mode off instead of removing each hook and advice by hand.
-- A failing auth-source backend (a ~.authinfo.gpg~ that does not decrypt, say) is reported once in the echo area, the token search stops, and remoto runs unauthenticated until ~M-x remoto-reset-auth~. It used to swallow the failure for every host and user combination, retry the lookup on every API call, and have the warm-up report that no token was found.
-- The Embark target finder and classifier swallow only the ~user-error~ that remoto's API layer signals for a failed forge lookup. Any other error propagates.
+- loading remoto changes nothing: ~global-remoto-mode~ installs everything and turns on at first use
+- the fetch indicator is a ~⟳~ before the input, for every request
+- ~remoto-unload-function~ turns the mode off
+- a broken auth-source backend is reported once
+- Embark swallows only remoto's lookup errors
 
 ** Fixed
-- Every HTTP error from the API read "Remoto: API error: HTTP Error: 404, ..." with the full payload, because the handler matched error symbols ~ghub-404~, ~ghub-403~ and ~ghub-401~ that ghub stopped defining in its 2.0.0. Unknown repositories, branches and files now say "Remoto: not found: ENDPOINT", a 403 names the rate limit or permissions, and a 401 says to configure a token.
-- ~dired~ on a short remoto path (~/github:OWNER/REPO~, ~/github:OWNER/REPO/~, or the ~/gh:~ forms) opened an empty listing named after the last path component. It now opens the repository at its default branch, as ~find-file~ on the same path does. ~dired-noselect~, ~dired-other-window~ and ~dired-other-frame~ were left out of that fix, because the rewriting advice sat on ~dired~ alone; it now sits on ~dired-noselect~, which all of them call.
-- ~find-file~ and ~dired~ called from Lisp with a ~/gh:~ path skipped the rewriting that the ~/github:~ spelling gets: ~(find-file "/gh:o/r/sub/")~ opened an empty listing and ~(find-file "/gh:o/r#31")~ signaled "cannot parse path" and left an empty buffer named ~31~. The shorthand is now normalized before the rewrite. Typed at the ~C-x C-f~ prompt it always worked, because ~read-file-name~ normalizes it first.
-- Visiting a path that does not exist in the repository signaled the API's 404 from inside ~find-file-noselect~, which then left an empty, file-less buffer behind. The handler now signals ~file-missing~ like TRAMP, so Emacs shows its usual empty read-only buffer for a new file and nothing strays.
-- An ~https://github.com/OWNER/REPO.git~ URL, the one the Code button copies, was parsed as repository ~REPO.git~ and failed with 404.
-- The first API call after a failed auth-source lookup (a backend that does not decrypt, right after ~remoto-reset-auth~ or before the idle warm-up ran) still handed ghub an empty auth and ghub's own lookup failed the same way, so that one call ended in "Remoto: authentication failed ... then M-x remoto-reset-auth" while the next one went unauthenticated. The call that discovers the failure now goes unauthenticated itself.
-- URL commands on a file whose name contains a space or another reserved character produced a URL with the raw character; path segments are now percent-encoded.
-- Issue and pull request candidates carry a ~display-sort-function~, so Vertico and the default completion UI keep remoto's order (pull requests first, newest first) instead of sorting by length or number.
-- Every file was decoded as UTF-8 text when fetched, so ~image-mode~ on a remoto png showed "Unknown image type" and the buffer held fewer characters than the file had bytes. The fetched bytes now stay bytes: a text file is decoded in the buffer the way Emacs reads it from disk (coding cookies, ~auto-coding-alist~ by name, then detection), an image or other binary keeps its bytes under ~no-conversion~ and renders, ~file-local-copy~ writes the bytes unchanged, and the BEG and END arguments of ~insert-file-contents~ count bytes as they do for a local file.
-- Typing during completion interrupted the API fetches behind it, and every interrupted fetch left a ~ *http api.github.com:443*~ buffer behind once its reply arrived; a completion session could leave dozens. A fetch that input can interrupt now runs as a callback request, which ghub cleans up itself, and it keeps running after the interruption: the next keystroke waits on that same request or reads its landed reply instead of starting another.
-- A pull request or issue web URL (~https://github.com/OWNER/REPO/pull/N~, ~/issues/N~, with or without a trailing ~/files~ or ~#issuecomment~ fragment) opened the repository root. ~find-file~ and ~remoto-browse~ now open the topic, as ~/github:OWNER/REPO#N~ does.
-- ~embark-act~ in the root Dired of ~/github:OWNER/REPO@REF:/~ offered the branch actions (compare, new pull request) instead of the repository ones (clone, remote URLs, history), because the bare ~@REF~ root was classified as a branch by shape. That root is now the repository at that ref; branch and tag completion candidates keep the branch actions.
-- The first ~find-file~ or ~dired~ of a session on a short path opened an empty listing, and on a ~#NUM~ path signaled "cannot parse path" and left a buffer named after the number - while the second identical call worked. The autoloads turn the mode on from inside the running call, so ~global-remoto-mode~ installed its rewriting advice too late for that one call. The autoload handler now canonicalizes the name itself, and the Dired listing resolves a short path rather than insisting on the canonical one, so an org link, a ~recentf~ entry or a Lisp call at session start behaves like every later call. A ~#NUM~ path cannot be turned into a topic buffer from inside the call, so it says what the path is, says to run the command again - which then opens the topic - and leaves nothing behind.
-- ~recentf~ dropped every remoto path from its list, and after 2.0.0 it also loaded remoto and fetched a tree at startup to do it. ~recentf-keep-default-predicate~ asks ~file-remote-p~ whether the connection is up, and remoto answered yes for a repository it had never fetched, which sent the check on to ~access-file~, an operation remoto did not handle. ~file-remote-p~ now honors its CONNECTED argument, and ~access-file~ answers like the local primitive.
-- Typing at the ~@~ level fetched the whole recursive tree of the repository once per branch or tag offered, because completion asks ~file-exists-p~ about every candidate and remoto answered that question by materializing the tree. A repository root at a ref is now answered on its shape, as ~/github:OWNER/REPO/~ already was.
-- The fetch indicator disappeared when the ~C-x C-f~ prompt inside a remoto directory was cleared (~C-a C-k~), although completion kept fetching from that directory. The prompt is now recognized by its directory as well as by its text.
-- A GitHub token sat in ~remoto--pending-requests~ as part of a hash-table key while a request was in flight, so it appeared in any dump of that variable. The key now carries a hash of the token.
-- ~remoto-embark.el~ and ~remoto-topic.el~ declared functions of ~remoto.el~ with the wrong arglists (~remoto--api~, ~remoto--forge-issue-url~), which ~check-declare~ flagged. Both files ~require~ remoto, so the declarations are gone.
-- ~remoto--clone-finished~ checks ~fboundp~ for the Magit entry point instead of carrying a forward declaration.
-- The README Commands table named ~remoto-copy-github-url~, obsolete since 1.8.0; it now names ~remoto-copy-url~.
+- HTTP errors read clearly: not found, rate limit, auth
+- ~dired~ on a short path opens the repository
+- ~/gh:~ paths from Lisp work like ~/github:~ ones
+- a missing file opens an empty buffer, as with TRAMP
+- the ~.git~ URL from GitHub's Code button parses
+- the first call after a failed auth lookup goes anonymous
+- URLs percent-encode special characters
+- issue and pull request candidates keep remoto's order
+- binary files, images included, open as binary
+- typing during completion leaves no ~*http*~ buffers behind
+- pull request and issue URLs open the topic
+- Embark on a ref root offers repository actions
+- the first ~find-file~ of a session on a short path works
+- ~recentf~ keeps remoto paths
+- ~@~ completion no longer fetches a tree per ref
+- the fetch indicator stays when the prompt is cleared
+- tokens no longer show in ~remoto--pending-requests~
+- ~check-declare~ is clean
+- the README names ~remoto-copy-url~
 
 * [1.9.2] - 2026-09-09
 
 ** Changed
-- The Embark hook is now a one-line ~;;;###autoload~ cookie instead of a ~with-eval-after-load~ form in the body of ~remoto-embark.el~. Installed users see no difference - the generated autoloads carry the form either way - but a session that loads ~remoto-embark.el~ by hand must call ~remoto-embark-register~ itself. package-lint rejects the form as code.
-- Character sets in ~rx~ forms use the ~in~ spelling rather than its synonym ~any~. Emacs 31.1 added a function called ~any~, and package-lint reads every ~(any ...)~ in the sources as a call to it.
+- the Embark hook is an autoload cookie
+- ~rx~ forms use ~in~, not ~any~
 
 ** Fixed
-- ~remoto-unload-function~ removes the ~minibuffer-exit-hook~ entry too, so ~unload-feature~ leaves nothing of remoto behind.
-- Guard clauses in ~if-let*~ and ~when-let*~ no longer bind ~_~. Emacs 29 rejects a bound ~_~ that the macro then reads, so the package failed to byte-compile there. ~make check-compile~ ignored the return value of ~byte-compile-file~, which is why CI stayed green over it.
+- ~remoto-unload-function~ removes the minibuffer hook
+- byte-compiles on Emacs 29
 
 ** Added
-- ~remoto-embark.el~ and ~remoto-topic.el~ carry an ~SPDX-License-Identifier~ and a maintainer, all three files carry an ~Assisted-by~ line, and ~remoto-topic.el~ declares ~remoto.el~ as its package-lint main file.
-- ~make lint~ runs package-lint and checkdoc over the three package files, and CI runs it on every push. checkdoc runs with ~checkdoc-verb-check-experimental-flag~ on, which Emacs 29 enables by default and later versions do not, so both CI Emacsen check the same thing.
-- A spec for ~remoto-unload-function~.
+- SPDX and maintainer headers
+- adds ~make lint~ - package-lint and checkdoc, in CI
 
 * [1.9.1] - 2026-09-09
 
 ** Fixed
-- Selecting a candidate right after the colon of a canonical path (~/github:o/r@main:~, what picking a branch leaves in the minibuffer, or a hand-typed ~/github:o/r:~) no longer appends it to the typed text: typing ~t~ and choosing ~test/~ gave ~/github:o/r@main:ttest/~. ~file-name-directory~ synthesized a ~/~ after the colon, so its result was one character longer than the real prefix, and ~completion-file-name-table~ derives the completion boundary from that length; the boundary landed past the typed text and every completion UI inserted the candidate after it. The directory now comes back exactly as typed, the way TRAMP returns ~/ssh:host:~ for ~/ssh:host:t~.
-- Completion under ~orderless~ (or any style that filters through ~completion-regexp-list~) now filters. Such styles hand the table only the text up to the completion boundary and express the typed text as regexps the table is expected to apply, as the built-in ~file-name-all-completions~ and TRAMP do. The handler ignored them and returned every candidate, so the wanted entry sat at the bottom of an unfiltered list. Files, branches, tags, repos, issues (matched on number and title), and accounts now honor ~completion-regexp-list~, with case folding per ~completion-ignore-case~.
-- The search levels (accounts at ~/github:~, repos at ~/github:OWNER/~, issues at ~/github:OWNER/REPO#~) and ~remoto-browse~ received an empty query under those styles, so they showed "recent" or "top" lists and never searched for what was typed. When the table is asked with an empty FILE, the query now comes from the active minibuffer, so a repo outside the recent list, an issue found by title, and a ~remoto-browse~ search all work under orderless as they do under ~basic~.
+- a candidate picked right after ~@main:~ no longer lands after the typed text
+- completion under ~orderless~ filters
+- searches get the typed query under ~orderless~
 
 ** Changed
-- remoto no longer writes ~completion-category-overrides~. That variable belongs to the user, and a ~setq~ in a user config that runs after remoto loads (common with orderless setups) wiped the entries anyway, which is how the unfiltered lists above appeared. With the table style-agnostic, the user's own ~completion-styles~ apply inside remoto as everywhere else: substring and multi-component matching under orderless, prefix matching under ~basic~. The ~remoto-*~ completion categories stay in the metadata for annotations, grouping, and Embark.
-
-** Added
-- ~orderless~ as a test dependency, with end-to-end specs that run ~completion-all-completions~ under the orderless style for every level and for ~remoto-browse~, boundary specs for the canonical no-slash forms, and regexp-filter specs per level.
+- remoto no longer writes ~completion-category-overrides~
 
 * [1.9.0] - 2026-09-04
 
 ** Fixed
-- Cloning from ~embark-act~ now clones into the directory you choose. ~read-directory-name~ hands back a tilde-abbreviated path (~~/code/repo/~) and ~start-process~ runs git without a shell, so git read ~~~ as an ordinary directory name and created ~./~/code/repo~ under its own working directory. The destination is expanded before git sees it.
-- The clone runs in a real local directory, and the "Clone into:" prompt starts there. A remoto buffer's ~default-directory~ names a repository on the forge, so it can be neither the working directory of a local process nor the base of a relative destination.
+- Embark's clone goes to the chosen directory
+- the clone runs in a local directory
 
 ** Added
-- A finished clone opens the Magit status buffer for it, or ~dired~ when Magit is not installed. Magit stays optional and is loaded only after a successful clone.
+- a finished clone opens Magit, or Dired without it
 
 * [1.8.1] - 2026-06-30
 
 ** Fixed
-- Minibuffer completion of ~/github:~ and ~/gh:~ paths no longer doubles the prefix. The ~read-file-name-internal~ advice re-based candidates to full paths (for example the repo segment ~agzam/~ became ~/github:agzam/~), so base-aware completion frameworks - Vertico, and Emacs' default completion - prepended the directory a second time: completing ~/gh:agza~ inserted ~/gh:/gh:agzam/~ instead of ~/gh:agzam/~ (and ~/gh:agza/github:agzam/~ before that). The advice now injects only the completion metadata (category and affixation for the ~@~, ~#~, and owner/repo levels) and delegates completion to the original table, so candidates stay relative to the completion boundary and are inserted exactly once. The defect affected both the ~/gh:~ shorthand and the canonical ~/github:~ form and had been latent since the advice was introduced.
-
-** Added
-- A regression test that reproduces the doubling by mirroring how a base-aware framework inserts a candidate (~string[0..base]~ concatenated with the candidate), asserting a single-prefixed result for ~/gh:~ and ~/github:~ at the owner and nested-path levels.
+- completion no longer doubles the prefix: ~/gh:/gh:agzam/~
 
 * [1.8.0]
 
 ** Added
-- Optional, forge-agnostic Embark integration (~remoto-embark.el~): ~embark-act~ on remoto targets (owner, repo, branch, issue, dir, file, and a forge ~url~ at point) in remoto buffers, ~dired~, and ~/github:~ minibuffer completion (including ~embark-collect~). It activates automatically when Embark is installed - an autoloaded ~(with-eval-after-load 'embark (remoto-embark-register))~ registers the keymaps the moment Embark loads, with no manual ~(require 'remoto-embark)~ (which still works for eager setup). Routing through the public ~remoto-embark-register~ instead of requiring the file avoids a load recursion when the file is loaded with Embark already present.
+- adds optional Embark integration - ~remoto-embark.el~
 
 ** Fixed
-- Embark actions no longer fail with "no URL templates for forge nil" on an owner or other non-repository target reached through the repository or generic ~remoto~ keymap. The generic ~remoto-embark-copy-url~/~-browse-url~ now resolve a web URL for any target kind (issue/PR, repository, directory, file, or owner); the repository- and file-specific actions raise a clear "not a repository, directory, or file target" message instead of a cryptic forge-lookup failure.
-- Owner targets now route to ~remoto-embark-owner-map~ rather than the repository keymap: a shared classifier (~remoto--embark-classify~) derives the Embark target type from the path shape (issue, branch, owner, or repo/dir/file).
-- Embark actions now treat every input form for the same target identically. The ~/gh:~ shorthand, the file-name form ~/github:OWNER/REPO~ or ~/github:OWNER/REPO/~ (as typed at ~C-x C-f~), and the canonical ~/github:OWNER/REPO:/~ all resolve to the same target via ~remoto--embark-canonicalize~. Previously only the canonical colon form was understood, so ~embark-act~ on a typed ~/gh:agzam/mxp~ or ~/github:agzam/mxp~ failed.
-- ~remoto--forge-url~ defaults a nil ref to ~HEAD~ (which forges resolve to the default branch), so the repository-level history action (~remoto-embark-copy-history-url~ on a repo target, which has no ref) builds a valid URL instead of erroring with "Invalid format character".
+- Embark's URL actions work on any target
+- owner targets get the owner keymap
+- Embark treats ~/gh:~, ~/github:~ and canonical names alike
+- the repository history URL works without a ref
 
 * [1.7.0] - 2026-05-31
 
 ** Added
-- ~/gh:~ shorthand prefix as an alias for ~/github:~. ~C-x C-f /gh:OWNER/REPO@REF:/path~ now works exactly like the longer ~/github:~ form. The shorthand is an entry point only: it is normalized to the canonical ~/github:~ on the first completion or file operation, so paths still display and resolve canonically. The original ~/github:~ prefix is unchanged and fully backward compatible.
-- ~remoto--normalize-shorthand~ - rewrites a leading ~/gh:~ in handler arguments to ~/github:~ so every downstream handler only ever sees canonical paths (no per-operation changes needed).
-- ~remoto--shorthand-prefix~ - the ~/gh:~ alias prefix constant.
-- Unit tests covering the normalizer (shorthand rewrite, canonical pass-through, non-string and unrelated-string pass-through), the widened ~remoto--handler-regexp~ (matches ~/gh:~ and ~/github:~, rejects look-alikes such as ~/ghostly:~), and ~/gh:~ dispatch parity with ~/github:~ for ~file-directory-p~, ~file-exists-p~, ~file-remote-p~ (prefix and method), ~file-name-directory~, and the public file API.
-
-** Changed
-- ~remoto--handler-regexp~ widened to match both ~/github:~ and the ~/gh:~ shorthand, so the ~/gh:~ entry is routed through ~file-name-handler-alist~ to the same handler.
+- adds ~/gh:~ - shorthand for ~/github:~
 
 * [1.6.0] - 2026-05-30
 
 ** Added
-- In-flight fetch indicator: while completion data loads (for example the org repo list at ~/github:OWNER/~, or while ~remoto-browse~ searches GitHub), a ~[fetching...]~ marker appears in the minibuffer. It is drawn as minibuffer text, so it works with any completion UI (vertico, icomplete, default). Toggle with ~remoto-show-fetch-indicator~ (default t).
-- ~remoto-browse~ shows the indicator in the echo area during the synchronous resolve/open that runs after a repo is selected, so the blocking GitHub round-trips are no longer silent.
-- ~remoto-show-fetch-indicator~ - customization to enable or disable the indicator (now governs both the completion overlay and the ~remoto-browse~ echo-area indicator).
-- ~remoto--invalidate-completion-ui~ - refreshes an in-progress minibuffer completion across front-ends after async data arrives.
-- Unit tests covering the in-flight counter (single decrement on success, error, and synchronous failure; correct behavior with overlapping fetches), the indicator overlay lifecycle and its cursor-preserving text property, the indicator appearing for ~remoto-browse~ (both completion and the synchronous fetch), the completion-refresh invalidation, and the consolidated repo search delegating to the shared owner-repos engine.
-- ~remoto--search-owner-repos-sync~ and ~remoto--recent-owner-repos-sync~ - synchronous owner-repo fetches wrapped in ~while-no-input~. The ~/github:OWNER/~ completion branch uses them as a cold-cache fallback so the first computation can return candidates instead of depending solely on the async refresh landing.
-- ~remoto--extract-search-repos~ - shared helper that builds propertized repo candidates (name plus description) from a GitHub search response, replacing three duplicated inline mappers.
-- Unit tests for the synchronous fallbacks (success and error paths), the owner-level sync-fallback wiring (and that it is skipped below ~remoto-min-search-chars~ or when async already has results), the trailing-slash repo candidates, the shared extractor, and the ~remoto~ category registration.
+- a fetch indicator in the minibuffer while completion loads
+- adds ~remoto-show-fetch-indicator~
+- ~remoto-browse~ shows the indicator while it opens a repository
 
 ** Fixed
-- Minibuffer cursor no longer jumps when the indicator renders: the ~[fetching...]~ after-string carries a ~cursor~ text property, so point stays at the end of the typed input instead of being drawn past the marker.
-- ~remoto-browse~ now finds all of an organization's matching repositories instead of only those in the first page of the owner listing. Its repo search previously derived results from a capped ~user:OWNER~ listing (via ~remoto--search-repos-from-parent~) and never issued the precise ~QUERY in:name user:OWNER~ query, so repos beyond the first page (for example ~qlik-trial/stitch-*~) never appeared. It now delegates to the same ~remoto--search-owner-repos~ engine the ~/github:~ completion uses.
-- Completion candidates now appear automatically when an async fetch completes. Previously the list stayed empty until the input was edited (for example deleting and retyping the trailing slash), because vertico skips recomputation while the typed input is unchanged. The refresh now voids vertico's input cache and the default sorted-completions cache, runs ~post-command-hook~ for icomplete/fido, and rebuilds ~*Completions*~ when it is displayed.
-- ~remoto--api-async~ decrements its in-flight counter exactly once even though ~ghub~ retries the callback with fewer arguments on an arity mismatch. Without this the indicator could clear while other fetches were still running.
-- Clean byte-compilation: ~remoto-search-cache-ttl~ was referenced (in ~remoto--fetch-dir-children-light~) before its ~defcustom~, producing a free-variable warning that failed ~make check-compile~. The defcustom is now defined ahead of its first use.
-- Repo candidates at ~/github:OWNER/~ now carry a trailing ~/~, matching the owner candidates at ~/github:~. Selecting a repo descends into it (default-branch file listing) instead of re-running a repo search on the bare name.
-- Owner-level repo completion no longer returns an empty candidate list while the async search is still in flight on a cold cache: the branch falls back to a synchronous ~while-no-input~ fetch (cached on completion) and only yields when the user keeps typing. Note: this addresses the cold-cache empty return at the function level; the broader async-refresh-vs-sync timing in the live minibuffer is not yet fully characterized.
-- The ~remoto~ completion category is registered through ~completion-category-overrides~ instead of ~completion-category-defaults~. With a global ~orderless~ in ~completion-styles~, the defaults entry was bypassed (and could be reset elsewhere), so owner-level matching fell back to orderless substring behavior instead of the intended ~partial-completion~/~basic~ prefix filtering.
-- Clean byte-compilation, second instance: ~remoto-min-search-chars~ is now forward-declared ahead of ~remoto--handle-file-name-all-completions~, which references it before the ~defcustom~.
+- the cursor stays put when the indicator shows
+- ~remoto-browse~ finds all of an organization's matching repositories
+- candidates appear when an async fetch lands
+- the in-flight counter decrements once
+- byte-compiles clean
+- repository candidates end with ~/~
+- owner completion returns candidates on a cold cache
+- the ~remoto~ category works with a global ~orderless~
 
 * [1.5.3] - 2026-05-30
 
 ** Fixed
-- Branch, tag, and organization completion now return the full result set instead of only the first 100 entries. Large repositories (e.g. NixOS/nixpkgs with >100 branches) previously showed a truncated list because each fetch issued a single ~per_page=100~ request.
-
-** Added
-- ~remoto--paginated-api~ - follows pagination to fetch all pages of a GitHub endpoint, bounded by an optional ~max-pages~ cap (default 10) so very large repositories cannot trigger an unbounded run of synchronous API calls.
-- Unit tests for ~remoto--paginated-api~ covering multi-page accumulation, the page cap, and the query-string separator.
+- branches, tags and organizations list past 100
 
 * [1.5.2] - 2026-05-08
 
 ** Fixed
-- Always pass ~:host "api.github.com"~ to ~ghub-get~ in all call sites (~remoto--ghub-get~, ~remoto--api-async~). The conditional guard only sent it for string auth tokens, so unauthenticated calls (~auth = 'none~) hit ~github.com~ instead of the API, returning HTML that crashed the JSON parser.
-- ~remoto--json-reader~ returns nil instead of signaling on malformed JSON, preventing unhandled errors in async contexts where no ~condition-case~ protects the reader callback.
-- ~remoto--warm-auth~ no longer permanently disables auth when the idle-timer token lookup fails. Previously, a transient failure (GPG agent not ready, ghub not loaded) set ~remoto--auth-failed~ to t, locking out private repos for the entire session.
-- ~remoto--api~ and ~remoto--api-async~ now try ~remoto--find-github-token~ directly when no cached token or user config exists, instead of relying solely on ghub's built-in auth-source lookup (which uses different host/user patterns and often fails on fresh sessions). Found tokens are cached in ~remoto--effective-auth~.
-- Auth failures now signal ~user-error~ with a clear message instead of silently falling back to unauthenticated access. Previously, private repos would quietly show empty results with only a message in ~*Messages*~ that was easily missed.
-
-** Added
-- Full pipeline tests asserting every segment (API, default-branch, fetch-tree, tree-entry, tree-children, file-exists-p, file-directory-p, file-regular-p, directory-files, file-attributes, insert-directory) returns non-nil data.
-- Auth forwarding tests verifying the token reaches ghub-get and that auth=none is used when auth-failed is set.
-- Fresh-session auth resolution tests: fallback to ~remoto--find-github-token~ when ghub fails, loud ~user-error~ when no token exists anywhere.
-- JSON reader unit tests covering headers, HTML error pages, empty buffers.
+- calls without a token reach the API host
+- malformed JSON no longer errors in async callbacks
+- a failed idle token lookup no longer disables auth for the session
+- token lookup falls back to auth-source itself
+- auth failures say so instead of showing nothing
 
 * [1.5.1] - 2026-05-07
 
 ** Fixed
-- Auth on fresh Emacs sessions. ghub's token resolution searched ~github.com~ while tokens were stored under ~api.github.com~, causing all API calls to fail with a cryptic JSON parse error. Remoto now searches auth-source directly, trying both hosts with ~^forge~, ~^ghub~, and bare username suffixes, then passes the token as a literal string with an explicit ~:host~.
-- ~remoto--warm-auth~ bypasses ~remoto--api~ timeout entirely - calls ghub directly so GPG passphrase entry can complete naturally (like forge does).
-- ~remoto--ghub-get~ catches ~json-error~ and translates it to a readable ~user-error~ instead of letting it propagate as a raw process filter crash.
+- auth works in a fresh session
+- the auth warm-up waits for the GPG passphrase
+- JSON errors read as a message
 
 ** Changed
-- ~remoto-auth-timeout~ default raised from 2 to 10 seconds - 2s was too aggressive for first-time GPG decryption.
-
-** Added
-- ~remoto--find-github-token~ - searches auth-source across host and package-suffix combinations, finding the first available token regardless of how it was stored.
-- ~remoto--effective-auth~ - caches the resolved token so subsequent API calls skip the probe. Cleared by ~remoto-reset-auth~.
+- ~remoto-auth-timeout~ defaults to 10 seconds, from 2
 
 * [1.5.0] - 2026-05-06
 
 ** Changed
-- Completion for user/org search, repo search, and browse-repos is now fully non-blocking. HTTP requests are debounced and fired asynchronously via ~ghub~ callbacks; cached results are returned immediately while fresh data loads in the background.
-- Minimum search character threshold raised from 2 to 3 (configurable via ~remoto-min-search-chars~).
-- Repo list cache uses a separate longer TTL (~remoto-repo-cache-ttl~, default 30 min) since repo lists rarely change.
-- ~remoto--prefetch-owner-repos~ now uses truly async HTTP instead of ~while-no-input~ wrapper.
-- Repo search below the minimum character threshold narrows from the recent-repos cache instead of returning nil.
-- ~remoto--search-repos-from-parent~ uses substring matching instead of prefix-only when filtering repo names.
-- ~remoto--json-reader~ scans for ~{~ or ~[~ instead of relying on blank-line header heuristic, fixing compatibility across ghub/Emacs versions.
+- completion searches run async and debounced
+- searches start at 3 characters
+- repository lists cache for 30 minutes
+- repository search below 3 characters narrows the recent repositories
+- repository filtering matches substrings
+- the JSON reader works across ghub versions
 
 ** Added
-- ~remoto-debounce-delay~ - configurable idle time (default 0.3s) before firing search requests.
-- ~remoto-min-search-chars~ - configurable minimum characters before searching users/repos (default 3).
-- ~remoto-repo-cache-ttl~ - longer cache TTL for repo lists (default 1800s).
-- ~remoto--api-async~ - async GitHub API calls via ~ghub-get~ with ~:callback~.
-- ~remoto--debounce~ - key-aware idle timer that prevents completion frameworks from starving the async fetch.
-- ~remoto--refresh-minibuffer-completions~ - framework-agnostic minibuffer refresh after async cache updates.
-- ~remoto--search-cache-get~ now accepts an optional TTL parameter for per-key TTL overrides.
-- Fail-fast for integration tests (stop after first failure, skip remaining).
-- CI: split unit and integration test jobs, nix/elpa caching, ~workflow_dispatch~ trigger, PAT-based authenticated integration tests.
+- adds ~remoto-debounce-delay~, ~remoto-min-search-chars~, ~remoto-repo-cache-ttl~
+- CI runs unit and integration tests as separate jobs
 
 ** Fixed
-- ~files-default~ handler catches 404 from non-existent repos instead of crashing vertico.
-- ~remoto--api-async~ auth: pass nil (not ~'none~) to ghub for default token resolution.
-- Suppress ~auth-source-search~ echo messages during async completion.
+- a missing repository no longer breaks Vertico
+- async calls use ghub's default token
+- no auth-source echo during completion
 
 * [1.4.0] - 2026-05-06
 
 ** Added
-- Three new completion levels: files-default (~/github:o/r/~), issues (~/github:o/r#~), branches+tags (~/github:o/r@~).
-- Root level (~/github:~) shows authenticated user + org memberships when query is empty.
-- ~remoto-topic.el~ - dedicated issue/PR display buffers. PR-aware rendering with diff stats, branch info, merge state, and review summary.
-- Completion annotations at every level via ~affixation-function~: repo descriptions, issue/PR titles, branch/tag grouping, user/org type, per-file last commit messages.
-- ~remoto--fetch-tags~ for tag completion at the ~@~ level.
-- ~remoto--fetch-issues~, ~remoto--search-issues~, ~remoto--fetch-issue~ for ~#~ level.
-- ~remoto--fetch-issue-comments~ for topic display.
-- ~remoto--fetch-file-commits~ for per-file commit message annotations (capped at 20 per directory).
-- ~remoto--fetch-user-orgs~ using authenticated ~/user/orgs~ endpoint.
-- ~remoto-annotation~ face (inherits ~completions-annotations~).
-- Annotation alignment via ~(space :align-to N)~ display property.
-- ~remoto-topic-mode~ (derived from ~special-mode~) with ~b~ (browse) and ~g~ (refresh) keybindings.
+- completion at ~/github:o/r/~, at ~/github:o/r#~ for issues and at ~/github:o/r@~ for branches and tags
+- ~/github:~ shows your account and organizations
+- adds ~remoto-topic.el~ - issue and pull request buffers, ~b~ browse, ~g~ refresh
+- completion annotations at every level
+- adds the ~remoto-annotation~ face
 
 ** Changed
-- Completion category set to ~remoto~ (with ~partial-completion~ style) when annotations are active, preventing Marginalia from overriding.
-- PRs sorted before issues in ~#~ completion.
-- ~remoto--parse-partial-canonical~ excludes ~#~ from owner/repo character class.
-- ~remoto-unload-function~ now clears all 9 caches.
+- pull requests sort before issues
 
 ** Fixed
-- ~find-file-noselect~ on ~/github:o/r#42~ now correctly routes to topic display instead of treating ~#42~ as part of the repo name.
-- ~remoto--maybe-rewrite~ no longer mangles ~#NUM~ paths.
-- Carriage returns (~^M~) stripped from issue/PR body and comments.
+- ~/github:o/r#42~ opens the topic
+- ~#NUM~ paths are no longer mangled
+- ~^M~ is stripped from issue text
 
 * [1.3.0] - 2026-04-28
 
 ** Changed
-- Repo completion now uses the GitHub search API instead of pre-fetching all repos. At ~/github:owner/~ with empty input, the 30 most recently updated repos are shown. As the user types, matching repos are fetched via ~search/repositories~. This replaces the old approach that fetched every repo for an owner (thousands for large orgs), which caused hangs.
-- Auth timeout in ~remoto--api~ now only applies on the first call before the authenticated user is known. Once auth succeeds, the timeout is skipped so slow API responses (e.g. search) are not aborted.
-- HTTP errors (404, 403) from the GitHub API no longer poison ~remoto--auth-failed~. Only actual auth-source/token errors trigger the unauthenticated fallback.
+- repository completion searches instead of fetching every repository
+- the auth timeout applies to the first call only
+- a 404 or 403 no longer disables auth
 
 ** Added
-- ~remoto--search-owner-repos~ for searching repos within an owner via the search API, with caching and client-side narrowing for longer queries.
-- ~remoto--recent-owner-repos~ for fetching the 30 most recently pushed repos of an owner.
-- Non-blocking completion: all pre-repo completion levels (user search, repo listing, branch listing) are wrapped in ~while-no-input~ so typing interrupts pending API calls instead of freezing Emacs.
-- Speculative pre-fetch: when user search returns results, an idle timer pre-fetches repos for the top match so the cache is warm by the time the user types ~/~.
-- ~file-accessible-directory-p~ handler for remoto paths.
-- ~read-file-name-internal~ advice so ~/github:~ completion works correctly with Vertico/orderless when ~default-directory~ prefixes are present.
-- ~file-exists-p~ now returns t for ~/github:owner/repo~ partial paths (no ~@~), fixing completion transitions.
+- completion no longer blocks typing
+- the top user match's repositories prefetch
+- completion works under Vertico and orderless with a default directory
 
 ** Fixed
-- ~expand-file-name~ no longer crashes on partial ~/github:~ paths (e.g. ~/github:owner/~ or ~/github:owner/repo@~). This broke ~embark-collect~ and ~embark-export~ at the repo and branch completion levels.
-- ~remoto--api~ now falls back to unauthenticated access when ghub raises a ~user-error~ about missing username config (e.g. ~github.user~ unset). Previously this was re-raised as an API error, crashing instead of falling through to the unauthenticated path.
+- ~embark-collect~ and ~embark-export~ work at the repository and branch levels
+- a missing ~github.user~ falls back to anonymous
 
 ** Removed
-- ~remoto--fetch-user-repos~ and ~remoto--user-repos-cache~. The "fetch all repos then filter client-side" approach is replaced by search API calls.
+- fetching every repository of an owner
 
 * [1.2.0] - 2026-04-27
 
 ** Added
-- Private repository listing for the authenticated user. When browsing your own repos at ~/github:yourname/~, remoto now uses the ~/user/repos?type=owner~ endpoint which includes private repositories. Other users' repos continue using the public ~/users/{owner}/repos~ endpoint.
-- ~remoto--get-authenticated-user~ to detect and cache the logged-in GitHub user via the ~/user~ API.
+- your private repositories list at ~/github:yourname/~
 
 ** Fixed
-- Branch completion now works with orderless/vertico. The ~@~ in ~/github:owner/repo@~ is treated as a directory boundary so completion frameworks that fetch all candidates before filtering (e.g. orderless) get branch names instead of the repo list.
+- branch completion works under orderless and Vertico
 
 * [1.1.0] - 2026-04-26
 
 ** Added
-- ~find-file~ completion for ~/github:~ paths. Type ~/github:foo~ to search users/orgs, ~/github:owner/~ to list repos, append ~@~ after a repo name to complete branches. Transitions seamlessly into file-level completion within a repo.
-- ~remoto--search-users~ for searching GitHub users/orgs via the search API with caching and client-side narrowing.
-- ~remoto--fetch-user-repos~ for fetching repos of a user/org via the GitHub API with caching.
-- Partial path support in file operations (~file-exists-p~, ~file-directory-p~, ~file-name-directory~, ~file-name-nondirectory~, ~file-remote-p~) for pre-repo completion levels.
-- ~remoto--parse-partial-canonical~ for resolving ~/github:owner/repo~ and ~/github:owner/repo@ref~ paths when opening.
+- ~find-file~ completion for ~/github:~ paths: accounts, repositories, ~@~ branches, files
 
 * [1.0.0] - 2026-04-25
 
 ** Changed
-- Replaced ~gh~ CLI dependency with the ~ghub~ Emacs library for all GitHub API access. No external binary needed - authentication is handled through ~auth-source~.
-- Added ~remoto-github-auth~ defcustom for controlling which ghub token to use.
-- Public repos now work without any token configuration (falls back to unauthenticated access at 60 req/hr).
-- Search cache entries now expire after 5 minutes (~remoto-search-cache-ttl~), preventing stale results from persisting across an entire session.
-- Bare search queries (no ~owner/~ prefix) now search by repository name instead of GitHub username, so typing "remoto.el" finds repos named "remoto.el".
+- uses ~ghub~ instead of the ~gh~ CLI, with auth through ~auth-source~
+- adds ~remoto-github-auth~
+- public repositories work without a token
+- the search cache expires after 5 minutes: ~remoto-search-cache-ttl~
+- a bare query searches repository names
 
 ** Fixed
-- ~remoto--search-repos~ now accepts an optional callback argument for compatibility with consult's async dynamic collection protocol.
-- Git remote URLs with dotted repo names (e.g., ~git@github.com:agzam/remoto.el.git~) now parse correctly.
-- Search cache now correctly caches empty results instead of re-hitting the API on every query.
+- search works with consult's async collections
+- remote URLs with dotted names parse
+- empty search results are cached
 
 ** Removed
-- ~gh~ CLI is no longer required. Removes implicit telemetry that ~gh~ collects unless users explicitly opt out.
+- the ~gh~ CLI dependency
 
 * [0.1.0] - 2026-04-24
 
 ** Added
-- Initial implementation of virtual filesystem for GitHub repos.
-- Path parser for canonical ~/github:owner/repo@ref:/path~ format.
-- User-facing URL parser accepting GitHub URLs, git remotes, owner/repo shorthand.
-- Tree cache using Git Trees API (single call per repo).
-- File content fetching via Contents/Blobs API with sha-based caching.
-- Dired integration with ~dired-subtree~ compatibility.
-- Read-only enforcement for all write operations.
-- ~remoto-browse~ command as the main entry point.
-- ~remoto-refresh~ command for cache invalidation.
-- ~remoto-copy-github-url~ for reverse URL mapping.
-- Transparent ~dired~ / ~find-file~ advice for GitHub URL rewriting.
+- GitHub repositories as a read-only filesystem: ~/github:owner/repo@ref:/path~
+- Dired, with ~dired-subtree~
+- ~remoto-browse~, ~remoto-refresh~, ~remoto-copy-github-url~
+- GitHub URLs open from ~find-file~ and ~dired~

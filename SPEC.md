@@ -205,6 +205,10 @@ This returns one directory level at a time. The tree cache stores what it has an
 | `abbreviate-file-name` | Return as-is |
 | `unhandled-file-name-directory` | Return nil |
 
+### Programs
+
+A program started in a remoto directory, through `process-file`, `start-file-process`, `make-process` with `:file-handler` or `shell-command`, runs in `~`: `unhandled-file-name-directory` is nil. A search there would report the files of `~` as the repository's, so the handlers of those four operations refuse one with `(user-error "Remoto: grep needs a clone; a repository has no local files")`. A search is a program in `remoto--search-programs` (grep, egrep, fgrep, rg, ugrep, ag, ack, find, fd, fdfind), `git` with its `grep` subcommand, or a shell whose command line after `-c` names one of those in any word, as xref's `xargs -0 grep` does. Every other program passes on unchanged (`remoto--pass-on`), git for Magit and vc included.
+
 ### Write operations (all read-only)
 
 `write-region`, `delete-file`, `delete-directory`, `rename-file`, `copy-file`, `set-file-modes`, `set-file-times` - all signal `(user-error "Remoto: repository is read-only")`.
@@ -490,6 +494,27 @@ A remoto file buffer visits a real file name, so the major mode hooks, `after-ch
 
 `remoto--inhibited` records which functions carry the advice, so turning the mode off removes exactly those even after a plain `setq` of the option. The option's `:set` moves the advice at once. Advice on a function that is not defined yet, or is still an autoload, waits for the definition and does not make the symbol `fboundp`, so remoto requires neither lsp-mode nor Eglot.
 
+## project.el
+
+A directory in a repository tree is a project: `(remoto . ROOT)`, ROOT the canonical `/PREFIX:OWNER/REPO@REF:/` of the tree (`remoto--project`). The levels above a tree (`/github:`, `/github:OWNER/`, `@`, `#`) have none, and neither has the short form `/github:OWNER/REPO/`, whose default branch would cost a request.
+
+| Method | Answer |
+|---|---|
+| `project-root` | ROOT |
+| `project-name` | `OWNER/REPO@REF`: ROOT after its prefix, without `:/` |
+| `project-files` | the blobs under each of DIRS, from the tree (`remoto--tree-files`): full names, sorted; relative to the one directory asked for when `project-files-relative-names` allows it. A truncated tree lists what it holds and says so |
+| `project-buffers` | project.el's default: the buffers whose `default-directory` is under ROOT |
+
+project.el's own `project-files` runs `find` through `process-file`, and a repository has no local directory to run it in (see Programs). The commands that search with a program stop with remoto's message: `project-find-regexp`, `project-find-file` with a prefix argument, consult-ripgrep, consult-find, `grep`. `project-shell` and `project-compile` run in `~`.
+
+`project-search` and `project-query-replace-regexp` visit every file of the project, a request each. While `global-remoto-mode` is on, `remoto--every-file-a` advises both: its interactive spec refuses a remoto `project-current` before the prompt, and it binds `remoto--every-file` around the call, so the `project-files` of a remoto project picked at the project prompt refuses as well, before any file is fetched.
+
+`remoto-project-try` finds the project. It lives in `remoto-project.el`, apart from remoto.el, because project.el calls it for every directory: it answers only a directory whose file-name handler is remoto's or the bootstrap handler of the autoloads, and only then requires remoto. The package autoloads add it to `project-find-functions` at depth -90 once project.el loads, ahead of `project-try-vc`, whose search for marker files costs a request per name in a tree. So a remoto project in `project-list-file` resolves in a session that has not loaded remoto yet, and `remoto--project` turns the mode on, as other first uses do. Left to `project-try-vc`, such a project is not found: project.el drops it from its list and lists the files of a transient project with `find` in `~`.
+
+`remoto-project-find-file`, on `C-x p R`, goes the other way: from a local clone to its repository on the forge. It runs what `C-x C-f` runs, with `default-directory` bound to the remoto counterpart of the current one (`remoto--forge-directory`): the directory `git rev-parse --show-prefix` names, in the tree of the remote the current branch tracks, at the tracked branch (`for-each-ref` with `%(upstream:remotename)` and `%(upstream:remoteref)`), or at the default branch once the remote-tracking branch is gone. With a prefix argument, or with several remotes and none tracked, it asks for the remote, offering the tracked one, else `origin`. On a remote the branch does not track, the branch keeps its name when `refs/remotes/REMOTE/BRANCH` exists, else the default branch takes its place; a detached HEAD gets the default branch. A remote counts when its fetch URL from `git remote -v`, `insteadOf` applied, names the web host of a registered forge (`remoto--remote-repo`): `https`, `ssh://`, `git://` and the scp form `USER@HOST:OWNER/REPO`, with or without `.git`. An ssh host that is no forge's is asked of `ssh -G`, for an alias of the ssh configuration. No git repository, no remote, or no remote on a forge each stop with a `user-error` that says which, the last one listing the remotes. In a remoto directory the command is `C-x C-f` itself. The autoloads bind `R` in `project-prefix-map`, which Emacs 29 and later define before project.el loads, only when the key is free. They run once, so a binding the user makes earlier stays, and one made later, or a `keymap-unset`, stands.
+
+project.el asks `file-remote-p` of every root it reads, writes and prunes, and recentf of every file it keeps, in sessions that may never browse a repository. So the autoloads hold the definition of `remoto-autoload-file-name-handler` itself, not an autoload of it: a `;;;###autoload` on a `progn` copies the `defun`. Before remoto loads, the handler answers `file-remote-p` of a canonical `/github:` or `/codeberg:` name with the prefix `remoto--handle-file-remote-p` gives, and nil for a CONNECTED that asks for a reached repository, since none is. Any other operation or identification, and a shorthand name, loads remoto and goes to `remoto--take-over`.
+
 ## Unloading
 
 `remoto-unload-function` removes the handler-alist entry and all advice, clears all caches (tree, default-branch, branches, tags, issues, users, search, content, file-commits).
@@ -551,7 +576,7 @@ Every cache key starts with the canonical prefix of the forge (`remoto--repo-id`
 /PREFIX:owner/repo@ref:/path       (an instance from remoto-forgejo-instances)
 ```
 
-Each forge file carries an autoload cookie that registers `remoto-autoload-file-name-handler` for its prefixes, so the first path of a session loads remoto; the mode then installs the real handler under `remoto--handler-regexp`, every registered prefix. An instance's prefix exists once remoto is loaded.
+Each forge file carries an autoload cookie that registers `remoto-autoload-file-name-handler` for its prefixes, so the first path of a session loads remoto, `file-remote-p` aside (see project.el); the mode then installs the real handler under `remoto--handler-regexp`, every registered prefix. An instance's prefix exists once remoto is loaded.
 
 ### Next
 
@@ -572,6 +597,7 @@ remoto.el/
   remoto-forgejo.el  ;; Forgejo and Gitea on GitHub's shape; registers Codeberg, remoto-forgejo-instances
   remoto-topic.el    ;; issue/PR display buffers
   remoto-embark.el   ;; optional Embark integration (loaded only when embark is present)
+  remoto-project.el  ;; remoto-project-try and the C-x p R binding, apart so remoto loads only for its own directories
   SPEC.md            ;; this spec
   README.org         ;; user-facing documentation
   changelog.org      ;; release history
