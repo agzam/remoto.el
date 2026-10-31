@@ -188,6 +188,23 @@ Evil's ex commands take remoto paths: ~:e~, ~:sp~, ~:vs~, ~:view~ and ~:new~ ope
 
 In a name that starts with ~/gh:~ or ~/github:~, ~#~ and ~%~ are literal: they do not name Evil's alternate and current file. A relative name keeps Evil's meaning, so in a remoto Dired, ~:e C\#/Program.cs~ opens ~C#/Program.cs~.
 
+*** project.el
+
+A remoto directory inside a repository is a project: the repository's tree at its ref, rooted at ~/github:OWNER/REPO@REF:/~ and named ~OWNER/REPO@REF~. These commands work in it:
+
+- ~project-find-file~ (~C-x p f~) and ~project-find-dir~ (~C-x p d~), with the file list from the tree remoto already holds
+- ~project-dired~, ~project-switch-to-buffer~ and ~project-kill-buffers~
+- ~project-switch-project~ to a remoto project in the project list, also before anything else has loaded remoto
+
+The commands that run a program in the project cannot work, since a repository has no local directory to run it in: ~project-find-regexp~, ~project-shell~, ~project-compile~, ~project-find-file~ with a prefix argument (it lists files with ~find~), and grep tools such as ~consult-ripgrep~. Clone the repository for those.
+
+The package autoloads put ~remoto-project-try~ on ~project-find-functions~. A setup without the autoloads adds it by hand:
+
+#+begin_src emacs-lisp
+(require 'remoto-project)
+(add-hook 'project-find-functions #'remoto-project-try -90)
+#+end_src
+
 ** Embark integration
 
 Optional [[https://github.com/oantolin/embark][Embark]] integration lives in ~remoto-embark.el~. Embark is not a hard dependency; when it is installed the integration activates automatically, with nothing to configure. With it active, ~embark-act~ offers forge-agnostic actions on remoto targets in remoto file buffers, ~dired~, and ~/github:~ minibuffer completion (including ~embark-collect~).
@@ -240,6 +257,7 @@ We can only imagine a world where git's transport layer gives you a browsable fi
 
 - Read-only. No commits, no pushes, no file modifications. You still can copy them out.
 - No git operations (log, blame, diff).
+- No programs run against a repository: grep, ripgrep, compile and ~project-find-regexp~ need a clone. In-buffer search (isearch, occur) works on opened files.
 - Timestamps in a repository's Dired are synthetic (the tree API has no timestamps); a listing of repositories shows their last push.
 - Very large repos (100k+ files) use slower per-directory fetching.
 - Rate limits: GitHub allows 5,000 requests an hour with a token and 60 without; Codeberg allows 2,000 per 10 minutes. Normal browsing stays well within them, though not within GitHub's 60.

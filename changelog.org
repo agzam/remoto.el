@@ -3,6 +3,12 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [Unreleased]
+
+** Added
+- project.el sees a repository tree as a project: a remoto directory belongs to the tree at its ref, rooted at ~/github:OWNER/REPO@REF:/~ and named ~OWNER/REPO@REF~. ~project-find-file~, ~project-find-dir~, ~project-dired~, ~project-switch-to-buffer~ and ~project-kill-buffers~ work in remoto buffers, and the file list comes from the tree remoto already holds, with no request and no ~find~. The commands that run a program in the project, such as ~project-find-regexp~ and ~consult-ripgrep~, still cannot: a repository has no local directory to run them in.
+- ~remoto-project-try~, in the new ~remoto-project.el~, finds the project. The package autoloads put it on ~project-find-functions~, ahead of ~project-try-vc~, and it loads remoto only for a directory that remoto serves, so a remoto project in the project list opens in a session that has not loaded remoto yet.
+
 * [2.5.0] - 2026-10-30
 
 ** Added

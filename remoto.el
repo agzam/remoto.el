@@ -49,6 +49,7 @@
 (require 'format-spec)
 (require 'ghub)
 (require 'iso8601)
+(require 'project)
 
 ;;;; Forges
 
@@ -3728,6 +3729,55 @@ Args: ORIG, STRING, PRED, ACTION."
          (when (bound-and-true-p global-remoto-mode)
            (remoto--sync-inhibited value)))
   :group 'remoto)
+
+;;;; project.el
+
+(defun remoto--project (dir)
+  "Return the project of DIR, a directory in a repository tree, or nil.
+The project is (remoto . ROOT), ROOT the /PREFIX:OWNER/REPO@REF:/ of the
+tree.  A project found before the mode is on turns it on."
+  (when-let* ((parsed (remoto--parse-path (remoto--normalize-shorthand dir))))
+    (remoto--ensure-global-mode)
+    (cons 'remoto (concat (remoto--tree-prefix parsed) "/"))))
+
+(cl-defmethod project-root ((project (head remoto)))
+  "Return the root of the remoto PROJECT."
+  (cdr project))
+
+(cl-defmethod project-name ((project (head remoto)))
+  "Return OWNER/REPO@REF, the name of the remoto PROJECT."
+  (string-remove-suffix ":/" (remoto--after-prefix (cdr project))))
+
+(cl-defmethod project-files ((project (head remoto)) &optional dirs)
+  "Return the files of the remoto PROJECT under DIRS, its root by default.
+The names are relative to the one directory asked for when
+`project-files-relative-names' allows it, as project.el's own are."
+  (let ((dirs (or dirs (list (project-root project)))))
+    (if (and (bound-and-true-p project-files-relative-names) (null (cdr dirs)))
+        (remoto--tree-files (car dirs) t)
+      (mapcan #'remoto--tree-files dirs))))
+
+(defun remoto--tree-files (dir &optional relative)
+  "Return the names of the files under DIR, a directory in a repository tree.
+RELATIVE names them from DIR.  They come from the tree: the default
+`project-files' runs find, and a repository has no local directory to
+run it in."
+  (when-let* ((parsed (remoto--parse-path (remoto--normalize-shorthand dir))))
+    (let* ((tree (remoto--ensure-tree parsed))
+           (key (remoto--tree-lookup-key (remoto-path-path parsed)))
+           (under (if (string-empty-p key) "" (concat key "/")))
+           (root (concat (remoto--tree-prefix parsed) "/"))
+           (head (if relative "" (concat root under)))
+           (files nil))
+      (when (gethash "\0truncated" tree)
+        (message "Remoto: the tree of %s is partial, and so is its file list" root))
+      (maphash (lambda (path entry)
+                 (when (and (not (string-prefix-p "\0" path))
+                            (string-prefix-p under path)
+                            (equal (alist-get 'type entry) "blob"))
+                   (push (concat head (substring path (length under))) files)))
+               tree)
+      (sort files #'string<))))
 
 ;;;; Global mode
 

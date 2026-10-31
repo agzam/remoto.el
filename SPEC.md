@@ -490,6 +490,21 @@ A remoto file buffer visits a real file name, so the major mode hooks, `after-ch
 
 `remoto--inhibited` records which functions carry the advice, so turning the mode off removes exactly those even after a plain `setq` of the option. The option's `:set` moves the advice at once. Advice on a function that is not defined yet, or is still an autoload, waits for the definition and does not make the symbol `fboundp`, so remoto requires neither lsp-mode nor Eglot.
 
+## project.el
+
+A directory in a repository tree is a project: `(remoto . ROOT)`, ROOT the canonical `/PREFIX:OWNER/REPO@REF:/` of the tree (`remoto--project`). The levels above a tree (`/github:`, `/github:OWNER/`, `@`, `#`) have none, and neither has the short form `/github:OWNER/REPO/`, whose default branch would cost a request.
+
+| Method | Answer |
+|---|---|
+| `project-root` | ROOT |
+| `project-name` | `OWNER/REPO@REF`: ROOT after its prefix, without `:/` |
+| `project-files` | the blobs under each of DIRS, from the tree (`remoto--tree-files`): full names, sorted. A truncated tree lists what it holds and says so |
+| `project-buffers` | project.el's default: the buffers whose `default-directory` is under ROOT |
+
+project.el's own `project-files` runs `find` through `process-file`. A repository has no local directory to run it in: `unhandled-file-name-directory` is nil, so the process runs in `~`. The same holds for the commands that run a program in the project (`project-find-regexp`, `project-shell`, `project-compile`, `project-find-file` with a prefix argument, consult-ripgrep); they stay out of reach.
+
+`remoto-project-try` finds the project. It lives in `remoto-project.el`, apart from remoto.el, because project.el calls it for every directory: it answers only a directory whose file-name handler is remoto's or the bootstrap handler of the autoloads, and only then requires remoto. The package autoloads add it to `project-find-functions` at depth -90 once project.el loads, ahead of `project-try-vc`, whose search for marker files costs a request per name in a tree. So a remoto project in `project-list-file` resolves in a session that has not loaded remoto yet, and `remoto--project` turns the mode on, as other first uses do. Left to `project-try-vc`, such a project is not found: project.el drops it from its list and lists the files of a transient project with `find` in `~`.
+
 ## Unloading
 
 `remoto-unload-function` removes the handler-alist entry and all advice, clears all caches (tree, default-branch, branches, tags, issues, users, search, content, file-commits).
@@ -572,6 +587,7 @@ remoto.el/
   remoto-forgejo.el  ;; Forgejo and Gitea on GitHub's shape; registers Codeberg, remoto-forgejo-instances
   remoto-topic.el    ;; issue/PR display buffers
   remoto-embark.el   ;; optional Embark integration (loaded only when embark is present)
+  remoto-project.el  ;; remoto-project-try for project.el, apart so remoto loads only for its own directories
   SPEC.md            ;; this spec
   README.org         ;; user-facing documentation
   changelog.org      ;; release history
