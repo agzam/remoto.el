@@ -6,8 +6,9 @@ Changes to the project, following Keep a Changelog conventions.
 * [Unreleased]
 
 ** Added
-- project.el sees a repository tree as a project: a remoto directory belongs to the tree at its ref, rooted at ~/github:OWNER/REPO@REF:/~ and named ~OWNER/REPO@REF~. ~project-find-file~, ~project-find-dir~, ~project-dired~, ~project-switch-to-buffer~ and ~project-kill-buffers~ work in remoto buffers, and the file list comes from the tree remoto already holds, with no request and no ~find~. The commands that run a program in the project, such as ~project-find-regexp~ and ~consult-ripgrep~, still cannot: a repository has no local directory to run them in.
+- project.el sees a repository tree as a project: a remoto directory belongs to the tree at its ref, rooted at ~/github:OWNER/REPO@REF:/~ and named ~OWNER/REPO@REF~. ~project-find-file~, ~project-find-dir~, ~project-dired~, ~project-switch-to-buffer~ and ~project-kill-buffers~ work in remoto buffers, and the file list comes from the tree remoto already holds, with no request and no ~find~.
 - ~remoto-project-try~, in the new ~remoto-project.el~, finds the project. The package autoloads put it on ~project-find-functions~, ahead of ~project-try-vc~, and it loads remoto only for a directory that remoto serves, so a remoto project in the project list opens in a session that has not loaded remoto yet.
+- A search started in a remoto directory stops with "Remoto: grep needs a clone; a repository has no local files": ~project-find-regexp~, ~project-find-file~ with a prefix argument, ~consult-ripgrep~, ~consult-find~, ~grep~, a ~find~ or ~rg~ at ~M-!~. A program started there runs in =~=, so the search reported the files of your home directory as the repository's. Other programs, git among them, run as before.
 
 * [2.5.0] - 2026-10-30
 

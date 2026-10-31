@@ -8931,6 +8931,97 @@ That is where the package autoloads put it."
           (expect 'dired :to-have-been-called-with
                   "/github:testowner/testrepo@main:/src/"))))))
 
+;;; Programs started in a remoto directory
+
+(defconst remoto-test--clone-message
+  "Remoto: %s needs a clone; a repository has no local files"
+  "The refusal of a search started in a remoto directory.")
+
+(describe "remoto--search-program"
+  (it "names the search that a program or a shell command line runs"
+    (pcase-dolist (`(,expected ,program . ,args)
+                   '(("grep" "grep" "-rn" "x")
+                     ("rg" "/usr/bin/rg" "--null" "x")
+                     ("fd" "fd" ".")
+                     ("git grep" "git" "--no-pager" "grep" "-n" "x")
+                     ("grep" "/bin/zsh" "-c" "xargs -0 grep  -snHE -e defun")
+                     ("find" "/bin/sh" "-c" "find -H . -type f -print0")
+                     ("rg" "sh" "-c" "cd src && $(command -v rg) x|head")
+                     ("grep" "bash" "-c" "git --no-pager grep -n x")
+                     ("find" "sh" "-c" "/usr/bin/find /github:o/r@main:/ -type f")))
+      (expect (remoto--search-program program args) :to-equal expected)))
+
+  (it "names nothing for the other programs"
+    (pcase-dolist (`(,program . ,args)
+                   '(("git" "rev-parse" "--show-toplevel")
+                     ("git" "log" "--grep=find" "-S" "x")
+                     ("git" "-c" "grep.lineNumber=true" "status")
+                     ("/bin/zsh" "-c" "git status --porcelain")
+                     ("/bin/zsh" "-i")
+                     ("ls" "-la")
+                     (nil)))
+      (expect (remoto--search-program program args) :to-be nil))))
+
+(describe "a program started in a remoto directory"
+  ;; It runs in `~', so a search there would report the files of `~'.  The
+  ;; searches below name a missing directory: run by mistake, they end at once.
+  (it "stops a search however it is started"
+    (let ((default-directory "/github:o/r@main:/src/"))
+      (pcase-dolist (`(,search . ,start)
+                     `(("grep" . ,(lambda () (process-file "grep" nil nil nil "-r" "x" "/nonexistent")))
+                       ("find" . ,(lambda () (process-file-shell-command "find /nonexistent -type f")))
+                       ("rg" . ,(lambda () (start-file-process "s" nil "rg" "x" "/nonexistent")))
+                       ("grep" . ,(lambda ()
+                                    (start-file-process-shell-command
+                                     "s" nil "xargs -0 grep x /nonexistent")))
+                       ("fd" . ,(lambda ()
+                                  (make-process :name "s" :command '("fd" "." "/nonexistent")
+                                                :file-handler t)))
+                       ("grep" . ,(lambda () (shell-command "grep -rn x /nonexistent")))
+                       ("rg" . ,(lambda () (async-shell-command "rg x /nonexistent")))))
+        (expect (funcall start) :to-throw 'user-error
+                (list (format remoto-test--clone-message search))))))
+
+  (it "runs the other programs as before"
+    (let ((default-directory "/github:o/r@main:/src/"))
+      (expect (with-temp-buffer
+                (list (process-file "echo" nil t nil "hi") (buffer-string)))
+              :to-equal '(0 "hi\n"))
+      (let ((process (make-process :name "s" :command '("true") :file-handler t
+                                   :noquery t)))
+        (while (process-live-p process)
+          (accept-process-output process 0.05))
+        (expect (process-exit-status process) :to-equal 0))
+      (with-temp-buffer
+        (shell-command "echo hi" (current-buffer))
+        (expect (buffer-string) :to-equal "hi\n"))))
+
+  (it "passes git on unchanged"
+    (spy-on 'remoto--pass-on :and-return-value 0)
+    (let ((default-directory "/github:o/r@main:/src/"))
+      (expect (process-file "git" nil nil nil "rev-parse" "--show-toplevel") :to-equal 0))
+    (expect 'remoto--pass-on :to-have-been-called-with
+            #'process-file '("git" nil nil nil "rev-parse" "--show-toplevel")))
+
+  (it "stops project-find-regexp before grep runs"
+    (remoto-test-with-cache
+      (remoto-test-with-project-finder
+        (spy-on 'project-remember-project)
+        (let ((default-directory "/github:testowner/testrepo@main:/src/"))
+          (expect (project-find-regexp "defun") :to-throw 'user-error
+                  (list (format remoto-test--clone-message "grep")))))))
+
+  (it "stops project-find-file with a prefix argument before find runs"
+    (remoto-test-with-cache
+      (remoto-test-with-project-finder
+        (spy-on 'project-remember-project)
+        ;; A find that ran by mistake would walk `~'.  grep.el defines the name.
+        (require 'grep)
+        (let ((default-directory "/github:testowner/testrepo@main:/")
+              (find-program "/nonexistent/find"))
+          (expect (project-find-file t) :to-throw 'user-error
+                  (list (format remoto-test--clone-message "find"))))))))
+
 ;;; The bootstrap handler of the autoloads
 
 (defun remoto-test--push-bootstrap ()

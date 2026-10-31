@@ -1504,13 +1504,16 @@ resolved handler receives only canonical paths."
       (if-let* ((handler (intern-soft (format "remoto--handle-%s" operation)))
                 ((fboundp handler)))
           (apply handler args)
-        ;; Fall through to default handler
-        (let ((inhibit-file-name-handlers
-               (cons #'remoto-file-name-handler
-                     (and (eq inhibit-file-name-operation operation)
-                          inhibit-file-name-handlers)))
-              (inhibit-file-name-operation operation))
-          (apply operation args))))))
+        (remoto--pass-on operation args)))))
+
+(defun remoto--pass-on (operation args)
+  "Run OPERATION on ARGS with remoto's handler out of the way."
+  (let ((inhibit-file-name-handlers
+         (cons #'remoto-file-name-handler
+               (and (eq inhibit-file-name-operation operation)
+                    inhibit-file-name-handlers)))
+        (inhibit-file-name-operation operation))
+    (apply operation args)))
 
 ;;;; Read operations
 
@@ -2448,6 +2451,58 @@ too, or Dired adds a line for the repository that `+' did not create."
 (defun remoto--handle-unhandled-file-name-directory (_filename)
   "Return nil - no local equivalent for remote paths."
   nil)
+
+;;;; Programs
+
+;; A program started in a remoto directory runs in `~', which is what a nil
+;; `unhandled-file-name-directory' gives it.  The searches among them would
+;; report the files there as the repository's, so they stop with a message.
+
+(defconst remoto--search-programs
+  '("grep" "egrep" "fgrep" "rg" "ugrep" "ag" "ack" "find" "fd" "fdfind")
+  "Programs that search the files of the directory they run in.")
+
+(defun remoto--search-program (program args)
+  "Return the search that PROGRAM with ARGS would start, or nil.
+That is PROGRAM itself, git with its grep subcommand, or for a shell a
+word of the command line after its -c."
+  (when (stringp program)
+    ;; Words of a command line can look like remote names; they are only split.
+    (let* ((file-name-handler-alist nil)
+           (name (file-name-nondirectory program))
+           (line (cadr (or (member shell-command-switch args) (member "-c" args)))))
+      (cond ((member name remoto--search-programs) name)
+            ((and (equal name "git") (member "grep" args)) "git grep")
+            ((stringp line)
+             (seq-find (lambda (word) (member word remoto--search-programs))
+                       (mapcar #'file-name-nondirectory
+                               (split-string line "[][ \t\n|;&()<>`'\"$]+" t))))))))
+
+(defun remoto--refuse-search (program args)
+  "Signal a `user-error' when PROGRAM with ARGS is a search."
+  (when-let* ((search (remoto--search-program program args)))
+    (user-error "Remoto: %s needs a clone; a repository has no local files" search)))
+
+(defun remoto--handle-process-file (program &optional infile buffer display &rest args)
+  "Run PROGRAM with ARGS unless it is a search; INFILE, BUFFER, DISPLAY as usual."
+  (remoto--refuse-search program args)
+  (remoto--pass-on #'process-file (append (list program infile buffer display) args)))
+
+(defun remoto--handle-start-file-process (name buffer program &rest args)
+  "Start PROGRAM with ARGS as process NAME in BUFFER unless it is a search."
+  (remoto--refuse-search program args)
+  (remoto--pass-on #'start-file-process (append (list name buffer program) args)))
+
+(defun remoto--handle-make-process (&rest args)
+  "Make the process that ARGS describe unless its command is a search."
+  (let ((command (plist-get args :command)))
+    (remoto--refuse-search (car command) (cdr command)))
+  (remoto--pass-on #'make-process args))
+
+(defun remoto--handle-shell-command (command &rest args)
+  "Run the shell COMMAND with ARGS unless it is a search."
+  (remoto--refuse-search shell-file-name (list shell-command-switch command))
+  (remoto--pass-on #'shell-command (cons command args)))
 
 ;;;; Write operations (all read-only)
 

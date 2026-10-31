@@ -205,6 +205,10 @@ This returns one directory level at a time. The tree cache stores what it has an
 | `abbreviate-file-name` | Return as-is |
 | `unhandled-file-name-directory` | Return nil |
 
+### Programs
+
+A program started in a remoto directory, through `process-file`, `start-file-process`, `make-process` with `:file-handler` or `shell-command`, runs in `~`: `unhandled-file-name-directory` is nil. A search there would report the files of `~` as the repository's, so the handlers of those four operations refuse one with `(user-error "Remoto: grep needs a clone; a repository has no local files")`. A search is a program in `remoto--search-programs` (grep, egrep, fgrep, rg, ugrep, ag, ack, find, fd, fdfind), `git` with its `grep` subcommand, or a shell whose command line after `-c` names one of those in any word, as xref's `xargs -0 grep` does. Every other program passes on unchanged (`remoto--pass-on`), git for Magit and vc included.
+
 ### Write operations (all read-only)
 
 `write-region`, `delete-file`, `delete-directory`, `rename-file`, `copy-file`, `set-file-modes`, `set-file-times` - all signal `(user-error "Remoto: repository is read-only")`.
@@ -501,7 +505,7 @@ A directory in a repository tree is a project: `(remoto . ROOT)`, ROOT the canon
 | `project-files` | the blobs under each of DIRS, from the tree (`remoto--tree-files`): full names, sorted; relative to the one directory asked for when `project-files-relative-names` allows it. A truncated tree lists what it holds and says so |
 | `project-buffers` | project.el's default: the buffers whose `default-directory` is under ROOT |
 
-project.el's own `project-files` runs `find` through `process-file`. A repository has no local directory to run it in: `unhandled-file-name-directory` is nil, so the process runs in `~`. The same holds for the commands that run a program in the project (`project-find-regexp`, `project-shell`, `project-compile`, `project-find-file` with a prefix argument, consult-ripgrep); they stay out of reach.
+project.el's own `project-files` runs `find` through `process-file`, and a repository has no local directory to run it in (see Programs). The commands that search with a program stop with remoto's message: `project-find-regexp`, `project-find-file` with a prefix argument, consult-ripgrep, consult-find, `grep`. `project-shell` and `project-compile` run in `~`.
 
 `remoto-project-try` finds the project. It lives in `remoto-project.el`, apart from remoto.el, because project.el calls it for every directory: it answers only a directory whose file-name handler is remoto's or the bootstrap handler of the autoloads, and only then requires remoto. The package autoloads add it to `project-find-functions` at depth -90 once project.el loads, ahead of `project-try-vc`, whose search for marker files costs a request per name in a tree. So a remoto project in `project-list-file` resolves in a session that has not loaded remoto yet, and `remoto--project` turns the mode on, as other first uses do. Left to `project-try-vc`, such a project is not found: project.el drops it from its list and lists the files of a transient project with `find` in `~`.
 
