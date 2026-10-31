@@ -509,6 +509,8 @@ project.el's own `project-files` runs `find` through `process-file`, and a repos
 
 `remoto-project-try` finds the project. It lives in `remoto-project.el`, apart from remoto.el, because project.el calls it for every directory: it answers only a directory whose file-name handler is remoto's or the bootstrap handler of the autoloads, and only then requires remoto. The package autoloads add it to `project-find-functions` at depth -90 once project.el loads, ahead of `project-try-vc`, whose search for marker files costs a request per name in a tree. So a remoto project in `project-list-file` resolves in a session that has not loaded remoto yet, and `remoto--project` turns the mode on, as other first uses do. Left to `project-try-vc`, such a project is not found: project.el drops it from its list and lists the files of a transient project with `find` in `~`.
 
+project.el asks `file-remote-p` of every root it reads, writes and prunes, and recentf of every file it keeps, in sessions that may never browse a repository. So the autoloads hold the definition of `remoto-autoload-file-name-handler` itself, not an autoload of it: a `;;;###autoload` on a `progn` copies the `defun`. Before remoto loads, the handler answers `file-remote-p` of a canonical `/github:` or `/codeberg:` name with the prefix `remoto--handle-file-remote-p` gives, and nil for a CONNECTED that asks for a reached repository, since none is. Any other operation or identification, and a shorthand name, loads remoto and goes to `remoto--take-over`.
+
 ## Unloading
 
 `remoto-unload-function` removes the handler-alist entry and all advice, clears all caches (tree, default-branch, branches, tags, issues, users, search, content, file-commits).
@@ -570,7 +572,7 @@ Every cache key starts with the canonical prefix of the forge (`remoto--repo-id`
 /PREFIX:owner/repo@ref:/path       (an instance from remoto-forgejo-instances)
 ```
 
-Each forge file carries an autoload cookie that registers `remoto-autoload-file-name-handler` for its prefixes, so the first path of a session loads remoto; the mode then installs the real handler under `remoto--handler-regexp`, every registered prefix. An instance's prefix exists once remoto is loaded.
+Each forge file carries an autoload cookie that registers `remoto-autoload-file-name-handler` for its prefixes, so the first path of a session loads remoto, `file-remote-p` aside (see project.el); the mode then installs the real handler under `remoto--handler-regexp`, every registered prefix. An instance's prefix exists once remoto is loaded.
 
 ### Next
 

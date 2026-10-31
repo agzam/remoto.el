@@ -9099,7 +9099,53 @@ That is where the package autoloads put it."
           (remoto-unload-function)
           (expect (rassq 'remoto-autoload-file-name-handler file-name-handler-alist)
                   :to-be nil))
-      (global-remoto-mode 1))))
+      (global-remoto-mode 1)))
+
+  (it "answers file-remote-p of a canonical name as the real handler does, loading nothing"
+    ;; project.el and recentf ask it of every name they keep.  Before remoto
+    ;; loads, its caches are empty: nothing is reached.
+    (let ((remoto--tree-cache (make-hash-table :test 'equal))
+          (remoto--default-branch-cache (make-hash-table :test 'equal))
+          (real-require (symbol-function 'require))
+          (results nil))
+      (spy-on 'require :and-call-fake
+              (lambda (feature &rest args)
+                (if (eq feature 'remoto)
+                    (error "Loaded remoto")
+                  (apply real-require feature args))))
+      (spy-on 'remoto--take-over)
+      (spy-on 'remoto--ensure-global-mode)
+      (dolist (name (append (mapcar #'car (remoto-test--grammar-rows))
+                            '("/github:o/r@main:/x" "/github:o/r@feature/x:/src/" "/github:o/r@:/x"
+                              "/github:o:x/r:/" "/github:o/r@a@b:/" "/github:o/r#12:x"
+                              "/github:o/r@main" "/codeberg:o/r@v1.0:/a/b.el")))
+        (dolist (connected '(nil never t))
+          (push (list name connected
+                      ;; `features' is not special: a plain let would be lexical.
+                      (dlet ((features (remq 'remoto features)))
+                        (remoto-autoload-file-name-handler 'file-remote-p name nil connected))
+                      (remoto-file-name-handler 'file-remote-p name nil connected))
+                results)))
+      (expect (seq-remove (lambda (r) (equal (nth 2 r) (nth 3 r))) results) :to-be nil)
+      (expect (seq-find (lambda (r) (equal (car r) "/github:o/r@main:/x")) results)
+              :to-be-truthy)
+      (expect 'remoto--take-over :not :to-have-been-called)
+      (expect 'remoto--ensure-global-mode :not :to-have-been-called)))
+
+  (it "loads remoto for any other question"
+    (spy-on 'require)
+    (spy-on 'remoto--take-over :and-return-value 'answer)
+    (dlet ((features (remq 'remoto features)))
+      (expect (remoto-autoload-file-name-handler 'file-remote-p "/gh:o/r@main:/x")
+              :to-be 'answer)
+      (expect (remoto-autoload-file-name-handler 'file-remote-p "/github:o/r@main:/x" 'method)
+              :to-be 'answer)
+      (expect (remoto-autoload-file-name-handler 'file-exists-p "/github:o/r@main:/x")
+              :to-be 'answer))
+    (expect 'require :to-have-been-called-with 'remoto)
+    (expect 'remoto--take-over :to-have-been-called-times 3)
+    (expect 'remoto--take-over :to-have-been-called-with
+            'file-exists-p '("/github:o/r@main:/x"))))
 
 (defmacro remoto-test-with-autoloads (var &rest body)
   "Bind VAR to a freshly generated autoloads file of the package and run BODY.
@@ -9142,11 +9188,17 @@ every source older than an existing output file, so it must not exist."
                               (string-match-p (car entry) (format "/%s:o/r" prefix)))
                             entries)
                   :to-be-truthy))
+        ;; The definition itself, not an autoload: answering `file-remote-p'
+        ;; loads nothing.
+        (expect (seq-find (lambda (f)
+                            (equal (seq-take f 2) '(defun remoto-autoload-file-name-handler)))
+                          forms)
+                :to-be-truthy)
         (expect (seq-find (lambda (f)
                             (and (eq (car-safe f) 'autoload)
                                  (equal (nth 1 f) ''remoto-autoload-file-name-handler)))
                           forms)
-                :to-be-truthy))))
+                :to-be nil))))
 
   (it "loads nothing and turns nothing on by itself"
     (remoto-test-with-autoloads file
@@ -9458,7 +9510,47 @@ with what the same call does once the mode is on."
                         (list :remoto (featurep 'remoto)
                               :asked (featurep 'remoto-project))))))
         (expect (plist-get result :remoto) :to-be nil)
-        (expect (plist-get result :asked) :to-be t)))))
+        (expect (plist-get result :asked) :to-be t))))
+
+  (it "reads, prunes and writes a list that holds remoto roots with remoto unloaded"
+    ;; project.el asks `file-remote-p' of every root it keeps, as recentf
+    ;; does of every file, in sessions that may never browse a repository.
+    (remoto-test-with-autoloads file
+      (let ((list-file (make-temp-file "remoto-projects"))
+            (local (file-name-as-directory (make-temp-file "remoto-local" t))))
+        (unwind-protect
+            (let ((result
+                   (progn
+                     (with-temp-file list-file
+                       (prin1 '(("/github:o/r@main:/") ("/codeberg:o/r:/")) (current-buffer)))
+                     (remoto-test--fresh-session
+                      file
+                      `(progn
+                         (require 'project)
+                         (require 'recentf)
+                         (setq project-list-file ,list-file)
+                         (let ((roots (project-known-project-roots)))
+                           (project-remember-project (cons 'transient ,local))
+                           (let ((completing-read-function (lambda (&rest _) ,local)))
+                             (project-prompt-project-dir))
+                           (list :roots roots
+                                 :written (with-temp-buffer
+                                            (insert-file-contents ,list-file)
+                                            (read (current-buffer)))
+                                 :kept (and (recentf-keep-default-predicate
+                                             "/github:o/r@main:/README.md")
+                                            t)
+                                 :remoto (featurep 'remoto)
+                                 :ghub (featurep 'ghub))))))))
+              (expect (plist-get result :roots)
+                      :to-equal '("/github:o/r@main:/" "/codeberg:o/r:/"))
+              (expect (cdr (plist-get result :written))
+                      :to-equal '(("/github:o/r@main:/") ("/codeberg:o/r:/")))
+              (expect (plist-get result :kept) :to-be t)
+              (expect (plist-get result :remoto) :to-be nil)
+              (expect (plist-get result :ghub) :to-be nil))
+          (delete-file list-file)
+          (delete-directory local t))))))
 
 ;;; Unloading
 

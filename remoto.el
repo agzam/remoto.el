@@ -3915,28 +3915,44 @@ file-name handler for as long as they live, so the mode has to stay on."
     (global-remoto-mode 1)
     (message "Remoto: `global-remoto-mode' enabled")))
 
-;;;###autoload
-(defun remoto-autoload-file-name-handler (operation &rest args)
+(defun remoto--take-over (operation args)
   "Turn on `global-remoto-mode' for the first remoto path, then run OPERATION.
-ARGS are the arguments of OPERATION.  The package autoloads register
-this handler in `file-name-handler-alist', so a path of a forge that
-comes with remoto, such as `/github:' or `/cb:', typed at a file prompt
-works before remoto is loaded, the way a remote path loads TRAMP.
-Calling it loads remoto; it then leaves the alist for good, and
-`remoto--install' puts the real handler in front.
-
-The call that brings remoto in runs without the advice `remoto--install'
-adds, because the advice arrives while that call is already under way.
-`expand-file-name' is what `find-file-noselect' asks first, and what it
-gets back is the name it visits, so canonicalizing here gives that one
-call the rewrite the advice would have given it.  A file prompt asks
-`substitute-in-file-name' first instead, and a prompt is still being
-typed into, so it is left alone."
+ARGS are its arguments.  The advice of `remoto--install' arrives while this
+call runs, so the rewrite it would give `expand-file-name', which
+`find-file-noselect' asks first, happens here."
   (remoto--drop-autoload-handler)
   (remoto--ensure-global-mode)
   (when (and (eq operation 'expand-file-name) (stringp (car args)))
     (setcar args (remoto--maybe-rewrite (car args))))
   (apply operation args))
+
+;; The definition itself goes into the autoloads: answering `file-remote-p'
+;; must not load remoto, since project.el and recentf ask it of every name
+;; they keep.  Before remoto loads no repository is reached, so a connected
+;; answer is nil, as `remoto--handle-file-remote-p' gives.
+;;;###autoload
+(progn
+  (defun remoto-autoload-file-name-handler (operation &rest args)
+    "Load remoto for a path of a forge that comes with it, then run OPERATION.
+ARGS are the arguments of OPERATION.  The package autoloads register this
+handler, so such a path works before remoto loads, as a remote path loads
+TRAMP; `file-remote-p' of a canonical name is answered without loading."
+    (if-let* (((eq operation 'file-remote-p))
+              ((not (featurep 'remoto)))
+              (name (car args))
+              ((stringp name))
+              ((null (nth 1 args)))
+              ((string-match-p "\\`/\\(?:github\\|codeberg\\):" name)))
+        (and (memq (nth 2 args) '(nil never))
+             (save-match-data
+               (if (string-match
+                    "\\`\\(/[^/:]+:[^/]+/[^/:@#]+\\)\\(?:@\\([^:]+\\)\\|@\\)?:" name)
+                   (concat (match-string 1 name)
+                           (and (match-beginning 2) (concat "@" (match-string 2 name)))
+                           ":")
+                 (substring name 0 (1+ (string-search ":" name))))))
+      (require 'remoto)
+      (remoto--take-over operation args))))
 
 ;;;; Issue display (see remoto-topic.el for full implementation)
 
