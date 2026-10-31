@@ -17,8 +17,13 @@
 (require 'remoto-e2e-cases (expand-file-name "remoto-e2e-cases"
                                              (file-name-directory load-file-name)))
 
-;; A sandbox never reaches the auth-source files of the person running it.
-(setq auth-sources (when-let* ((file (getenv "REMOTO_KEYS_AUTHINFO"))) (list file)))
+;; A sandbox never reaches the auth-source files of the person running it.  A
+;; scenario with a HOME of its own keeps Emacs's default list, inside that HOME.
+(unless (getenv "REMOTO_KEYS_DEFAULT_AUTH")
+  (setq auth-sources (when-let* ((file (getenv "REMOTO_KEYS_AUTHINFO"))) (list file))))
+;; epg prefers any gpg2 on PATH; the scenario's GnuPG home belongs to this gpg.
+(when-let* ((gpg (getenv "REMOTO_KEYS_GPG")))
+  (setq epg-gpg-program gpg))
 (when-let* ((file (getenv "REMOTO_KEYS_TOKEN_FILE"))
             ((file-exists-p file)))
   (setq remoto-github-auth (with-temp-buffer
@@ -147,11 +152,19 @@ ENDPOINT); GitHub's go unprefixed, so the two compare."
   "HTTP/[0-9.]+ [0-9]\\{3\\}\\|<!DOCTYPE\\|<html\\|{\"message\":"
   "Text of a raw HTTP answer, which a message to a person never holds.")
 
+(defun remoto-keys--minibuffer-input ()
+  "Return the input of the current minibuffer, or <hidden> when it is a secret."
+  (let ((input (minibuffer-contents-no-properties)))
+    (if (and (string-match-p "token\\|[Pp]assphrase\\|[Pp]assword" (minibuffer-prompt))
+             (not (string-empty-p input)))
+        "<hidden>"
+      input)))
+
 (defun remoto-keys-state ()
   "Return where the case ended, without the parts that are nil."
   (let ((minibuffer (and (active-minibuffer-window)
                          (with-current-buffer (window-buffer (active-minibuffer-window))
-                           (minibuffer-contents-no-properties)))))
+                           (remoto-keys--minibuffer-input)))))
     (with-current-buffer (window-buffer (or (minibuffer-selected-window) (selected-window)))
       (let* ((dired (derived-mode-p 'dired-mode))
              (names (remoto-e2e--buffer-names)))
@@ -222,10 +235,94 @@ ENDPOINT); GitHub's go unprefixed, so the two compare."
       (nreverse logins))))
 
 (defun remoto-keys-prompt ()
-  "Return the prompt and the input of the minibuffer, or nil."
+  "Return the prompt and the input of the minibuffer, or nil.
+A token or passphrase being typed shows as <hidden>."
   (when-let* ((window (active-minibuffer-window)))
     (with-current-buffer (window-buffer window)
-      (concat (minibuffer-prompt) (minibuffer-contents-no-properties)))))
+      (concat (minibuffer-prompt) (remoto-keys--minibuffer-input)))))
+
+(defun remoto-keys-message-count (regexp)
+  "Return how many lines of *Messages* match REGEXP since Emacs started."
+  (with-current-buffer (messages-buffer)
+    (save-excursion
+      (goto-char (point-min))
+      (how-many regexp))))
+
+(defun remoto-keys-window-buffer ()
+  "Return the name of the buffer of the selected window, or the one a minibuffer left."
+  (buffer-name (window-buffer (or (minibuffer-selected-window) (selected-window)))))
+
+(defun remoto-keys-directory ()
+  "Return the directory of the Dired in the selected window, or nil."
+  (with-current-buffer (window-buffer (or (minibuffer-selected-window) (selected-window)))
+    (and (derived-mode-p 'dired-mode) default-directory)))
+
+(defun remoto-keys--tokens ()
+  "Return the tokens remoto's logins hold."
+  (let (tokens)
+    (when (boundp 'remoto--logins)
+      (maphash (lambda (_host login)
+                 (when-let* ((token (ignore-errors (remoto--login-token login))))
+                   (push token tokens)))
+               remoto--logins))
+    tokens))
+
+(defun remoto-keys--hide-secret (row tokens)
+  "Return ROW, a line of an authinfo file, with its password hidden.
+A password reads <login> when it is one of TOKENS, the tokens remoto's
+logins hold, itself when it is a scenario's fake one, else <other>."
+  (replace-regexp-in-string
+   "\\(\\bpassword[ \t]+\\)\\([^ \t\n]+\\)"
+   (lambda (match)
+     (let ((secret (match-string 2 match)))
+       (concat (match-string 1 match)
+               (cond ((member secret tokens) "<login>")
+                     ((string-match-p "\\`\\(?:ghp_e2e\\|e2e-\\|kept\\'\\)" secret) secret)
+                     (t "<other>")))))
+   row t t))
+
+(defun remoto-keys-authinfo (&optional file)
+  "Return the mode and the rows of FILE, ~/.authinfo.gpg by default, or nil.
+Every password is hidden, as `remoto-keys--hide-secret' does."
+  (let ((file (expand-file-name (or file "~/.authinfo.gpg")))
+        (tokens (remoto-keys--tokens)))
+    (when (file-exists-p file)
+      (list :mode (format "%o" (file-modes file))
+            :rows (condition-case err
+                      (with-temp-buffer
+                        (insert-file-contents file)
+                        (mapcar (lambda (row) (remoto-keys--hide-secret row tokens))
+                                (split-string (buffer-string) "\n" t)))
+                    (error (list 'error (error-message-string err))))))))
+
+(defun remoto-keys-pinentry ()
+  "Return what the scenario's pinentry was asked, never the passphrase."
+  (let ((log (expand-file-name "~/.gnupg/pinentry.log")))
+    (when (file-exists-p log)
+      (with-temp-buffer
+        (insert-file-contents log)
+        (split-string (buffer-string) "\n" t)))))
+
+(defun remoto-keys-token-share (host)
+  "Return (REQUESTS . WITH-TOKEN): the requests to HOST since Emacs started."
+  (let ((rows (seq-filter (lambda (row) (equal (car row) host)) remoto-keys--auth-log)))
+    (cons (length rows) (seq-count #'cadr rows))))
+
+(defun remoto-keys-tokenless-p (host)
+  "Non-nil when requests went to HOST, none of them with a token."
+  (pcase-let ((`(,requests . ,tokens) (remoto-keys-token-share host)))
+    (and (< 0 requests) (= 0 tokens))))
+
+(defun remoto-keys-tokened-p (host)
+  "Non-nil when requests went to HOST, all of them with a token."
+  (pcase-let ((`(,requests . ,tokens) (remoto-keys-token-share host)))
+    (and (< 0 requests) (= requests tokens))))
+
+(defun remoto-keys-github-token-p ()
+  "Return non-nil when GitHub's login has a token."
+  (and (boundp 'remoto--logins)
+       (when-let* ((login (gethash "api.github.com" remoto--logins)))
+         (and (remoto--login-token login) t))))
 
 (defun remoto-keys-forges ()
   "Return the prefixes of remoto's forges and the text of *Warnings*."

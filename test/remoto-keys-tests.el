@@ -414,11 +414,126 @@
   (it "says which token a scenario lacks"
     (let ((remoto-keys--token nil) (remoto-keys--codeberg-token nil))
       (expect (remoto-keys--skip '(:token t)) :to-equal "needs REMOTO_E2E_TOKEN")
+      (expect (remoto-keys--skip '(:paste t)) :to-equal "needs REMOTO_E2E_TOKEN")
       (expect (remoto-keys--skip '(:codeberg t)) :to-equal "needs REMOTO_E2E_CODEBERG_TOKEN")
+      (expect (remoto-keys--skip '(:codeberg-paste t))
+              :to-equal "needs REMOTO_E2E_CODEBERG_TOKEN")
       (expect (remoto-keys--skip '(:gitconfig "")) :to-be nil)))
+  (it "says a GnuPG home needs gpg"
+    (let ((remoto-keys--gpg nil))
+      (expect (remoto-keys--skip '(:gnupg empty)) :to-equal "needs gpg")))
   (it "runs the Codeberg scenario with Codeberg's token"
     (let ((remoto-keys--codeberg-token "not-a-codeberg-token"))
       (expect (remoto-keys--skip '(:codeberg t)) :to-be nil))))
+
+(describe "remoto-keys--chosen-p"
+  (it "runs a scenario that spends GitHub's requests without a token only by name"
+    (expect (remoto-keys--chosen-p '("login-x" (:limited t)) nil) :to-be nil)
+    (expect (remoto-keys--chosen-p '("dired-ret" (:spends t)) nil) :to-be nil)
+    (expect (remoto-keys--chosen-p '("login-x" (:limited t)) '("login-x")) :to-be-truthy)
+    (expect (remoto-keys--chosen-p '("none" (:gitconfig "")) nil) :to-be-truthy)
+    (expect (remoto-keys--chosen-p '("none" (:gitconfig "")) '("lit")) :to-be nil)))
+
+(describe "remoto-keys--redact"
+  (it "replaces the run's tokens in every string of a state, kill ring and lists included"
+    (let ((remoto-keys--token "ghp_secret") (remoto-keys--codeberg-token "cb_secret"))
+      (expect (remoto-keys--redact '(:kill "ghp_secret" :messages ("x cb_secret y") :n 3 :v ["ghp_secret"]))
+              :to-equal '(:kill "<token>" :messages ("x <token> y") :n 3 :v ["<token>"]))))
+  (it "leaves everything as it is without tokens"
+    (let ((remoto-keys--token nil) (remoto-keys--codeberg-token nil))
+      (expect (remoto-keys--redact '(:kill "abc")) :to-equal '(:kill "abc")))))
+
+(describe "remoto-keys--check-value"
+  (it "matches a string value against a regexp, anything else with equal"
+    (expect (remoto-keys--check-value "Remoto: no token given" "\\`Remoto: no token") :to-be t)
+    (expect (remoto-keys--check-value nil "anything") :to-be nil)
+    (expect (remoto-keys--check-value '(:mode "600") '(:mode "600")) :to-be t)
+    (expect (remoto-keys--check-value nil nil) :to-be t)
+    (expect (remoto-keys--check-value 1 0) :to-be nil)))
+
+(describe "remoto-keys--steps with a token"
+  (it "pastes a token part and never types it"
+    (let ((remoto-keys--token "ghp_secret"))
+      (let ((steps (remoto-keys--steps `("x" token ,(kbd "RET") padded-token codeberg-token)
+                                       "vanilla")))
+        (expect steps :to-equal '((text "x") (paste token) (key "Enter") (paste padded-token)
+                                  (paste codeberg-token)))
+        (expect (format "%S" steps) :not :to-match "ghp_secret")))))
+
+(describe "remoto-keys--env of a scenario with a HOME of its own"
+  (it "puts HOME there, keeps Emacs's auth-sources and names the gpg of the GnuPG home"
+    (let* ((remoto-keys--dir (file-name-as-directory (make-temp-file "remoto-keys" t)))
+           (remoto-keys--gpg "/x/gpg")
+           (env (remoto-keys--env "sc-x" "vanilla" "/elpa/"
+                                  '(:home "/tmp/rk-home-x/" :gnupg empty))))
+      (unwind-protect
+          (progn
+            (expect (getenv-internal "HOME" env) :to-equal "/tmp/rk-home-x/")
+            (expect (getenv-internal "REMOTO_KEYS_DEFAULT_AUTH" env) :to-equal "1")
+            (expect (getenv-internal "REMOTO_KEYS_GPG" env) :to-equal "/x/gpg"))
+        (delete-directory remoto-keys--dir t))))
+  (it "leaves the directories of gpg and gpg2 out of PATH for :no-gpg"
+    (let* ((bin (file-name-as-directory (make-temp-file "rk-bin" t)))
+           (other (file-name-as-directory (make-temp-file "rk-other" t)))
+           (process-environment (cons (concat "PATH=" bin path-separator other)
+                                      process-environment))
+           (remoto-keys--dir (file-name-as-directory (make-temp-file "remoto-keys" t))))
+      (unwind-protect
+          (progn
+            (with-temp-file (expand-file-name "gpg2" bin))
+            (set-file-modes (expand-file-name "gpg2" bin) #o755)
+            (expect (getenv-internal "PATH" (remoto-keys--env "sc-x" "vanilla" "/e/" '(:no-gpg t)))
+                    :to-equal other)
+            (expect (getenv-internal "HOME" (remoto-keys--env "sc-x" "vanilla" "/e/" '(:no-gpg t)))
+                    :to-equal (getenv "HOME")))
+        (delete-directory bin t)
+        (delete-directory other t)
+        (delete-directory remoto-keys--dir t)))))
+
+(describe "remoto-keys--make-home"
+  (it "makes a HOME with nothing in it but the files the setup asks for"
+    (let* ((remoto-keys--token "t0k")
+           (home (remoto-keys--make-home '(:netrc "machine x login y password %TOKEN%\n"))))
+      (unwind-protect
+          (progn
+            (expect (directory-files home nil "\\`[^.]\\|\\`\\.[^.]") :to-equal '(".netrc"))
+            (expect (with-temp-buffer (insert-file-contents (expand-file-name ".netrc" home))
+                                      (buffer-string))
+                    :to-equal "machine x login y password t0k\n")
+            (expect (file-modes (expand-file-name ".netrc" home)) :to-equal #o600))
+        (remoto-keys--wipe-home home))
+      (expect (file-exists-p home) :to-be nil)))
+  (it "encrypts the rows to a key of the home, whose pinentry opens no window"
+    (assume remoto-keys--gpg "No gpg")
+    (let* ((remoto-keys--token "t0k")
+           (home (remoto-keys--make-home '(:gnupg key :authinfo-gpg "machine x password %TOKEN%\n")))
+           (gnupg (expand-file-name ".gnupg" home)))
+      (unwind-protect
+          (progn
+            (expect (remoto-keys--gpg-call gnupg "-q" "-d" (expand-file-name ".authinfo.gpg" home))
+                    :to-equal "machine x password t0k\n")
+            (expect (file-modes (expand-file-name ".authinfo.gpg" home)) :to-equal #o600)
+            (expect (with-temp-buffer
+                      (insert-file-contents (expand-file-name "gpg-agent.conf" gnupg))
+                      (buffer-string))
+                    :to-match "\\`pinentry-program .*/\\.gnupg/pinentry\\.sh$"))
+        (remoto-keys--wipe-home home)))))
+
+(describe "the pinentry of a GnuPG home"
+  (it "answers with the passphrase and logs the requests without it"
+    (let* ((home (file-name-as-directory (make-temp-file "rk-home" t)))
+           (dir (remoto-keys--gnupg home)))
+      (unwind-protect
+          (with-temp-buffer
+            (insert "SETDESC Please enter\nGETPIN\nBYE\n")
+            (call-process-region (point-min) (point-max) (expand-file-name "pinentry.sh" dir)
+                                 t t)
+            (expect (buffer-string) :to-match (concat "^D " remoto-keys--passphrase "$"))
+            (expect (with-temp-buffer
+                      (insert-file-contents (expand-file-name "pinentry.log" dir))
+                      (buffer-string))
+                    :to-equal "SETDESC Please enter\nGETPIN\n"))
+        (delete-directory home t)))))
 
 (describe "remoto-keys--learn-logins"
   :var (answers)
@@ -479,10 +594,20 @@
               :to-equal '("none" "cbbad" "lit" "cbtoken" "mock" "instances"
                           "boot-cb-forgejo-docs" "boot-cb-forgejo-docs-README-md"
                           "boot-cb-forgejo-forgejo-14989" "boot-gh-agzam-remoto-el"
-                          "boot-gh-agzam-remoto-el-README-org" "boot-gh-agzam-remoto-el-51"))
+                          "boot-gh-agzam-remoto-el-README-org" "boot-gh-agzam-remoto-el-51"
+                          "first-vanilla" "first-evil" "first-full"
+                          "store-new" "store-loopback" "store-nogpg" "store-readonly"
+                          "store-symmetric" "store-plain" "mistyped" "revoked" "option-stale"
+                          "existing-ghub" "existing-forge" "existing-netrc"
+                          "accounts-gitconfig" "accounts" "codeberg-login"
+                          "dired-ret" "option-none" "entry-points"
+                          "login-vanilla" "login-fido" "login-vertico" "login-orderless"
+                          "login-evil" "login-embark" "login-ido" "login-evil-vertico"
+                          "login-full"))
       (dolist (scenario scenarios)
         (dolist (step (cddr scenario))
-          (expect (memq (car step) '(case step probe fault)) :to-be-truthy)))
+          (expect (memq (car step) '(case step probe fault check restart visit spend))
+                  :to-be-truthy)))
       (expect (seq-filter (lambda (scenario) (plist-get (cadr scenario) :token)) scenarios)
               :to-equal (list (assoc "lit" scenarios)))
       (expect (seq-filter (lambda (scenario) (plist-get (cadr scenario) :codeberg)) scenarios)

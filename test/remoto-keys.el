@@ -45,6 +45,12 @@
 (defconst remoto-keys--codeberg-token (getenv "REMOTO_E2E_CODEBERG_TOKEN")
   "A Codeberg token for the scenario that signs in to Codeberg, or nil.")
 
+(defconst remoto-keys--gpg (executable-find "gpg")
+  "The gpg that makes the scenarios' GnuPG homes, or nil without one.")
+
+(defconst remoto-keys--passphrase "e2e-passphrase"
+  "The passphrase of the scenarios' GnuPG homes, which their pinentry gives.")
+
 (defvar remoto-keys--github-login nil
   "The GitHub account of `remoto-keys--token', as GitHub names it.")
 
@@ -339,17 +345,36 @@ The dependencies come from the .elpa of the checkout, linked in."
                 "^ghub password " remoto-keys--codeberg-token "\n")))
     file))
 
+(defun remoto-keys--path-without-gpg (path)
+  "Return PATH, a search path, without the directories that hold gpg or gpg2."
+  (string-join (seq-remove (lambda (dir)
+                             (or (file-executable-p (expand-file-name "gpg" dir))
+                                 (file-executable-p (expand-file-name "gpg2" dir))))
+                           (split-string path path-separator t))
+               path-separator))
+
 (defun remoto-keys--env (name profile elpa &optional setup)
   "Return the whole environment of the profile NAME: PROFILE, remoto from ELPA.
 SETUP is the plist of a scenario of `remoto-keys--scenarios'.  Git config
 never comes from the person running it: it names the account of a token
 the profile gets, since ghub uses no token without one."
   (let ((github (and remoto-keys--token (or (null setup) (plist-get setup :token))))
-        (codeberg (and (plist-get setup :codeberg) remoto-keys--codeberg-login)))
+        (codeberg (and (plist-get setup :codeberg) remoto-keys--codeberg-login))
+        (home (plist-get setup :home)))
     (append
      ;; An empty TMPDIR would put temporary files in the current, remoto, directory.
-     (seq-keep (lambda (var) (when-let* ((value (getenv var))) (concat var "=" value)))
+     (seq-keep (lambda (var)
+                 (when-let* ((value (pcase var
+                                      ((and "HOME" (guard (stringp home))) home)
+                                      ((and "PATH" (guard (plist-get setup :no-gpg)))
+                                       (remoto-keys--path-without-gpg (getenv "PATH")))
+                                      (_ (getenv var)))))
+                   (concat var "=" value)))
                '("HOME" "USER" "LOGNAME" "SHELL" "TMPDIR" "PATH"))
+     (when (stringp home)
+       (list "REMOTO_KEYS_DEFAULT_AUTH=1"))
+     (when (and (plist-get setup :gnupg) remoto-keys--gpg)
+       (list (concat "REMOTO_KEYS_GPG=" remoto-keys--gpg)))
      (list (concat "LANG=" (or (getenv "LANG") "en_US.UTF-8"))
            ;; A screen TERM keeps Emacs from querying the terminal at startup.
            "TERM=screen-256color"
@@ -481,9 +506,9 @@ macOS refuses connections past the server's backlog of five."
 
 (defun remoto-keys--steps (parts profile)
   "Return what typing PARTS of a case under PROFILE takes.
-A step is (text STRING), (key NAME) for tmux, or (pause).  A string part
-may hold keys: `kbd' gives one when all are characters.  Pending input
-cancels remoto's fetch, so a pause precedes Embark and keys after a submit."
+A step is (text STRING), (key NAME) for tmux, (paste TOKEN) or (pause).
+A string part may hold keys: `kbd' gives one when all are characters.
+Pending input cancels a fetch, so Embark and keys after a submit wait."
   (let (steps)
     (while parts
       (let ((part (pop parts)))
@@ -494,8 +519,12 @@ cancels remoto's fetch, so a pause precedes Embark and keys after a submit."
                    (when (and parts (not (eq (car parts) 'pause)))
                      (push 'pause parts)))
           ('goto (setq part [f12])))
-        (if (eq part 'pause)
-            (push '(pause) steps)
+        (cond
+         ((eq part 'pause)
+          (push '(pause) steps))
+         ((memq part '(token padded-token codeberg-token))
+          (push `(paste ,part) steps))
+         (t
           (let (text)
             (seq-doseq (event part)
               (if (remoto-keys--plain-p event)
@@ -505,13 +534,14 @@ cancels remoto's fetch, so a pause precedes Embark and keys after a submit."
                   (setq text nil))
                 (push `(key ,(remoto-keys--tmux-key event)) steps)))
             (when text
-              (push `(text ,(concat (nreverse text))) steps))))))
+              (push `(text ,(concat (nreverse text))) steps)))))))
     (nreverse steps)))
 
 (defun remoto-keys--type (name script)
   "Type SCRIPT, from `remoto-keys--steps', into the profile NAME."
   (dolist (step script)
     (pcase step
+      (`(paste ,which) (remoto-keys--paste name which))
       (`(text ,text) (remoto-keys--tmux "send-keys" "-t" (remoto-keys--target name)
                                         "-l" "--" text))
       (`(key ,key) (remoto-keys--tmux "send-keys" "-t" (remoto-keys--target name) key))
@@ -536,10 +566,10 @@ Return a plist of the label, seconds, a note, the line and the state."
       (remoto-keys--type name (remoto-keys--steps parts profile))
       (let* ((note (remoto-keys--wait-idle name remoto-keys--case-seconds))
              (seconds (round (- (float-time) start)))
-             (state (remoto-keys--eval name '(remoto-keys-state)))
+             (state (remoto-keys--redact (remoto-keys--eval name '(remoto-keys-state))))
              (dead (remoto-keys--dead-urls state)))
         (list :label label :seconds seconds :note note
-              :line (remoto-keys--eval name '(remoto-keys-line))
+              :line (remoto-keys--redact (remoto-keys--eval name '(remoto-keys-line)))
               :state (if dead (append state (list :dead dead)) state))))))
 
 (defun remoto-keys--run-safely (name case profile elpa)
@@ -912,6 +942,171 @@ An error answers 502, since one that left a filter would end the batch run."
                         :coding 'binary :noquery t
                         :filter #'remoto-keys--mock-filter))
 
+;;; Homes
+
+(defun remoto-keys--with-token (text)
+  "Return TEXT with %TOKEN% replaced by GitHub's token, or nil for no TEXT."
+  (and text (string-replace "%TOKEN%" (or remoto-keys--token "") text)))
+
+(defun remoto-keys--gnupg (home)
+  "Make ~/.gnupg in HOME, whose agent asks a pinentry that opens no window.
+The pinentry answers with `remoto-keys--passphrase' and logs each request
+but the passphrase to ~/.gnupg/pinentry.log.  Return the directory."
+  (let* ((dir (expand-file-name ".gnupg" home))
+         (pinentry (expand-file-name "pinentry.sh" dir))
+         (log (shell-quote-argument (expand-file-name "pinentry.log" dir))))
+    (make-directory dir t)
+    (set-file-modes dir #o700)
+    (with-temp-file pinentry
+      (insert "#!/bin/sh\necho 'OK Pleased to meet you'\n"
+              "while IFS= read -r line; do\n  case $line in\n"
+              "    SETDESC*|SETPROMPT*|SETREPEAT*|GETPIN*|CONFIRM*) printf '%s\\n' \"$line\" >> " log ";;\n"
+              "  esac\n  case $line in\n"
+              "    GETPIN*) echo 'D " remoto-keys--passphrase "'; echo OK;;\n"
+              "    BYE*) echo 'OK closing connection'; exit 0;;\n"
+              "    *) echo OK;;\n  esac\ndone\n"))
+    (set-file-modes pinentry #o700)
+    (with-temp-file (expand-file-name "gpg-agent.conf" dir)
+      (insert "pinentry-program " pinentry "\nallow-loopback-pinentry\n"))
+    dir))
+
+(defun remoto-keys--gpg-call (dir &rest args)
+  "Run gpg on the GnuPG home DIR with ARGS, no prompt, and return its output."
+  (apply #'remoto-keys--sh remoto-keys--gpg "--homedir" dir "--batch" "--yes"
+         "--pinentry-mode" "loopback" args))
+
+(defun remoto-keys--encrypt (dir rows file how)
+  "Write ROWS to FILE encrypted by the GnuPG home DIR, HOW being key or symmetric.
+The rows pass through a file only the run can read, deleted at once."
+  (let ((plain (with-file-modes #o600 (make-temp-file "rk-rows-"))))
+    (unwind-protect
+        (progn
+          (with-temp-file plain (insert rows))
+          (if (eq how 'symmetric)
+              (remoto-keys--gpg-call dir "--passphrase" remoto-keys--passphrase
+                                     "-c" "-o" file plain)
+            (remoto-keys--gpg-call dir "--trust-model" "always"
+                                   "-e" "-r" "e2e@remoto.invalid" "-o" file plain)))
+      (delete-file plain))
+    (set-file-modes file #o600)))
+
+(defun remoto-keys--make-home (setup)
+  "Make a HOME for a scenario of SETUP, with no file of the person running it.
+:gnupg makes ~/.gnupg empty, with a key, or for a ~/.authinfo.gpg of the
+:authinfo-gpg rows encrypted to that key, symmetrically, or to a key the
+home lacks; :netrc writes ~/.netrc.  Short, under /tmp, for gpg's sockets."
+  (let* ((home (file-name-as-directory (make-temp-file "/tmp/rk-home-" t)))
+         (gnupg (plist-get setup :gnupg))
+         (rows (remoto-keys--with-token (plist-get setup :authinfo-gpg)))
+         (file (expand-file-name ".authinfo.gpg" home)))
+    (when gnupg
+      (let ((dir (remoto-keys--gnupg home)))
+        (when (memq gnupg '(key otherkey))
+          (let ((keys (if (eq gnupg 'key) dir (make-temp-file "/tmp/rk-keys-" t))))
+            (remoto-keys--gpg-call keys "--passphrase" "" "--quick-gen-key"
+                                   "remoto e2e <e2e@remoto.invalid>" "default" "default" "never")
+            (when rows
+              (remoto-keys--encrypt keys rows file 'key))
+            (unless (eq gnupg 'key)
+              (ignore-errors (call-process "gpgconf" nil nil nil "--homedir" keys "--kill" "all"))
+              (delete-directory keys t))))
+        (when (and rows (eq gnupg 'symmetric))
+          (remoto-keys--encrypt dir rows file 'symmetric))))
+    (when-let* ((mode (plist-get setup :authinfo-mode)))
+      (set-file-modes file mode))
+    (when-let* ((netrc (remoto-keys--with-token (plist-get setup :netrc))))
+      (with-file-modes #o600
+        (with-temp-file (expand-file-name ".netrc" home) (insert netrc))))
+    home))
+
+(defun remoto-keys--wipe-home (home)
+  "Stop the gpg-agent of HOME and delete HOME, with the tokens it may hold."
+  (ignore-errors (call-process "gpgconf" nil nil nil "--homedir"
+                               (expand-file-name ".gnupg" home) "--kill" "all"))
+  (ignore-errors (delete-directory home t)))
+
+(defun remoto-keys--anonymous-left ()
+  "Return GitHub's core requests left for this IP without a token, and their reset."
+  (let-alist (remoto-keys--json "https://api.github.com/rate_limit" nil)
+    (and (numberp .resources.core.remaining)
+         (cons .resources.core.remaining .resources.core.reset))))
+
+(defun remoto-keys--spend-anonymous ()
+  "Spend what is left of GitHub's hourly requests without a token, from this IP.
+GitHub's count lags between its servers, so it asks until three answers in
+a row refuse.  Every read without a token then fails with GitHub's rate
+limit until the reset, which is printed."
+  (let ((spent 0) (refused 0))
+    (while (and (< refused 3) (< spent 150))
+      (pcase-let ((`(,exit . ,status)
+                   (remoto-keys--curl "https://api.github.com/repos/agzam/remoto.el" nil
+                                      "-o" "/dev/null" "-w" "%{http_code}")))
+        (cl-incf spent)
+        (setq refused (if (and (eql exit 0) (equal (string-trim status) "403")) (1+ refused) 0))))
+    (princ (format "  [spent %d of GitHub's requests without a token; such reads fail until %s]\n"
+                   spent (if-let* ((left (remoto-keys--anonymous-left)))
+                             (format-time-string "%H:%M" (cdr left))
+                           "?")))))
+
+(defun remoto-keys--paste (name which)
+  "Paste the token WHICH names into the profile NAME, as a terminal pastes text.
+It goes through a file only the run can read and a tmux buffer, both
+deleted at once, so no command line, trace or result holds it."
+  (let ((token (pcase which
+                 ('token remoto-keys--token)
+                 ('padded-token (concat "  " remoto-keys--token "  \n"))
+                 ('codeberg-token remoto-keys--codeberg-token)))
+        (file (with-file-modes #o600 (make-temp-file "rk-paste-"))))
+    (unwind-protect
+        (progn
+          (with-temp-file file (insert token))
+          (remoto-keys--tmux "load-buffer" "-b" "rk-paste" file)
+          (remoto-keys--tmux "paste-buffer" "-p" "-d" "-b" "rk-paste"
+                             "-t" (remoto-keys--target name)))
+      (delete-file file))))
+
+(defun remoto-keys--visit (name file)
+  "Visit FILE in the Emacs of NAME as `emacsclient -n FILE' does: from a process filter."
+  (call-process (or (executable-find "emacsclient")
+                    (expand-file-name "emacsclient" invocation-directory))
+                nil nil nil "-s" (expand-file-name name (expand-file-name "sock/" remoto-keys--dir))
+                "-n" file)
+  (remoto-keys--wait-idle name 30))
+
+(defun remoto-keys--redact (object)
+  "Return OBJECT with the run's tokens replaced by <token> in every string.
+A token pasted into a terminal Emacs lands in its kill ring, so a state,
+a probe or a check can hold one."
+  (let ((tokens (delq nil (list remoto-keys--token remoto-keys--codeberg-token))))
+    (cl-labels ((walk (x)
+                  (cond ((stringp x)
+                         (seq-reduce (lambda (s token) (string-replace token "<token>" s)) tokens x))
+                        ((consp x) (cons (walk (car x)) (walk (cdr x))))
+                        ((vectorp x) (apply #'vector (mapcar #'walk x)))
+                        (t x))))
+      (walk object))))
+
+(defun remoto-keys--check-value (value expected)
+  "Non-nil when VALUE meets EXPECTED: a regexp it matches when a string, else equal."
+  (if (stringp expected)
+      (and (stringp value) (string-match-p expected value) t)
+    (equal value expected)))
+
+(defun remoto-keys--check-step (name label form expected)
+  "Print LABEL with whether FORM's value in the Emacs of NAME meets EXPECTED.
+Return non-nil when it does."
+  (let* ((value (remoto-keys--redact
+                 (condition-case err
+                     (remoto-keys--eval name form)
+                   (error (list 'error (error-message-string err))))))
+         (pass (remoto-keys--check-value value expected)))
+    (princ (format "%s %s | %s%s\n" (if pass "PASS" "FAIL") name label
+                   (if pass ""
+                     (format ": got %s, want %s"
+                             (truncate-string-to-width (prin1-to-string value) 300)
+                             (prin1-to-string expected)))))
+    pass))
+
 ;;; Scenarios
 
 (defun remoto-keys--ff (name)
@@ -925,6 +1120,309 @@ then shows the forges and the warnings."
   `((,(if continue 'step 'case) ,(format "setopt %S" instances)
      ,(kbd "M-:") ,(format "(setopt remoto-forgejo-instances '%S)" instances) ,(kbd "RET"))
     (probe "forges" (remoto-keys-forges))))
+
+;;; Logins
+
+(defconst remoto-keys--kept-rows
+  "machine example.org login someone password kept\nmachine imap.example.org login someone port 993 password e2e-imap\n"
+  "Rows of other hosts in a ~/.authinfo.gpg, which a login must keep.")
+
+(defconst remoto-keys--hint
+  "\\`Remoto: no GitHub token, 60 requests/hour\\. M-x remoto-login\\'"
+  "What the first remoto buffer of a session without a token says.")
+
+(defconst remoto-keys--limit-prompt
+  "\\`GitHub rate limited until [0-9]+:[0-9]+\\. Log in now\\? (y or n) \\'"
+  "The question a command meets when GitHub limits reads without a token.")
+
+(defconst remoto-keys--limit-message
+  "\\`Remoto: GitHub rate limited until [0-9]+:[0-9]+\\. M-x remoto-login\\'"
+  "What remoto says of GitHub's limit when it may not ask.")
+
+(defconst remoto-keys--refused-prompt
+  "\\`GitHub refused the token\\. Log in again\\? (y or n) \\'"
+  "The question a command meets when GitHub refuses the token.")
+
+(defconst remoto-keys--token-page
+  "\\`https://github\\.com/settings/tokens/new\\?scopes=repo,read:org&description=remoto\\'"
+  "GitHub's page for a new classic token, its scopes ticked.")
+
+(defun remoto-keys--open (profile name)
+  "Return the parts that open NAME under PROFILE: its ex command under Evil alone."
+  (if (equal profile "evil")
+      `(,(kbd ": e SPC") ,name ,(kbd "RET"))
+    `(,(kbd "C-x C-f") ,name submit)))
+
+(defun remoto-keys--logged-in (forge)
+  "Return the check that FORGE's login message names the token's account."
+  `(check "says who logged in"
+          (remoto-keys-message-count
+           ,(format "^Remoto: logged in to %s as %s$" forge
+                    (if (equal forge "GitHub") remoto-keys--github-login
+                      remoto-keys--codeberg-login)))
+          1))
+
+(defun remoto-keys--rows (host login &optional others)
+  "Return the check of ~/.authinfo.gpg: LOGIN's remoto row for HOST first.
+OTHERS are the rows after it, the kept rows by default; the mode is 600."
+  `(check "remoto's row first, the others kept, mode 600" (remoto-keys-authinfo)
+          (:mode "600"
+                 :rows (,(format "machine %s login %s^remoto password <login>" host login)
+                        ,@(split-string (or others remoto-keys--kept-rows) "\n" t)))))
+
+(defun remoto-keys--login-steps (&optional token)
+  "Return what logging in to GitHub with `remoto-login' takes; TOKEN is a paste part."
+  `((case "M-x remoto-login" ,(kbd "M-x") "remoto-login" ,(kbd "RET"))
+    (check "offers GitHub first" (remoto-keys-prompt) "\\`Remoto: log in to (default GitHub): \\'")
+    (step "RET for GitHub" ,(kbd "RET"))
+    (check "opens GitHub's token page" (car remoto-keys--browsed) ,remoto-keys--token-page)
+    (check "asks for the token" (remoto-keys-prompt) "\\`GitHub token: \\'")
+    (step "paste the token" ,(or token 'token) ,(kbd "RET"))))
+
+(defun remoto-keys--first-contact (profile)
+  "Return the scenario of a new user's first names under PROFILE, no token anywhere."
+  (let ((open (lambda (name) (remoto-keys--open profile name))))
+    `(,(concat "first-" profile) (:profile ,profile :home t :gitconfig "")
+      (case "open a public repository" ,@(funcall open "/gh:agzam/remoto.el"))
+      (check "it opens" (remoto-keys-directory) "\\`/github:agzam/remoto\\.el@main:/\\'")
+      (check "the hint shows" (current-message) ,remoto-keys--hint)
+      ;; Vertico and Marginalia would annotate the files of the repository at a
+      ;; request each, which the hourly budget without a token cannot pay.
+      ,@(unless (member profile '("vertico" "orderless" "embark" "evil-vertico" "full"))
+          `((case "open a file of it" ,@(funcall open "/gh:agzam/remoto.el/README.org"))
+            (check "the hint shows once a session" (remoto-keys-message-count "no GitHub token") 1)))
+      (case "open a repository that does not exist"
+            ,@(funcall open "/gh:agzam/no-such-repo-zz9q"))
+      (check "says not found or private"
+             (current-message)
+             "\\`Remoto: agzam/no-such-repo-zz9q not found or private\\. M-x remoto-login\\'")
+      (case "open /gh:" ,@(funcall open "/gh:"))
+      (check "asks to log in" (remoto-keys-prompt) "needs a GitHub token\\. Log in now\\? (y or n) \\'")
+      (step "n" "n")
+      (check "n says how to log in" (current-message) "needs a GitHub token\\. M-x remoto-login\\'")
+      (check "no request carried a token" (remoto-keys-tokenless-p "api.github.com") t)
+      (check "url.el stored no password" (bound-and-true-p url-http-real-basic-auth-storage) nil))))
+
+(defun remoto-keys--login-flow (profile)
+  "Return the scenario of a new user's login under PROFILE, GitHub's limit run out.
+It needs the run to spend GitHub's requests without a token, so it runs
+only by name."
+  (let ((open (remoto-keys--open profile "/gh:agzam/remoto.el"))
+        (user remoto-keys--github-login))
+    `(,(concat "login-" profile)
+      (:profile ,profile :home t :limited t :paste t :gitconfig "" :gnupg key
+                :authinfo-gpg ,remoto-keys--kept-rows)
+      (case "open, rate limited" ,@open)
+      (check "asks to log in, saying until when" (remoto-keys-prompt) ,remoto-keys--limit-prompt)
+      (step "n" "n")
+      (check "n says until when and how to log in" (current-message) ,remoto-keys--limit-message)
+      (case "open again" ,@open)
+      (check "asks no more this session" (remoto-keys-prompt) nil)
+      (restart)
+      (case "open in a new session" ,@open)
+      (check "a new session asks again" (remoto-keys-prompt) ,remoto-keys--limit-prompt)
+      (step "C-g at the question" ,(kbd "C-g"))
+      (check "C-g leaves no question" (remoto-keys-prompt) nil)
+      (case "open after C-g" ,@open)
+      (check "C-g declined nothing" (remoto-keys-prompt) ,remoto-keys--limit-prompt)
+      (step "y" "y")
+      (check "opens GitHub's token page" (car remoto-keys--browsed) ,remoto-keys--token-page)
+      (check "asks for the token" (remoto-keys-prompt) "\\`GitHub token: \\'")
+      (step "paste the token" token ,(kbd "RET"))
+      ,(remoto-keys--logged-in "GitHub")
+      (check "the command finishes" (remoto-keys-directory) "\\`/github:agzam/remoto\\.el@main:/\\'")
+      ,(remoto-keys--rows "github.com" user)
+      (restart)
+      (case "open in the next session" ,@open)
+      (check "no question" (remoto-keys-prompt) nil)
+      (check "no hint" (remoto-keys-message-count "no GitHub token") 0)
+      (check "the next session sends the token" (remoto-keys-tokened-p "api.github.com") t))))
+
+(defun remoto-keys--login-scenarios ()
+  "Return the scenarios of remoto-login: a new user, the store, the questions.
+The ones that spend GitHub's requests without a token run only by name."
+  (let* ((user remoto-keys--github-login)
+         (ff (lambda (name) (remoto-keys--ff name)))
+         (stored (remoto-keys--rows "github.com" user))
+         (opens '(check "the command finishes" (remoto-keys-directory)
+                        "\\`/github:agzam/remoto\\.el@main:/\\'"))
+         (no-question '(check "no question" (remoto-keys-prompt) nil))
+         (existing (lambda (name setup)
+                     `(,name (:home t :paste t ,@setup)
+                             ,(funcall ff "/gh:agzam/remoto.el")
+                             ,no-question ,opens
+                             (check "no hint" (remoto-keys-message-count "no GitHub token") 0)
+                             (check "every GitHub request sends the token"
+                                    (remoto-keys-tokened-p "api.github.com") t)))))
+    `(,@(mapcar #'remoto-keys--first-contact '("vanilla" "evil" "full"))
+      ;; The first store: no ~/.authinfo.gpg yet.
+      ("store-new" (:home t :paste t :gitconfig "" :gnupg empty)
+       ,@(remoto-keys--login-steps)
+       (check "no key list for a new file" (and (get-buffer-window "*Keys*") t) nil)
+       (probe "screen" (remoto-keys-window-buffer))
+       (step "C-c C-c in the key list: no key, symmetric" ,(kbd "C-c C-c"))
+       (probe "pinentry" (remoto-keys-pinentry))
+       ,(remoto-keys--logged-in "GitHub")
+       ,(remoto-keys--rows "github.com" user ""))
+      ("store-loopback" (:home t :paste t :gitconfig "" :gnupg empty
+                               :init (setq epg-pinentry-mode 'loopback))
+       ,@(remoto-keys--login-steps)
+       (check "no key list for a new file" (and (get-buffer-window "*Keys*") t) nil)
+       (step "C-c C-c in the key list: no key, symmetric" ,(kbd "C-c C-c"))
+       (probe "prompt" (remoto-keys-prompt))
+       (step "the passphrase" ,remoto-keys--passphrase ,(kbd "RET"))
+       (probe "prompt" (remoto-keys-prompt))
+       (step "the passphrase again" ,remoto-keys--passphrase ,(kbd "RET"))
+       (check "the agent's pinentry was not asked" (remoto-keys-pinentry) nil)
+       ,(remoto-keys--logged-in "GitHub")
+       ,(remoto-keys--rows "github.com" user ""))
+      ("store-nogpg" (:home t :paste t :gitconfig "" :no-gpg t)
+       ,@(remoto-keys--login-steps)
+       (probe "messages" (with-current-buffer (messages-buffer)
+                           (buffer-substring-no-properties
+                            (max (point-min) (- (point-max) 400)) (point-max))))
+       (check "a failed store keeps the token for the session" (remoto-keys-github-token-p) t))
+      ("store-readonly" (:home t :paste t :gitconfig "" :gnupg key
+                               :authinfo-gpg ,remoto-keys--kept-rows :authinfo-mode #o400)
+       ,@(remoto-keys--login-steps)
+       (probe "message" (current-message))
+       (check "a failed store keeps the token for the session" (remoto-keys-github-token-p) t)
+       (check "the file stays as it was" (plist-get (remoto-keys-authinfo) :rows)
+              ,(split-string remoto-keys--kept-rows "\n" t)))
+      ("store-symmetric" (:home t :paste t :gitconfig "" :gnupg symmetric
+                                :authinfo-gpg ,remoto-keys--kept-rows)
+       ,@(remoto-keys--login-steps)
+       (probe "pinentry" (remoto-keys-pinentry))
+       ,(remoto-keys--logged-in "GitHub")
+       ,stored)
+      ("store-plain" (:home t :paste t :gitconfig ""
+                            :init (setq auth-sources (list "~/.authinfo")))
+       ,@(remoto-keys--login-steps)
+       (check "logs in for the session" (remoto-keys-message-count
+                                         ,(format "^Remoto: logged in to GitHub as %s for this session$"
+                                                  user))
+              1)
+       (restart)
+       (check "the next session has no token" (progn (require 'remoto)
+                                                    (eq (remoto--auth remoto--github) 'none))
+              t))
+      ;; Tokens typed wrong, and tokens GitHub stopped taking.
+      ("mistyped" (:home t :paste t :gitconfig "" :gnupg key :authinfo-gpg ,remoto-keys--kept-rows)
+       (case "M-x remoto-login, a mistyped token" ,(kbd "M-x") "remoto-login" ,(kbd "RET")
+             ,(kbd "RET") "ghp_e2eMistyped000000000000000000000000000" ,(kbd "RET"))
+       (check "says GitHub refused it" (current-message) "\\`Remoto: GitHub refused the token\\'")
+       (check "url.el asked no password" (bound-and-true-p url-http-real-basic-auth-storage) nil)
+       (check "no login" (remoto-keys-github-token-p) nil)
+       (case "M-x remoto-login, nothing typed" ,(kbd "M-x") "remoto-login" ,(kbd "RET")
+             ,(kbd "RET") ,(kbd "RET"))
+       (check "says no token was given" (current-message) "\\`Remoto: no token given\\'")
+       (case "M-x remoto-login, a pasted token with spaces and a newline" ,(kbd "M-x")
+             "remoto-login" ,(kbd "RET") ,(kbd "RET") padded-token ,(kbd "RET"))
+       ,(remoto-keys--logged-in "GitHub")
+       ,stored)
+      ("revoked" (:home t :paste t :gitconfig "" :gnupg key
+                         :authinfo-gpg ,(concat "machine github.com login " user
+                                                "^remoto password ghp_e2eRevoked00000000000000000000000000\n"
+                                                "machine github.com login " user "^forge password e2e-forge\n"
+                                                remoto-keys--kept-rows))
+       ,(funcall ff "/gh:agzam/remoto.el")
+       (check "asks to log in again" (remoto-keys-prompt) ,remoto-keys--refused-prompt)
+       (step "y" "y")
+       (step "paste the token" token ,(kbd "RET"))
+       ,opens
+       ,(remoto-keys--rows "github.com" user
+                           (concat "machine github.com login " user "^forge password e2e-forge\n"
+                                   remoto-keys--kept-rows)))
+      ("option-stale" (:home t :paste t :gitconfig "" :gnupg key :authinfo-gpg ,remoto-keys--kept-rows
+                             :init (setq remoto-github-auth "ghp_e2eStale0000000000000000000000000000"))
+       ,(funcall ff "/gh:agzam/remoto.el")
+       (check "asks to log in again" (remoto-keys-prompt) ,remoto-keys--refused-prompt)
+       (step "y" "y")
+       (step "paste the token" token ,(kbd "RET"))
+       ,opens
+       (restart)
+       ,(funcall ff "/gh:agzam/remoto.el")
+       (check "the stored token serves the next session" (remoto-keys-prompt) nil))
+      ;; Setups from before remoto-login: none needs git config any more.
+      ,(funcall existing "existing-ghub"
+                `(:gitconfig ,(format "[github]\n\tuser = %s\n" user) :gnupg key
+                             :authinfo-gpg ,(format "machine api.github.com login %s^ghub password %%TOKEN%%\n" user)))
+      ,(funcall existing "existing-forge"
+                `(:gitconfig "" :gnupg key
+                             :authinfo-gpg ,(format "machine api.github.com login %s^forge password %%TOKEN%%\n" user)))
+      ,(funcall existing "existing-netrc"
+                `(:gitconfig "" :netrc ,(format "machine github.com login %s password %%TOKEN%%\n" user)))
+      ,(funcall existing "accounts-gitconfig"
+                `(:gitconfig ,(format "[github]\n\tuser = %s\n" user) :gnupg key
+                             :authinfo-gpg ,(format "machine api.github.com login other^ghub password ghp_e2eOther0000000000000000000000000000\nmachine api.github.com login %s^ghub password %%TOKEN%%\n" user)))
+      ("accounts" (:home t :paste t :gitconfig "" :gnupg key
+                          :authinfo-gpg ,(format "machine api.github.com login other^ghub password ghp_e2eOther0000000000000000000000000000\nmachine api.github.com login %s^ghub password %%TOKEN%%\n" user))
+       ,(funcall ff "/gh:agzam/remoto.el")
+       (probe "prompt" (remoto-keys-prompt))
+       (probe "logins" (remoto-keys-logins)))
+      ("codeberg-login" (:home t :codeberg-paste t :gitconfig "" :gnupg key
+                                :authinfo-gpg ,remoto-keys--kept-rows)
+       ,(funcall ff "/cb:forgejo/docs")
+       (check "no hint for Codeberg" (remoto-keys-message-count "no Codeberg token") 0)
+       ,(funcall ff "/cb:")
+       (check "asks to log in" (remoto-keys-prompt) "needs a Codeberg token\\. Log in now\\? (y or n) \\'")
+       (step "y" "y")
+       (check "opens Codeberg's applications page" (car remoto-keys--browsed)
+              "\\`https://codeberg\\.org/user/settings/applications\\'")
+       (check "names the permissions to tick" (remoto-keys-prompt)
+              "\\`Codeberg token (Read: repository, issue, organization, user): \\'")
+       (step "paste the token" codeberg-token ,(kbd "RET"))
+       ,(remoto-keys--logged-in "Codeberg")
+       (check "lists the account and its organizations" (remoto-keys-directory) "\\`/codeberg:")
+       ,(remoto-keys--rows "codeberg.org" remoto-keys--codeberg-login)
+       (check "GitHub got no request" (car (remoto-keys-token-share "api.github.com")) 0))
+      ;; From here GitHub's requests without a token are spent.
+      ("dired-ret" (:home t :spends t :gitconfig "")
+       ,(funcall ff "/gh:agzam/remoto.el")
+       ,opens
+       (spend)
+       (step "RET on README.org" ,(kbd "M-:")
+             "(dired-goto-file \"/github:agzam/remoto.el@main:/README.org\")" ,(kbd "RET")
+             ,(kbd "RET"))
+       (check "RET on a file asks" (remoto-keys-prompt) ,remoto-keys--limit-prompt)
+       (step "n" "n")
+       (check "n says until when" (current-message) ,remoto-keys--limit-message)
+       (step "RET on README.org again" ,(kbd "RET"))
+       (check "asks no more this session" (remoto-keys-prompt) nil))
+      ("option-none" (:home t :limited t :gitconfig "" :init (setq remoto-github-auth 'none))
+       ,(funcall ff "/gh:agzam/remoto.el")
+       (check "asks nothing" (remoto-keys-prompt) nil)
+       (check "says until when" (current-message) "\\`Remoto: GitHub rate limited until [0-9]+:[0-9]+")
+       (check "no hint" (remoto-keys-message-count "no GitHub token") 0))
+      ("entry-points" (:home t :limited t :gitconfig ""
+                              :init (progn (require 'bookmark)
+                                           (bookmark-store "rk-readme"
+                                                           '((filename . "/gh:agzam/remoto.el/README.org"))
+                                                           nil)))
+       ,@(mapcan
+          (lambda (entry)
+            `((case ,(car entry) ,@(cdr entry))
+              (check ,(concat (car entry) " asks") (remoto-keys-prompt) ,remoto-keys--limit-prompt)
+              (step "C-g" ,(kbd "C-g"))))
+          `(("C-x d" ,(kbd "C-x d") "/gh:agzam/remoto.el" submit)
+            ("C-x 4 f" ,(kbd "C-x 4 f") "/gh:agzam/remoto.el/README.org" submit)
+            ("M-x remoto-browse" ,(kbd "M-x") "remoto-browse" ,(kbd "RET") "agzam/remoto.el"
+             ,(kbd "RET"))
+            ("C-x r b of a bookmark" ,(kbd "C-x r b") "rk-readme" ,(kbd "RET"))
+            ("an org link" ,(kbd "M-:")
+             "(progn (require 'org) (org-link-open-from-string \"[[file:/gh:agzam/remoto.el/README.org]]\"))"
+             ,(kbd "RET"))))
+       (case "TAB in the file prompt" ,(kbd "C-x C-f") "/gh:agzam/rem" pause ,(kbd "TAB"))
+       (check "TAB asks nothing" (string-match-p "Log in" (or (remoto-keys-prompt) "")) nil)
+       (case "a timer opens a file" ,(kbd "M-:")
+             "(run-at-time 0 nil #'find-file \"/gh:agzam/remoto.el/README.org\")" ,(kbd "RET"))
+       (check "a timer asks nothing" (remoto-keys-prompt) nil)
+       (visit "/gh:agzam/remoto.el/README.org")
+       (check "emacsclient asks nothing" (remoto-keys-prompt) nil)
+       (probe "messages" (with-current-buffer (messages-buffer)
+                           (buffer-substring-no-properties
+                            (max (point-min) (- (point-max) 600)) (point-max)))))
+      ,@(mapcar #'remoto-keys--login-flow remoto-e2e-live-profiles))))
 
 (defun remoto-keys--scenarios (port)
   "Return the scenarios that run with the mock Forgejo on PORT.
@@ -1019,30 +1517,39 @@ Each is (NAME SETUP . STEPS).  SETUP has :gitconfig and :authinfo texts, an
                     (probe "loaded" (remoto-keys-loaded))))
                 '("/cb:forgejo/docs" "/cb:forgejo/docs/README.md" "/cb:forgejo/forgejo#14989"
                   "/gh:agzam/remoto.el" "/gh:agzam/remoto.el/README.org"
-                  "/gh:agzam/remoto.el#51")))))
+                  "/gh:agzam/remoto.el#51"))
+      ,@(remoto-keys--login-scenarios))))
 
 (defun remoto-keys--probe (name label form)
   "Print LABEL and the value of FORM in the profile NAME, or its error."
   (princ (format "  %s=%s\n" label
                  (truncate-string-to-width
-                  (condition-case err (prin1-to-string (remoto-keys--eval name form))
+                  (condition-case err
+                      (prin1-to-string (remoto-keys--redact (remoto-keys--eval name form)))
                     (error (format "error: %s" (error-message-string err))))
                   400))))
 
 (defun remoto-keys--skip (setup)
   "Return why a scenario of SETUP cannot run, or nil."
-  (cond ((and (plist-get setup :token) (not remoto-keys--token))
+  (cond ((and (or (plist-get setup :token) (plist-get setup :paste)) (not remoto-keys--token))
          "needs REMOTO_E2E_TOKEN")
-        ((and (plist-get setup :codeberg) (not remoto-keys--codeberg-token))
-         "needs REMOTO_E2E_CODEBERG_TOKEN")))
+        ((and (or (plist-get setup :codeberg) (plist-get setup :codeberg-paste))
+              (not remoto-keys--codeberg-token))
+         "needs REMOTO_E2E_CODEBERG_TOKEN")
+        ((and (plist-get setup :gnupg) (not remoto-keys--gpg))
+         "needs gpg")))
 
 (defun remoto-keys--scenario (scenario elpa)
-  "Run SCENARIO in a vanilla profile with remoto from ELPA.
-A (step ...) types where the last one ended, a (case ...) after a reset.
-Return a plist of the cases run and of those that failed a check.  A step
-that signals stops the scenario with a failure that says why."
+  "Run SCENARIO in its profile, vanilla by default, with remoto from ELPA.
+A (step ...) types where the last one ended, a (case ...) after a reset, a
+\(check LABEL FORM EXPECTED) tests FORM's value, a (restart) starts a new
+session, a (visit FILE) opens FILE through emacsclient, and a (spend) uses
+up GitHub's requests without a token.  Return a plist of the cases and
+checks run and of those that failed; a step that signals stops the
+scenario with a failure that says why."
   (pcase-let* ((`(,name ,setup . ,steps) scenario)
                (profile (concat "sc-" name))
+               (kind (or (plist-get setup :profile) "vanilla"))
                (cases 0) (failed 0) (results nil))
     (if-let* ((why (remoto-keys--skip setup)))
         (princ (format "=== %s: skip, %s\n" name why))
@@ -1050,14 +1557,31 @@ that signals stops the scenario with a failure that says why."
       (unwind-protect
           (condition-case err
               (progn
-                (princ (format "=== %s\nstart %s: %S\n" name profile
-                               (remoto-keys--start profile "vanilla" elpa setup)))
+                (princ (format "=== %s\n" name))
+                (when (plist-get setup :limited)
+                  (remoto-keys--spend-anonymous))
+                (when (plist-get setup :home)
+                  (setq setup (plist-put (copy-sequence setup) :home
+                                         (remoto-keys--make-home setup))))
+                (princ (format "start %s: %S\n" profile
+                               (remoto-keys--start profile kind elpa setup)))
                 (dolist (step steps)
                   (pcase step
                     (`(fault ,fault) (setq remoto-keys--fault fault))
                     (`(probe ,label ,form) (remoto-keys--probe profile label form))
+                    (`(check ,label ,form ,expected)
+                     (cl-incf cases)
+                     (unless (remoto-keys--check-step profile label form expected)
+                       (cl-incf failed)))
+                    ('(restart)
+                     (remoto-keys--stop profile)
+                     (princ (format "restart %s: %S\n" profile
+                                    (remoto-keys--start profile kind elpa setup))))
+                    (`(visit ,file) (remoto-keys--visit profile file))
+                    ('(spend) (remoto-keys--spend-anonymous))
                     (`(,(and kind (or 'case 'step)) ,label . ,parts)
-                     (let ((result (remoto-keys--run profile `(,label nil ,@parts) "vanilla"
+                     (let ((result (remoto-keys--run profile `(,label nil ,@parts)
+                                                     (or (plist-get setup :profile) "vanilla")
                                                      (eq kind 'step))))
                        (cl-incf cases)
                        (push result results)
@@ -1070,10 +1594,19 @@ that signals stops the scenario with a failure that says why."
              (princ (format "FAIL %s | stopped: %s\n" profile (error-message-string err)))))
         (setq remoto-keys--fault "none")
         (unless remoto-keys--keep
-          (remoto-keys--stop profile))
+          (remoto-keys--stop profile)
+          (when (stringp (plist-get setup :home))
+            (remoto-keys--wipe-home (plist-get setup :home))))
         (remoto-keys--write (expand-file-name (concat "results/" profile ".eld") remoto-keys--dir)
                             (reverse results))))
     (list :cases cases :failed failed)))
+
+(defun remoto-keys--chosen-p (scenario only)
+  "Return non-nil to run SCENARIO: ONLY names it, or ONLY is empty and it spends nothing.
+A scenario that spends GitHub's requests without a token runs only by name."
+  (if only
+      (member (car scenario) only)
+    (not (or (plist-get (cadr scenario) :limited) (plist-get (cadr scenario) :spends)))))
 
 (defun remoto-keys-scenarios-main ()
   "Run the scenarios of REMOTO_KEYS_SCENARIOS, all by default, and exit."
@@ -1093,7 +1626,7 @@ that signals stops the scenario with a failure that says why."
     (remoto-keys--learn-logins t)
     (princ (format "mock Forgejo on 127.0.0.1:%d\n" port))
     (dolist (scenario (remoto-keys--scenarios port))
-      (when (or (null only) (member (car scenario) only))
+      (when (remoto-keys--chosen-p scenario only)
         (let ((counts (remoto-keys--scenario scenario elpa)))
           (cl-incf cases (plist-get counts :cases))
           (cl-incf failed (plist-get counts :failed)))))
