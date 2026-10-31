@@ -3859,6 +3859,128 @@ run it in."
                tree)
       (sort files #'string<))))
 
+(defun remoto--git (&rest args)
+  "Return what git prints for ARGS in `default-directory', or nil if it fails."
+  (with-temp-buffer
+    (when (eq 0 (ignore-errors (apply #'process-file "git" nil '(t nil) nil args)))
+      (string-remove-suffix "\n" (buffer-string)))))
+
+(defun remoto--forge-of-host (host)
+  "Return the forge whose web host is HOST, or nil."
+  (and host
+       (seq-find (lambda (forge) (string-equal-ignore-case host (remoto-forge-host forge)))
+                 (seq-uniq (mapcar #'cdr remoto--forges)))))
+
+(defun remoto--ssh-hostname (host)
+  "Return the name that ssh connects to for HOST, which may be an alias."
+  (with-temp-buffer
+    (when (eq 0 (ignore-errors (process-file "ssh" nil '(t nil) nil "-G" host)))
+      (goto-char (point-min))
+      (and (re-search-forward "^hostname \\(.+\\)$" nil t)
+           (match-string 1)))))
+
+(defun remoto--remote-repo (url)
+  "Return the root of the repository that the git remote URL names, or nil.
+The root is a `remoto-path'.  An ssh host that is no forge's can be an
+alias of the ssh configuration, which ssh -G resolves."
+  (when (string-match
+         (rx bos (or (seq (group-n 1 (+ (in "a-z+"))) "://"
+                          (? (* (not (in "@/"))) "@")
+                          (group-n 2 (+ (not (in "/:"))))
+                          (? ":" (* digit)) (+ "/"))
+                     (seq (? (* (not (in "@/"))) "@")
+                          (group-n 2 (+ (not (in "/:")))) ":" (? "/")))
+             (group-n 3 (+ (not "/"))) "/"
+             (group-n 4 (+? (not "/"))) (? ".git") (* "/") eos)
+         url)
+    (let* ((scheme (match-string 1 url))
+           (host (match-string 2 url))
+           (owner (match-string 3 url))
+           (repo (match-string 4 url))
+           (forge (or (remoto--forge-of-host host)
+                      (and (not (member scheme '("http" "https")))
+                           (remoto--forge-of-host (remoto--ssh-hostname host))))))
+      (and forge
+           (remoto-path-create :forge forge :owner owner :repo repo :path "/")))))
+
+(defun remoto--git-remotes ()
+  "Return (NAME . URL) for each remote of the repository, as git lists them."
+  (seq-uniq
+   (seq-keep (lambda (line)
+               (and (string-match "\\`\\([^\t]+\\)\t\\(.+\\) (fetch)\\'" line)
+                    (cons (match-string 1 line) (match-string 2 line))))
+             (split-string (or (remoto--git "remote" "-v") "") "\n" t))))
+
+(defun remoto--git-upstream (branch)
+  "Return (REMOTE REMOTE-BRANCH) that BRANCH tracks, or nil.
+REMOTE-BRANCH is nil once its remote-tracking branch is gone."
+  (when-let* ((line (remoto--git "for-each-ref"
+                                 "--format=%(upstream:remotename)%09%(upstream:remoteref)%09%(upstream:track)"
+                                 (concat "refs/heads/" branch)))
+              (fields (split-string line "\t"))
+              ((not (string-empty-p (car fields)))))
+    (list (car fields)
+          (and (not (equal (nth 2 fields) "[gone]"))
+               (string-prefix-p "refs/heads/" (nth 1 fields))
+               (string-remove-prefix "refs/heads/" (nth 1 fields))))))
+
+(defun remoto--read-remote (remotes default)
+  "Ask for one of REMOTES, (NAME . ROOT) pairs; DEFAULT names the one offered."
+  (let* ((width (apply #'max (mapcar (lambda (remote) (length (car remote))) remotes)))
+         (completion-extra-properties
+          (list :annotation-function
+                (lambda (name)
+                  (concat (make-string (- (1+ width) (length name)) ?\s)
+                          (remoto--canonical-path (cdr (assoc name remotes))))))))
+    (assoc (completing-read (format-prompt "Remote" default) remotes nil t nil nil default)
+           remotes)))
+
+(defun remoto--forge-directory (pick)
+  "Return the remoto directory of `default-directory', a directory of a clone.
+The remote is the one the branch tracks; PICK, or several remotes and
+none tracked, asks for it.  The ref is the tracked branch, else the
+branch's own name when the remote has it, else the default branch."
+  (let* ((prefix (or (remoto--git "rev-parse" "--show-prefix")
+                     (user-error "Remoto: %s is not in a git repository"
+                                 (abbreviate-file-name default-directory))))
+         (remotes (or (remoto--git-remotes)
+                      (user-error "Remoto: this repository has no remote")))
+         (served (or (seq-keep (lambda (remote)
+                                 (when-let* ((root (remoto--remote-repo (cdr remote))))
+                                   (cons (car remote) root)))
+                               remotes)
+                     (user-error "Remoto: no remote is on a forge remoto serves: %s"
+                                 (mapconcat (lambda (remote) (concat (car remote) " " (cdr remote)))
+                                            remotes ", "))))
+         (branch (remoto--git "symbolic-ref" "--quiet" "--short" "HEAD"))
+         (upstream (and branch (remoto--git-upstream branch)))
+         (tracked (assoc (car upstream) served))
+         (remote (if (or pick (and (not tracked) (cdr served)))
+                     (remoto--read-remote served (car (or tracked (assoc "origin" served)
+                                                          (car served))))
+                   (or tracked (car served))))
+         (root (cdr remote)))
+    (setf (remoto-path-ref root)
+          (cond ((eq remote tracked) (nth 1 upstream))
+                ((and branch (remoto--git "show-ref" "--verify" "--quiet"
+                                          (format "refs/remotes/%s/%s" (car remote) branch)))
+                 branch)))
+    (concat (remoto--tree-prefix root) "/" prefix)))
+
+;;;###autoload
+(defun remoto-project-find-file (&optional pick)
+  "Find a file in the forge copy of this clone, starting from this directory.
+The prompt is on the remote the branch tracks, at that branch when the
+remote has it, else at its default branch.  PICK, a prefix argument, or
+several remotes and none tracked, asks for the remote."
+  (interactive "P")
+  (let ((default-directory (if (string-match-p remoto--handler-regexp default-directory)
+                               default-directory
+                             (remoto--forge-directory pick)))
+        (command (key-binding (kbd "C-x C-f"))))
+    (remoto--ensure-global-mode)
+    (call-interactively (if (commandp command) command #'find-file))))
+
 ;;;; Global mode
 
 (defun remoto--drop-autoload-handler ()

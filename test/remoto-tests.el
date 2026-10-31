@@ -9079,6 +9079,205 @@ That is where the package autoloads put it."
           (kill-buffer visiting))
         (delete-directory dir t)))))
 
+;;; The forge copy of a local clone
+
+(defconst remoto-test--git-environment
+  '("GIT_CONFIG_GLOBAL=/dev/null" "GIT_CONFIG_NOSYSTEM=1"
+    "GIT_AUTHOR_NAME=t" "GIT_AUTHOR_EMAIL=t@t"
+    "GIT_COMMITTER_NAME=t" "GIT_COMMITTER_EMAIL=t@t")
+  "A git that reads neither the user's configuration nor the system's.")
+
+(defun remoto-test--git (&rest args)
+  "Run git with ARGS in `default-directory'; signal an error when it fails."
+  (with-temp-buffer
+    (unless (eq 0 (apply #'call-process "git" nil t nil args))
+      (error "Git %s: %s" (string-join args " ") (buffer-string)))
+    (buffer-string)))
+
+(defmacro remoto-test-in-clone (var &rest body)
+  "Run BODY in a new git repository with one commit on main, VAR its directory.
+Remotes are added by name only, so nothing reaches the network."
+  (declare (indent 1))
+  `(progn
+     (assume (executable-find "git") "no git")
+     (let* ((process-environment (append remoto-test--git-environment process-environment))
+            (,var (file-name-as-directory (file-truename (make-temp-file "remoto-clone" t))))
+            (default-directory ,var))
+       (unwind-protect
+           (progn
+             (remoto-test--git "init" "--quiet" "--initial-branch=main")
+             (remoto-test--git "commit" "--quiet" "--allow-empty" "--message=init")
+             ,@body)
+         (delete-directory ,var t)))))
+
+(defvar remoto-test--found nil
+  "The `default-directory' that `remoto-test--find-file' saw.")
+
+(defun remoto-test--find-file ()
+  "Stand in for what C-x C-f runs: keep `default-directory'."
+  (interactive)
+  (setq remoto-test--found default-directory))
+
+(defun remoto-test--find-remote (&optional pick)
+  "Run `remoto-project-find-file' as C-x p R does, PICK as its prefix argument.
+Return the directory its C-x C-f started in."
+  (let ((overriding-local-map (define-keymap "C-x C-f" #'remoto-test--find-file))
+        (current-prefix-arg pick)
+        (remoto-test--found nil))
+    (call-interactively #'remoto-project-find-file)
+    remoto-test--found))
+
+(describe "remoto--remote-repo"
+  (it "reads every form of remote URL git takes"
+    (spy-on 'remoto--ssh-hostname)
+    (dolist (case '(("git@github.com:o/r.git" . "/github:o/r:/")
+                    ("git@github.com:o/r" . "/github:o/r:/")
+                    ("git@GitHub.com:o/r.git" . "/github:o/r:/")
+                    ("git@github.com:agzam/remoto.el.git" . "/github:agzam/remoto.el:/")
+                    ("https://github.com/o/r.git" . "/github:o/r:/")
+                    ("https://github.com/o/r.git/" . "/github:o/r:/")
+                    ("https://user:token@github.com/o/r" . "/github:o/r:/")
+                    ("http://github.com/o/r" . "/github:o/r:/")
+                    ("ssh://git@github.com/o/r.git" . "/github:o/r:/")
+                    ("ssh://git@github.com:22/o/r.git" . "/github:o/r:/")
+                    ("git+ssh://git@github.com/o/r.git" . "/github:o/r:/")
+                    ("git://github.com/o/r.git" . "/github:o/r:/")
+                    ("git@codeberg.org:forgejo/docs.git" . "/codeberg:forgejo/docs:/")
+                    ("https://codeberg.org/forgejo/docs" . "/codeberg:forgejo/docs:/")))
+      (expect (remoto--canonical-path (remoto--remote-repo (car case)))
+              :to-equal (cdr case)))
+    (expect 'remoto--ssh-hostname :not :to-have-been-called))
+
+  (it "asks ssh about a host no forge has, which can be an alias"
+    (spy-on 'remoto--ssh-hostname :and-call-fake
+            (lambda (host) (if (equal host "github-work") "github.com" host)))
+    (dolist (url '("git@github-work:o/r.git" "ssh://git@github-work/o/r.git"))
+      (expect (remoto--canonical-path (remoto--remote-repo url))
+              :to-equal "/github:o/r:/"))
+    (expect 'remoto--ssh-hostname :to-have-been-called-with "github-work")
+    (expect (remoto--remote-repo "git@gitlab.com:o/r.git") :to-be nil))
+
+  (it "names nothing for an https host no forge has, and asks ssh nothing"
+    (spy-on 'remoto--ssh-hostname)
+    (dolist (url '("https://gitlab.com/o/r.git" "https://gitlab.com/group/sub/r.git"
+                   "https://github.com/o"))
+      (expect (remoto--remote-repo url) :to-be nil))
+    (expect 'remoto--ssh-hostname :not :to-have-been-called))
+
+  (it "names nothing for a local remote"
+    (spy-on 'remoto--ssh-hostname :and-call-fake #'identity)
+    (dolist (url '("/srv/git/r.git" "../r" "file:///srv/git/r.git"))
+      (expect (remoto--remote-repo url) :to-be nil)))
+
+  (it "reads the host name out of ssh -G"
+    (let* ((bin (make-temp-file "remoto-bin" t))
+           (exec-path (cons bin exec-path)))
+      (unwind-protect
+          (progn
+            (with-temp-file (expand-file-name "ssh" bin)
+              (insert "#!/bin/sh\nprintf 'user git\\nhostname github.com\\nport 22\\n'\n"))
+            (set-file-modes (expand-file-name "ssh" bin) #o755)
+            (expect (remoto--ssh-hostname "github-work") :to-equal "github.com"))
+        (delete-directory bin t)))))
+
+(describe "remoto-project-find-file"
+  (it "opens on the remote the branch tracks, at that branch and this directory"
+    (remoto-test-in-clone dir
+      (remoto-test--git "remote" "add" "origin" "git@github.com:o/r.git")
+      (remoto-test--git "remote" "add" "upstream" "git@github.com:u/r.git")
+      (remoto-test--git "update-ref" "refs/remotes/origin/feature/x" "HEAD")
+      (remoto-test--git "checkout" "--quiet" "-b" "topic")
+      (remoto-test--git "branch" "--quiet" "--set-upstream-to=origin/feature/x")
+      (make-directory (expand-file-name "src/lib" dir) t)
+      (spy-on 'completing-read)
+      (expect (remoto-test--find-remote) :to-equal "/github:o/r@feature/x:/")
+      (let ((default-directory (expand-file-name "src/lib/" dir)))
+        (expect (remoto-test--find-remote) :to-equal "/github:o/r@feature/x:/src/lib/"))
+      (expect 'completing-read :not :to-have-been-called)))
+
+  (it "opens at the default branch once the tracked branch is gone"
+    (remoto-test-in-clone _dir
+      (remoto-test--git "remote" "add" "origin" "git@github.com:o/r.git")
+      (remoto-test--git "remote" "add" "upstream" "git@github.com:u/r.git")
+      (remoto-test--git "config" "branch.main.remote" "origin")
+      (remoto-test--git "config" "branch.main.merge" "refs/heads/merged")
+      (spy-on 'completing-read)
+      (expect (remoto-test--find-remote) :to-equal "/github:o/r:/")
+      (expect 'completing-read :not :to-have-been-called)))
+
+  (it "keeps the branch on an untracked remote that has it, else the default branch"
+    (remoto-test-in-clone _dir
+      (remoto-test--git "remote" "add" "origin" "https://codeberg.org/o/r.git")
+      (remoto-test--git "update-ref" "refs/remotes/origin/main" "HEAD")
+      (expect (remoto-test--find-remote) :to-equal "/codeberg:o/r@main:/")
+      (remoto-test--git "checkout" "--quiet" "-b" "local")
+      (expect (remoto-test--find-remote) :to-equal "/codeberg:o/r:/")))
+
+  (it "opens at the default branch from a detached HEAD"
+    (remoto-test-in-clone _dir
+      (remoto-test--git "remote" "add" "origin" "git@github.com:o/r.git")
+      (remoto-test--git "update-ref" "refs/remotes/origin/main" "HEAD")
+      (remoto-test--git "checkout" "--quiet" "--detach")
+      (expect (remoto-test--find-remote) :to-equal "/github:o/r:/")))
+
+  (it "asks for the remote when the branch tracks none and several qualify"
+    (remoto-test-in-clone _dir
+      (spy-on 'remoto--ssh-hostname :and-call-fake #'identity)
+      (remoto-test--git "remote" "add" "origin" "git@github.com:o/r.git")
+      (remoto-test--git "remote" "add" "upstream" "git@github.com:u/r.git")
+      (remoto-test--git "remote" "add" "mirror" "git@gitlab.com:o/r.git")
+      (let (annotation)
+        (spy-on 'completing-read :and-call-fake
+                (lambda (&rest _)
+                  (setq annotation (funcall (plist-get completion-extra-properties
+                                                       :annotation-function)
+                                            "origin"))
+                  "upstream"))
+        (expect (remoto-test--find-remote) :to-equal "/github:u/r:/")
+        (let ((args (spy-calls-args-for 'completing-read 0)))
+          (expect (car args) :to-equal "Remote (default origin): ")
+          (expect (mapcar #'car (nth 1 args)) :to-equal '("origin" "upstream"))
+          (expect (nth 6 args) :to-equal "origin"))
+        (expect annotation :to-equal "   /github:o/r:/"))))
+
+  (it "asks with a prefix argument, offering the tracked remote"
+    (remoto-test-in-clone _dir
+      (remoto-test--git "remote" "add" "origin" "git@github.com:o/r.git")
+      (remoto-test--git "remote" "add" "upstream" "git@github.com:u/r.git")
+      (remoto-test--git "update-ref" "refs/remotes/origin/main" "HEAD")
+      (remoto-test--git "update-ref" "refs/remotes/upstream/main" "HEAD")
+      (remoto-test--git "branch" "--quiet" "--set-upstream-to=upstream/main")
+      (spy-on 'completing-read :and-return-value "origin")
+      (expect (remoto-test--find-remote '(4)) :to-equal "/github:o/r@main:/")
+      (expect (nth 6 (spy-calls-args-for 'completing-read 0)) :to-equal "upstream")))
+
+  (it "reads a remote through the insteadOf of git's configuration"
+    (remoto-test-in-clone _dir
+      (remoto-test--git "config" "url.git@github.com:.insteadOf" "gh:")
+      (remoto-test--git "remote" "add" "origin" "gh:o/r.git")
+      (expect (remoto-test--find-remote) :to-equal "/github:o/r:/")))
+
+  (it "says why it cannot open: no repository, no remote, no forge"
+    (spy-on 'remoto--ssh-hostname :and-call-fake #'identity)
+    (let ((default-directory (file-name-as-directory (make-temp-file "remoto-none" t))))
+      (unwind-protect
+          (expect (remoto-test--find-remote) :to-throw 'user-error
+                  (list (format "Remoto: %s is not in a git repository"
+                                (abbreviate-file-name default-directory))))
+        (delete-directory default-directory t)))
+    (remoto-test-in-clone _dir
+      (expect (remoto-test--find-remote) :to-throw 'user-error
+              '("Remoto: this repository has no remote"))
+      (remoto-test--git "remote" "add" "origin" "git@gitlab.com:o/r.git")
+      (expect (remoto-test--find-remote) :to-throw 'user-error
+              '("Remoto: no remote is on a forge remoto serves: origin git@gitlab.com:o/r.git"))))
+
+  (it "is C-x C-f itself in a remoto directory"
+    (spy-on 'remoto--git)
+    (let ((default-directory "/github:o/r@main:/src/"))
+      (expect (remoto-test--find-remote) :to-equal "/github:o/r@main:/src/"))
+    (expect 'remoto--git :not :to-have-been-called)))
+
 ;;; The bootstrap handler of the autoloads
 
 (defun remoto-test--push-bootstrap ()
@@ -9277,7 +9476,21 @@ every source older than an existing output file, so it must not exist."
                                     (and (eq (car-safe f) 'autoload)
                                          (equal (nth 1 f) ''remoto-project-try)))
                                   forms)))
-                :to-equal "remoto-project")))))
+                :to-equal "remoto-project"))))
+
+  (it "binds C-x p R to remoto-project-find-file when the key is free"
+    (remoto-test-with-autoloads file
+      (let ((forms (remoto-test--autoload-forms file)))
+        (expect (member '(when (and (boundp 'project-prefix-map)
+                                    (not (keymap-lookup project-prefix-map "R")))
+                           (keymap-set project-prefix-map "R" #'remoto-project-find-file))
+                        forms)
+                :to-be-truthy)
+        (expect (seq-find (lambda (f)
+                            (and (eq (car-safe f) 'autoload)
+                                 (equal (nth 1 f) ''remoto-project-find-file)))
+                          forms)
+                :to-be-truthy)))))
 
 ;;; A fresh session: the autoloads alone, then the first remoto path
 
@@ -9607,7 +9820,38 @@ with what the same call does once the mode is on."
               (expect (plist-get result :remoto) :to-be nil)
               (expect (plist-get result :ghub) :to-be nil))
           (delete-file list-file)
-          (delete-directory local t))))))
+          (delete-directory local t)))))
+
+  (it "has C-x p R before project.el or remoto loads, and leaves a key bound first"
+    (remoto-test-with-autoloads file
+      (expect (remoto-test--fresh-session
+               file '(list (keymap-lookup project-prefix-map "R")
+                           (featurep 'project) (featurep 'remoto)))
+              :to-equal '(remoto-project-find-file nil nil))
+      (expect (remoto-test--fresh-session
+               nil `(progn (keymap-set project-prefix-map "R" #'ignore)
+                           (load ,file nil t)
+                           (keymap-lookup project-prefix-map "R")))
+              :to-be 'ignore)))
+
+  (it "opens the forge copy of a clone at the first C-x p R"
+    (remoto-test-with-autoloads file
+      (remoto-test-in-clone dir
+        (remoto-test--git "remote" "add" "origin" "git@github.com:o/r.git")
+        (remoto-test--git "update-ref" "refs/remotes/origin/main" "HEAD")
+        (remoto-test--git "branch" "--quiet" "--set-upstream-to=origin/main")
+        (let ((result (remoto-test--fresh-session
+                       file
+                       `(let ((default-directory ,dir)
+                              (found nil))
+                          (let ((overriding-local-map
+                                 (define-keymap "C-x C-f"
+                                   (lambda () (interactive) (setq found default-directory)))))
+                            (call-interactively (keymap-lookup project-prefix-map "R")))
+                          (list :found found
+                                :global (bound-and-true-p global-remoto-mode))))))
+          (expect (plist-get result :found) :to-equal "/github:o/r@main:/")
+          (expect (plist-get result :global) :to-be t))))))
 
 ;;; Unloading
 

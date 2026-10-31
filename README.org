@@ -13,13 +13,13 @@ Wouldn't it be nice to be able to ~C-x C-f~ and just browse any remote repo?
 
 [[./test/demo.gif]]
 
-remoto.el registers a virtual filesystem via ~file-name-handler-alist~ that translates standard Emacs file operations into calls to the forge's API. The result: ~find-file~, ~dired~, tab-completion, ~dired-subtree~ - all standard Emacs file tooling works against a remote repository.
+It registers a virtual filesystem via ~file-name-handler-alist~ that translates standard file operations into calls to remote API. ~find-file~, ~dired~, tab-completion, ~dired-subtree~ - etc. seamlessly work against a remote repository.
 
 First time it was [[https://youtu.be/YV1kyVE6SvU][demoed]] at [[https://www.meetup.com/emacsatx/][Emacs ATX Meetup]] of July 2026.
 
 * Why
 
-Sometimes you just want to look at code. Check a function signature, glance over the README, browse the project structure. Cloning a repo for that is overkill - takes disk space, make you think where to put the damn folder; it just breaks your flow.
+Sometimes you just want to look at code. Check a function signature, glance over the README, browse the project structure. Cloning is overkill for that - it takes disk space, makes you think about where to put the damn folder; generally, it just breaks your flow.
 
 * Where
 
@@ -31,9 +31,9 @@ It is on [[https://melpa.org/#/remoto][MELPA]].
 (use-package remoto)
 #+end_src
 
-Loading the package defines things and changes nothing. ~global-remoto-mode~ is the switch: it installs the file handler, the URL rewriting in ~find-file~ and ~dired~, and the completion metadata, and removes them all when turned off. Nothing else is needed:
+Loading the package defines things and changes nothing. ~global-remoto-mode~ is the switch: it installs the file handler, the URL rewriting in ~find-file~ and ~dired~, completion metadata; and when turned off - removes them all.
 
-The mode turns itself on at first use, whichever way that comes: ~M-x remoto-browse~, an Embark open action, or a ~/github:~, ~/gh:~, ~/codeberg:~ or ~/cb:~ path typed at ~C-x C-f~, ~C-x d~ or any other file prompt. For the last one the package autoloads register a small handler for those prefixes, the way TRAMP loads on the first remote path; it hands over to the real handler and steps aside. Each of these says so once in the echo area. To have the mode on from the start, and skip that message, put ~(global-remoto-mode 1)~ in your config.
+The mode turns itself on at first use, whichever way that comes: ~M-x remoto-browse~, an Embark open action, or a ~/github:~ or ~/codeberg:~ path typed at ~C-x C-f~, ~C-x d~ or any other file prompt. For the last one the package autoloads register a small handler for those prefixes, hands over to the real handler and steps aside. Each of these says so once in the echo area. To skip that message, add ~(global-remoto-mode 1)~ in the config.
 
 #+HTML: <details><summary>
 ** GitHub
@@ -160,6 +160,8 @@ In a name that starts with ~/gh:~ or ~/github:~, ~#~ and ~%~ are literal: they d
 A remoto repository is a project: ~C-x p f~, ~C-x p d~, ~C-x p D~, ~C-x p b~, ~C-x p k~ and ~C-x p p~ - just work.
 
 Commands that require local items obviously wouldn't - ~project-shell~, ~project-compile~, ~project-find-regexp~, ~consult-ripgrep~.
+
+With ~C-x p R~ (~remoto-project-find-file~) browse project's remote; with ~C-u~ you get to pick which one.
 
 *** Embark
 

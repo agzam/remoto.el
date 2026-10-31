@@ -10,6 +10,7 @@ Changes to the project, following Keep a Changelog conventions.
 - ~remoto-project-try~, in the new ~remoto-project.el~, finds the project. The package autoloads put it on ~project-find-functions~, ahead of ~project-try-vc~, and it loads remoto only for a directory that remoto serves, so a remoto project in the project list opens in a session that has not loaded remoto yet.
 - A search started in a remoto directory stops with "Remoto: grep needs a clone; a repository has no local files": ~project-find-regexp~, ~project-find-file~ with a prefix argument, ~consult-ripgrep~, ~consult-find~, ~grep~, a ~find~ or ~rg~ at ~M-!~. A program started there runs in =~=, so the search reported the files of your home directory as the repository's. Other programs, git among them, run as before.
 - ~project-search~ and ~project-query-replace-regexp~ stop before their prompt in a remoto project: they visit every file, a request each.
+- adds ~remoto-project-find-file~ - ~C-x p R~
 
 ** Changed
 - A ~/github:~ or ~/codeberg:~ name in ~project-list-file~ or ~recentf-list~ no longer loads remoto. project.el and recentf ask ~file-remote-p~ of every name they keep, and the package autoloads now answer that themselves; before, each session that read such a list loaded remoto and ghub and said "Remoto: ‘global-remoto-mode’ enabled".
