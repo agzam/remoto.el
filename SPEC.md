@@ -118,7 +118,9 @@ A custom `:reader` function (`remoto--json-reader`) is used instead of ghub's de
 
 Public repos work without any token. When remoto finds none for a forge, it reads that forge anonymously (GitHub allows 60 requests an hour) until `remoto-reset-auth` or `remoto-login`.
 
-`M-x remoto-login` asks for a token, checks it with `/user` and stores it as `ACCOUNT^remoto` under the forge's web host, in the first `.gpg` file of `auth-sources`; without one the token lasts the session. The lookup reads every row under the API host or the web host and ranks them: `^remoto`, `^forge`, `^ghub`, untagged, with the account git config names first within a tag. It needs no git config: remoto hands ghub the row's account as `:username`, so ghub never asks git for one.
+`M-x remoto-login` asks for a token, checks it with `/user` and stores it as `ACCOUNT^remoto` under the forge's web host, in the first `.gpg` file of `auth-sources`; without one, or when the file cannot be written, the token lasts the session. The file is written as `auth-source-netrc-saver` writes it: with `auth-source-gpg-encrypt-to` non-nil, `epa-file-encrypt-to` is buffer-local, so a new file gets a passphrase and no list of keys to pick. The token page's address goes to `*Messages*`, and into the prompt when `browse-url` fails; a pasted token is taken out of the kill ring. The lookup reads every row under the API host or the web host and ranks them: `^remoto`, `^forge`, `^ghub`, untagged, with the account git config names first within a tag; a macOS keychain is read only when no other source holds a token. It needs no git config: remoto hands ghub the row's account as `:username`, so ghub never asks git for one.
+
+A token the forge refuses stays refused for the session: the lookup skips it, `remoto-github-auth`'s included, and the next token auth-source holds takes its place before remoto asks to log in again. A login kept by an older remoto, whose struct has fewer slots, is forgotten when remoto loads again.
 
 The `remoto-github-auth` defcustom:
 

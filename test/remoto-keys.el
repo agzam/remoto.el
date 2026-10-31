@@ -1162,6 +1162,10 @@ then shows the forges and the warnings."
                       remoto-keys--codeberg-login)))
           1))
 
+(defconst remoto-keys--kill-clean
+  '(check "the pasted token left the kill ring" (remoto-keys-kill-has-token-p) nil)
+  "The check that no token of a login stays in the kill ring.")
+
 (defun remoto-keys--rows (host login &optional others)
   "Return the check of ~/.authinfo.gpg: LOGIN's remoto row for HOST first.
 OTHERS are the rows after it, the kept rows by default; the mode is 600."
@@ -1176,8 +1180,12 @@ OTHERS are the rows after it, the kept rows by default; the mode is 600."
     (check "offers GitHub first" (remoto-keys-prompt) "\\`Remoto: log in to (default GitHub): \\'")
     (step "RET for GitHub" ,(kbd "RET"))
     (check "opens GitHub's token page" (car remoto-keys--browsed) ,remoto-keys--token-page)
+    (check "names the token page in *Messages*"
+           (remoto-keys-message-count "^Remoto: make a GitHub token at https://github\\.com/settings/tokens/new")
+           1)
     (check "asks for the token" (remoto-keys-prompt) "\\`GitHub token: \\'")
-    (step "paste the token" ,(or token 'token) ,(kbd "RET"))))
+    (step "paste the token" ,(or token 'token) ,(kbd "RET"))
+    ,remoto-keys--kill-clean))
 
 (defun remoto-keys--first-contact (profile)
   "Return the scenario of a new user's first names under PROFILE, no token anywhere."
@@ -1230,6 +1238,7 @@ only by name."
       (check "asks for the token" (remoto-keys-prompt) "\\`GitHub token: \\'")
       (step "paste the token" token ,(kbd "RET"))
       ,(remoto-keys--logged-in "GitHub")
+      ,remoto-keys--kill-clean
       (check "the command finishes" (remoto-keys-directory) "\\`/github:agzam/remoto\\.el@main:/\\'")
       ,(remoto-keys--rows "github.com" user)
       (restart)
@@ -1259,36 +1268,48 @@ The ones that spend GitHub's requests without a token run only by name."
       ("store-new" (:home t :paste t :gitconfig "" :gnupg empty)
        ,@(remoto-keys--login-steps)
        (check "no key list for a new file" (and (get-buffer-window "*Keys*") t) nil)
-       (probe "screen" (remoto-keys-window-buffer))
-       (step "C-c C-c in the key list: no key, symmetric" ,(kbd "C-c C-c"))
-       (probe "pinentry" (remoto-keys-pinentry))
+       (check "the agent's pinentry asked a new passphrase, twice"
+              (seq-count (lambda (line) (string-prefix-p "GETPIN" line)) (remoto-keys-pinentry))
+              2)
        ,(remoto-keys--logged-in "GitHub")
        ,(remoto-keys--rows "github.com" user ""))
       ("store-loopback" (:home t :paste t :gitconfig "" :gnupg empty
                                :init (setq epg-pinentry-mode 'loopback))
        ,@(remoto-keys--login-steps)
        (check "no key list for a new file" (and (get-buffer-window "*Keys*") t) nil)
-       (step "C-c C-c in the key list: no key, symmetric" ,(kbd "C-c C-c"))
-       (probe "prompt" (remoto-keys-prompt))
+       (check "asks a passphrase in the minibuffer" (remoto-keys-prompt)
+              "\\`Passphrase for symmetric encryption for .*authinfo\\.gpg: \\'")
        (step "the passphrase" ,remoto-keys--passphrase ,(kbd "RET"))
-       (probe "prompt" (remoto-keys-prompt))
+       (check "asks it again" (remoto-keys-prompt) "\\`Confirm password: \\'")
        (step "the passphrase again" ,remoto-keys--passphrase ,(kbd "RET"))
        (check "the agent's pinentry was not asked" (remoto-keys-pinentry) nil)
        ,(remoto-keys--logged-in "GitHub")
+       ,remoto-keys--kill-clean
        ,(remoto-keys--rows "github.com" user ""))
       ("store-nogpg" (:home t :paste t :gitconfig "" :no-gpg t)
        ,@(remoto-keys--login-steps)
-       (probe "messages" (with-current-buffer (messages-buffer)
-                           (buffer-substring-no-properties
-                            (max (point-min) (- (point-max) 400)) (point-max))))
+       (check "says why it logged in for the session only" (current-message)
+              ,(format "\\`Remoto: logged in to GitHub as %s for this session; ~/\\.authinfo\\.gpg: .*GPG error"
+                       user))
        (check "a failed store keeps the token for the session" (remoto-keys-github-token-p) t))
       ("store-readonly" (:home t :paste t :gitconfig "" :gnupg key
                                :authinfo-gpg ,remoto-keys--kept-rows :authinfo-mode #o400)
        ,@(remoto-keys--login-steps)
-       (probe "message" (current-message))
+       (check "says why it logged in for the session only" (current-message)
+              ,(format "\\`Remoto: logged in to GitHub as %s for this session; ~/\\.authinfo\\.gpg: .*Permission denied"
+                       user))
        (check "a failed store keeps the token for the session" (remoto-keys-github-token-p) t)
        (check "the file stays as it was" (plist-get (remoto-keys-authinfo) :rows)
               ,(split-string remoto-keys--kept-rows "\n" t)))
+      ("store-nobrowser" (:home t :paste t :gitconfig "" :gnupg key :authinfo-gpg ,remoto-keys--kept-rows
+                                :init (setq browse-url-browser-function
+                                            (lambda (&rest _) (error "No usable browser found"))))
+       (case "M-x remoto-login" ,(kbd "M-x") "remoto-login" ,(kbd "RET") ,(kbd "RET"))
+       (check "the prompt names the token page" (remoto-keys-prompt)
+              "\\`GitHub token, from https://github\\.com/settings/tokens/new\\?scopes=repo,read:org&description=remoto: \\'")
+       (step "paste the token" token ,(kbd "RET"))
+       ,(remoto-keys--logged-in "GitHub")
+       ,stored)
       ("store-symmetric" (:home t :paste t :gitconfig "" :gnupg symmetric
                                 :authinfo-gpg ,remoto-keys--kept-rows)
        ,@(remoto-keys--login-steps)
@@ -1342,7 +1363,12 @@ The ones that spend GitHub's requests without a token run only by name."
        ,opens
        (restart)
        ,(funcall ff "/gh:agzam/remoto.el")
-       (check "the stored token serves the next session" (remoto-keys-prompt) nil))
+       (check "the stored token serves the next session" (remoto-keys-prompt) nil)
+       ,opens
+       (check "says the option's token was refused"
+              (remoto-keys-message-count
+               "^Remoto: GitHub refused the token in remoto-github-auth, using the one auth-source holds$")
+              1))
       ;; Setups from before remoto-login: none needs git config any more.
       ,(funcall existing "existing-ghub"
                 `(:gitconfig ,(format "[github]\n\tuser = %s\n" user) :gnupg key
@@ -1358,8 +1384,11 @@ The ones that spend GitHub's requests without a token run only by name."
       ("accounts" (:home t :paste t :gitconfig "" :gnupg key
                           :authinfo-gpg ,(format "machine api.github.com login other^ghub password ghp_e2eOther0000000000000000000000000000\nmachine api.github.com login %s^ghub password %%TOKEN%%\n" user))
        ,(funcall ff "/gh:agzam/remoto.el")
-       (probe "prompt" (remoto-keys-prompt))
-       (probe "logins" (remoto-keys-logins)))
+       ,no-question ,opens
+       (check "the next row's token serves"
+              (remoto-keys-message-count
+               "^Remoto: GitHub refused a token, using the next one auth-source holds$")
+              1))
       ("codeberg-login" (:home t :codeberg-paste t :gitconfig "" :gnupg key
                                 :authinfo-gpg ,remoto-keys--kept-rows)
        ,(funcall ff "/cb:forgejo/docs")
@@ -1417,6 +1446,7 @@ The ones that spend GitHub's requests without a token run only by name."
        (case "a timer opens a file" ,(kbd "M-:")
              "(run-at-time 0 nil #'find-file \"/gh:agzam/remoto.el/README.org\")" ,(kbd "RET"))
        (check "a timer asks nothing" (remoto-keys-prompt) nil)
+       (check "a timer's error prints plain text" (remoto-keys-message-count "user-error #(") 0)
        (visit "/gh:agzam/remoto.el/README.org")
        (check "emacsclient asks nothing" (remoto-keys-prompt) nil)
        (probe "messages" (with-current-buffer (messages-buffer)

@@ -6,7 +6,7 @@ Changes to the project, following Keep a Changelog conventions.
 * [Unreleased]
 
 ** Added
-- ~remoto-login~: log in to a forge with a token. It opens the forge's page for a new token, GitHub's with ~repo~ and ~read:org~ ticked, reads the token, asks the forge whose it is, and stores it as ~ACCOUNT^remoto~ under the forge's web host in the first =.gpg= file of ~auth-sources~, in place of remoto's earlier row for that host; without such a file, the token lasts the session.
+- ~remoto-login~: log in to a forge with a token. It opens the forge's page for a new token, GitHub's with ~repo~ and ~read:org~ ticked, reads the token, asks the forge whose it is, and stores it as ~ACCOUNT^remoto~ under the forge's web host in the first =.gpg= file of ~auth-sources~, in place of remoto's earlier row for that host; without such a file, or when GnuPG cannot write it, the token lasts the session and the message says why. A new file is encrypted with a passphrase, as auth-source encrypts one, with no list of keys to pick. The page's address goes to =*Messages*=, and into the prompt when no browser opens; a pasted token stays out of the kill ring.
 - remoto offers a login when a command of yours needs a token: GitHub's limit for requests without one runs out ("GitHub rate limited until 14:32. Log in now?"), the forge refuses the token, or ~/github:~ or ~/codeberg:~ lists your account. After "n" it only says so for the rest of the session, and during completion, from timers and from process filters it never asks.
 - Without a token, the first remoto buffer of a session says that GitHub is read anonymously, 60 requests an hour, and names ~remoto-login~. Codeberg's limit, 2,000 requests per 10 minutes, gets no such line.
 
@@ -15,7 +15,9 @@ Changes to the project, following Keep a Changelog conventions.
 - Without a token, remoto reads a forge anonymously from the first request on and says nothing then. With an account name in git config and no token, the first request failed with ghub's "Required Github token" error, and without the name remoto said "no github.user in git config".
 - A rate limit says until when: "Remoto: GitHub rate limited until 14:32", from ~x-ratelimit-reset~ or a Retry-After in seconds, and names ~remoto-login~ when the request went without a token. A 403 said "access denied (rate limit or permissions)", and a 429 how long to wait. The headers of a request that completion started reach the message too.
 - A repository that answers 404 without a token, at ~find-file~, ~dired~ or ~remoto-browse~, says "OWNER/REPO not found or private" and names ~remoto-login~.
-- A token the forge refuses says "Remoto: GitHub refused the token" and names ~remoto-login~.
+- A token the forge refuses gives way to the next one auth-source holds, a refused ~remoto-github-auth~ to the stored login; with none left, remoto says "Remoto: GitHub refused the token" and names ~remoto-login~.
+- remoto reads a macOS keychain only when no other source holds a token: macOS asks before a program reads an item that git's credential helper saved.
+- Loading remoto again in a running Emacs, as an upgrade does, forgets the logins of the older version, whose fewer slots failed every request with a token.
 - ~remoto-reset-auth~ also forgets auth-source's cache, which kept a failed search for two hours.
 - ~remoto-auth-timeout~ is obsolete: it guarded ghub's own token lookup, which remoto no longer leaves to ghub.
 

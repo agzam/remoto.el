@@ -45,7 +45,7 @@ The mode turns itself on at first use, whichever way that comes: ~M-x remoto-bro
 
 Public repositories need no setup. A token adds private repositories, a higher rate limit (5,000 requests an hour instead of 60), and ~/gh:~ itself, which lists your account and organizations.
 
-Run ~M-x remoto-login~. It opens GitHub's page for a new token with its scopes ticked, reads the token you paste, checks it with GitHub, and stores it in the first =.gpg= file of ~auth-sources~, such as =~/.authinfo.gpg=; without one, the token lasts the session. There is no command to remember: when GitHub's limit runs out, or when you open ~/gh:~, remoto asks to log in.
+Run ~M-x remoto-login~. It opens GitHub's page for a new token with its scopes ticked, reads the token you paste, checks it with GitHub, and stores it in the first =.gpg= file of ~auth-sources~, such as =~/.authinfo.gpg=; without one, or when GnuPG cannot write it, the token lasts the session. A new =.gpg= file asks for a passphrase twice, as auth-source does. The page's address also goes to =*Messages*=, for an Emacs with no browser at hand. There is no command to remember: when GitHub's limit runs out, or when you open ~/gh:~, remoto asks to log in.
 
 The page ticks ~repo~, for private repositories, and ~read:org~, to list your organizations. A fine-grained token works for the repositories it covers, but GitHub lists no organizations for it.
 
@@ -55,7 +55,7 @@ remoto also reads the tokens you keep already, with no git config: those of [[ht
 machine github.com login USER password TOKEN
 #+end_example
 
-After you change auth-source by hand in a running Emacs, ~M-x remoto-reset-auth~ looks the token up again. To send no token at all, set ~remoto-github-auth~ to ~none~.
+When GitHub refuses a token, remoto takes the next one auth-source holds before it asks you to log in again. It reads a macOS keychain only when no other source holds a token, since macOS asks before remoto reads an item that git's credential helper saved. After you change auth-source by hand in a running Emacs, ~M-x remoto-reset-auth~ looks the token up again. To send no token at all, set ~remoto-github-auth~ to ~none~.
 
 *** Examples
 

@@ -2406,6 +2406,39 @@ The test delivers the reply through `remoto-test--reply' when it decides."
     (spy-on 'auth-source-search :and-return-value nil)
     (expect (remoto--find-token remoto--github) :to-be nil))
 
+  (it "reads the macOS keychain only when no other source holds a token"
+    ;; Reading a keychain item of git's credential helper makes macOS ask.
+    (let ((remoto--logins (remoto-test--logins))
+          (auth-sources '("~/.authinfo.gpg" macos-keychain-internet
+                          (:source (:macos-keychain-generic "x"))))
+          (searched nil))
+      (spy-on 'ghub--username :and-return-value nil)
+      (spy-on 'auth-source-search :and-call-fake
+              (lambda (&rest spec)
+                (push auth-sources searched)
+                (when (and (member "~/.authinfo.gpg" auth-sources)
+                           (equal (plist-get spec :host) "api.github.com"))
+                  (list (list :user "alice^forge" :secret "t-file")))))
+      (expect (remoto--find-token remoto--github) :to-equal "t-file")
+      (expect searched :to-equal '(("~/.authinfo.gpg") ("~/.authinfo.gpg")))))
+
+  (it "reads the macOS keychain when nothing else holds a token"
+    (let ((remoto--logins (remoto-test--logins))
+          (auth-sources '("~/.authinfo.gpg" "macos-keychain-internet:login"))
+          (searched nil))
+      (spy-on 'ghub--username :and-return-value nil)
+      (spy-on 'auth-source-search :and-call-fake
+              (lambda (&rest spec)
+                (push (cons (plist-get spec :host) auth-sources) searched)
+                (when (and (member "macos-keychain-internet:login" auth-sources)
+                           (equal (plist-get spec :host) "github.com"))
+                  (list (list :user "alice" :secret "t-keychain")))))
+      (expect (remoto--find-token remoto--github) :to-equal "t-keychain")
+      (expect (nreverse searched)
+              :to-equal '(("api.github.com" "~/.authinfo.gpg") ("github.com" "~/.authinfo.gpg")
+                          ("api.github.com" "macos-keychain-internet:login")
+                          ("github.com" "macos-keychain-internet:login")))))
+
   (it "reports a failing auth-source backend once, stops, and marks auth failed"
     (let ((remoto--logins (remoto-test--logins :failed nil)))
       (spy-on 'ghub--username :and-return-value "testuser")
@@ -2421,6 +2454,82 @@ using unauthenticated access until M-x remoto-reset-auth")
       ;; Every API call retries the lookup while this is nil, and each
       ;; retry would repeat the message.
       (expect (remoto--login-failed (remoto-test--github-login)) :to-be t))))
+
+(defun remoto-test--ghub-refuses (&rest refused)
+  "Make `ghub-get' refuse the tokens REFUSED with a 401 and answer any other."
+  (spy-on 'ghub-get :and-call-fake
+          (lambda (_resource &optional _params &rest args)
+            (if (member (plist-get args :auth) refused)
+                (signal 'ghub-http-error
+                        (list 401 "Unauthorized" "https://api.github.com/x" nil))
+              '((name . "r") (login . "alice"))))))
+
+(describe "a refused token"
+  (before-each
+    (spy-on 'message)
+    (spy-on 'y-or-n-p))
+
+  (it "gives way to the next token of auth-source before remoto asks to log in"
+    (let ((remoto--logins (remoto-test--logins))
+          (remoto-github-auth nil))
+      (spy-on 'ghub--username :and-return-value nil)
+      (remoto-test--auth-rows '(("api.github.com" "other^ghub" "t-other")
+                                ("api.github.com" "alice^ghub" "t-alice")))
+      (remoto-test--ghub-refuses "t-other")
+      (remoto-test-as-command
+        (expect (remoto--api remoto--github "repos/o/r") :to-equal '((name . "r") (login . "alice"))))
+      (expect 'y-or-n-p :not :to-have-been-called)
+      (expect (remoto--login-token (remoto-test--github-login)) :to-equal "t-alice")
+      (expect (remoto--login-failed (remoto-test--github-login)) :to-be nil)
+      (expect 'message :to-have-been-called-with
+              "Remoto: %s refused a token, using the next one auth-source holds" "GitHub")))
+
+  (it "gives way to auth-source when the token of remoto-github-auth is refused"
+    (let ((remoto--logins (remoto-test--logins))
+          (remoto-github-auth "t-stale"))
+      (spy-on 'ghub--username :and-return-value nil)
+      (remoto-test--auth-rows '(("github.com" "alice^remoto" "t-alice")))
+      (remoto-test--ghub-refuses "t-stale")
+      (remoto-test-as-command
+        (expect (remoto--api remoto--github "repos/o/r") :to-equal '((name . "r") (login . "alice")))
+        (expect (remoto--api remoto--github "repos/o/r2") :to-equal '((name . "r") (login . "alice"))))
+      (expect 'y-or-n-p :not :to-have-been-called)
+      (expect (remoto--login-token (remoto-test--github-login)) :to-equal "t-alice")
+      (expect (spy-calls-count 'ghub-get) :to-equal 3)
+      (expect 'message :to-have-been-called-with
+              "Remoto: %s refused the token in remoto-github-auth, using the one auth-source holds"
+              "GitHub")))
+
+  (it "asks to log in once no other token is left"
+    (let ((remoto--logins (remoto-test--logins))
+          (remoto-github-auth nil))
+      (spy-on 'ghub--username :and-return-value nil)
+      (remoto-test--auth-rows '(("api.github.com" "alice^ghub" "t-alice")))
+      (remoto-test--ghub-refuses "t-alice")
+      (remoto-test-as-command
+        (remoto--api remoto--github "repos/o/r"))
+      (expect 'y-or-n-p :to-have-been-called-with "GitHub refused the token. Log in again? ")
+      (expect (remoto--login-failed (remoto-test--github-login)) :to-be t))))
+
+(describe "a login of an older remoto"
+  (it "is forgotten, so an upgrade in a running Emacs looks its token up again"
+    (let ((remoto--logins (make-hash-table :test 'equal)))
+      ;; 2.4.0's login had three slots; its accessors fail on this remoto's.
+      (puthash "api.github.com" (record 'remoto--login nil "ghp_old" "alice") remoto--logins)
+      (puthash "codeberg.org/api/v1" (remoto--login-create :token "cb") remoto--logins)
+      (remoto--forget-stale-logins)
+      (expect (gethash "api.github.com" remoto--logins) :to-be nil)
+      (expect (remoto--login-token (gethash "codeberg.org/api/v1" remoto--logins)) :to-equal "cb")
+      (expect (remoto--ghub-username remoto--github "ghp_x") :to-equal "remoto"))))
+
+(describe "remoto--login-keys"
+  (it "names the command in the face of keys for a command, plainly elsewhere"
+    ;; A timer's error prints with %S, text properties and all.
+    (let ((this-command 'find-file))
+      (expect (text-property-not-all 0 16 'face nil (remoto--login-keys)) :to-be-truthy))
+    (let ((this-command nil))
+      (expect (remoto--login-keys) :to-equal "M-x remoto-login")
+      (expect (text-property-not-all 0 16 'face nil (remoto--login-keys)) :to-be nil))))
 
 (describe "remoto--warm-auth"
   (it "caches authenticated user and token on success"
@@ -2567,6 +2676,60 @@ using unauthenticated access until M-x remoto-reset-auth")
     (expect (remoto-login remoto--github) :to-throw 'user-error '("Remoto: no token given"))
     (expect 'ghub-get :not :to-have-been-called))
 
+  (it "keeps the token for the session when the store fails, and says why"
+    (let ((remoto--logins (remoto-test--logins :failed t)))
+      (spy-on 'read-passwd :and-return-value "ghp_new")
+      (spy-on 'ghub-get :and-return-value '((login . "alice")))
+      (spy-on 'remoto--token-file :and-return-value "/tmp/x/authinfo.gpg")
+      (spy-on 'remoto--store-token :and-call-fake
+              (lambda (&rest _) (error "GPG error: \"no usable configuration\", OpenPGP")))
+      (expect (remoto-login remoto--github) :to-equal "alice")
+      (expect (remoto--login-token (remoto-test--github-login)) :to-equal "ghp_new")
+      (expect (remoto--login-failed (remoto-test--github-login)) :to-be nil)
+      (expect 'message :to-have-been-called-with
+              "Remoto: logged in to %s as %s%s" "GitHub" "alice"
+              " for this session; /tmp/x/authinfo.gpg: GPG error: \"no usable configuration\", OpenPGP")))
+
+  (it "names the token page, and asks for the token when no browser opens"
+    (let ((remoto--logins (remoto-test--logins)))
+      (spy-on 'browse-url :and-call-fake (lambda (&rest _) (error "No usable browser found")))
+      (spy-on 'read-passwd :and-return-value "ghp_new")
+      (spy-on 'ghub-get :and-return-value '((login . "alice")))
+      (spy-on 'remoto--store-token :and-return-value "/tmp/a.gpg")
+      (expect (remoto-login remoto--github) :to-equal "alice")
+      (expect 'message :to-have-been-called-with
+              "Remoto: make a %s token at %s" "GitHub"
+              "https://github.com/settings/tokens/new?scopes=repo,read:org&description=remoto")
+      (expect 'read-passwd :to-have-been-called-with
+              (concat "GitHub token, from https://github.com/settings/tokens/new"
+                      "?scopes=repo,read:org&description=remoto: "))))
+
+  (it "says that the forge gave no answer when the check of the token got none"
+    (let ((remoto--logins (remoto-test--logins)))
+      (spy-on 'read-passwd :and-return-value "ghp_new")
+      (spy-on 'ghub-get :and-call-fake (lambda (&rest _) (error "No buffer returned")))
+      (spy-on 'remoto--store-token)
+      (expect (remoto-login remoto--github)
+              :to-throw 'user-error '("Remoto: GitHub did not answer the check of the token: No buffer returned"))
+      (expect 'remoto--store-token :not :to-have-been-called)))
+
+  (it "leaves no pasted token in the kill ring"
+    (let ((remoto--logins (remoto-test--logins))
+          (kill-ring (list " ghp_new \n" "kept"))
+          (kill-ring-yank-pointer nil)
+          (pasting nil))
+      (setq kill-ring-yank-pointer kill-ring)
+      (spy-on 'read-passwd :and-call-fake
+              (lambda (&rest _)
+                (setq pasting (bound-and-true-p xterm-store-paste-on-kill-ring))
+                " ghp_new \n"))
+      (spy-on 'ghub-get :and-return-value '((login . "alice")))
+      (spy-on 'remoto--store-token :and-return-value "/tmp/a.gpg")
+      (remoto-login remoto--github)
+      (expect pasting :to-be nil)
+      (expect kill-ring :to-equal '("kept"))
+      (expect kill-ring-yank-pointer :to-equal '("kept"))))
+
   (it "opens Codeberg's page and names the permissions to tick there"
     (let ((remoto--logins (remoto-test--logins)))
       (spy-on 'read-passwd :and-return-value "cb_new")
@@ -2622,6 +2785,20 @@ using unauthenticated access until M-x remoto-reset-auth")
       (spy-on 'write-region)
       (expect (remoto--store-token remoto--github "alice" "ghp_new") :to-be nil)
       (expect 'write-region :not :to-have-been-called)))
+
+  (it "writes a new .gpg file without Emacs's key list, as auth-source writes one"
+    ;; epa-file asks for recipients unless `epa-file-encrypt-to' is local.
+    (let ((seen nil))
+      (spy-on 'remoto--token-file :and-return-value "/tmp/remoto-no-such-dir/authinfo.gpg")
+      (spy-on 'auth-source-forget-all-cached)
+      (spy-on 'set-file-modes)
+      (spy-on 'write-region :and-call-fake
+              (lambda (&rest _)
+                (push (list (local-variable-p 'epa-file-encrypt-to) epa-file-encrypt-to) seen)))
+      (dolist (to '(t ("me@example.org") nil))
+        (let ((auth-source-gpg-encrypt-to to))
+          (remoto--store-token remoto--github "alice" "ghp_new")))
+      (expect (nreverse seen) :to-equal '((t nil) (t ("me@example.org")) (nil nil)))))
 
   (it "takes the first .gpg file of auth-sources, as a name or a :source"
     (let ((auth-sources '("~/.authinfo" (:source "~/.secrets/authinfo.gpg") "~/.authinfo.gpg")))

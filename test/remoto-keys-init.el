@@ -303,6 +303,13 @@ Every password is hidden, as `remoto-keys--hide-secret' does."
         (insert-file-contents log)
         (split-string (buffer-string) "\n" t)))))
 
+(defun remoto-keys-kill-has-token-p ()
+  "Return non-nil when a token of remoto's logins is in the kill ring."
+  (let ((tokens (remoto-keys--tokens)))
+    (and (seq-some (lambda (text) (member (string-trim (substring-no-properties text)) tokens))
+                   kill-ring)
+         t)))
+
 (defun remoto-keys-token-share (host)
   "Return (REQUESTS . WITH-TOKEN): the requests to HOST since Emacs started."
   (let ((rows (seq-filter (lambda (row) (equal (car row) host)) remoto-keys--auth-log)))
