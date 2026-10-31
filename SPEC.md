@@ -183,7 +183,7 @@ This returns one directory level at a time. The tree cache stores what it has an
 | `file-regular-p` | Check `:type` = `"blob"` in cache |
 | `file-readable-p` | `file-exists-p`, else `file-directory-p`: Dired asks this of `/github:OWNER` and `/github:OWNER/REPO@`, which `file-exists-p` denies, before it lists matches there |
 | `file-writable-p` | Always nil |
-| `file-attributes` | Synthesize from cache entry (size, type, mode, epoch-0 timestamps) |
+| `file-attributes` | Synthesize from cache entry (size, type, mode, epoch-0 timestamps), with an inode per canonical name (`remoto--inode`): `find-buffer-visiting` and `file-equal-p` take two files with equal inodes and attributes for one file |
 | `directory-files` | List tree cache children for parent path, prepend `.` and `..` |
 | `directory-files-and-attributes` | Same, with attributes |
 | `file-name-all-completions` | Filter tree cache entries by prefix, append `/` to dirs; at pre-repo levels, searches users or lists repos |
