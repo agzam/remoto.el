@@ -190,20 +190,9 @@ In a name that starts with ~/gh:~ or ~/github:~, ~#~ and ~%~ are literal: they d
 
 *** project.el
 
-A remoto directory inside a repository is a project: the repository's tree at its ref, rooted at ~/github:OWNER/REPO@REF:/~ and named ~OWNER/REPO@REF~. These commands work in it:
+A remoto repository is a project: ~C-x p f~, ~C-x p d~, ~C-x p D~, ~C-x p b~, ~C-x p k~ and ~C-x p p~ work in it.
 
-- ~project-find-file~ (~C-x p f~) and ~project-find-dir~ (~C-x p d~), with the file list from the tree remoto already holds
-- ~project-dired~, ~project-switch-to-buffer~ and ~project-kill-buffers~
-- ~project-switch-project~ to a remoto project in the project list, also before anything else has loaded remoto
-
-The commands that run a program in the project cannot work, since a repository has no local directory to run it in: ~project-find-regexp~, ~project-shell~, ~project-compile~, ~project-find-file~ with a prefix argument (it lists files with ~find~), and grep tools such as ~consult-ripgrep~. Clone the repository for those.
-
-The package autoloads put ~remoto-project-try~ on ~project-find-functions~. A setup without the autoloads adds it by hand:
-
-#+begin_src emacs-lisp
-(require 'remoto-project)
-(add-hook 'project-find-functions #'remoto-project-try -90)
-#+end_src
+Commands that require local items obviously won't work - ~project-shell~, ~project-compile~, ~project-find-regexp~, ~consult-ripgrep~.
 
 ** Embark integration
 
