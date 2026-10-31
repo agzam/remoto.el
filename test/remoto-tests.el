@@ -8734,6 +8734,13 @@ That is where the package autoloads put it."
     (expect (remoto-project-try "/cb:o/r@main:/src/")
             :to-equal '(remoto . "/codeberg:o/r@main:/")))
 
+  (it "gives a root without the text properties of the directory"
+    ;; A completion candidate can carry them, and project.el writes the root to its list.
+    (let ((root (cdr (remoto-project-try
+                      (propertize "/github:o/r@main:/src/" 'remoto-target "/github:o")))))
+      (expect root :to-equal "/github:o/r@main:/")
+      (expect (object-intervals root) :to-be nil)))
+
   (it "finds no project above a tree, nor in the short form of one"
     (spy-on 'remoto--api)
     (dolist (dir '("/github:" "/github:o/" "/github:o/r@" "/github:o/r#"
@@ -8811,6 +8818,15 @@ That is where the package autoloads put it."
               :to-equal '("/github:testowner/testrepo@main:/bin/run"
                           "/github:testowner/testrepo@main:/src/main.el"
                           "/github:testowner/testrepo@main:/src/utils.el"))))
+
+  (it "names its files without the text properties of the directory asked for"
+    (remoto-test-with-cache
+      (let ((files (project-files remoto-test--project
+                                  (list (propertize "/github:testowner/testrepo@main:/src/"
+                                                    'remoto-target "/github:testowner")))))
+        (expect files :to-equal '("/github:testowner/testrepo@main:/src/main.el"
+                                  "/github:testowner/testrepo@main:/src/utils.el"))
+        (expect (seq-mapcat #'object-intervals files) :to-be nil))))
 
   (it "names its files from the one directory asked for when project.el allows"
     (remoto-test-with-cache

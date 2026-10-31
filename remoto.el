@@ -3736,7 +3736,10 @@ Args: ORIG, STRING, PRED, ACTION."
   "Return the project of DIR, a directory in a repository tree, or nil.
 The project is (remoto . ROOT), ROOT the /PREFIX:OWNER/REPO@REF:/ of the
 tree.  A project found before the mode is on turns it on."
-  (when-let* ((parsed (remoto--parse-path (remoto--normalize-shorthand dir))))
+  ;; DIR can carry a completion candidate's text properties, and project.el
+  ;; writes the root to `project-list-file'.
+  (when-let* ((parsed (remoto--parse-path
+                       (remoto--normalize-shorthand (substring-no-properties dir)))))
     (remoto--ensure-global-mode)
     (cons 'remoto (concat (remoto--tree-prefix parsed) "/"))))
 
@@ -3762,7 +3765,8 @@ The names are relative to the one directory asked for when
 RELATIVE names them from DIR.  They come from the tree: the default
 `project-files' runs find, and a repository has no local directory to
 run it in."
-  (when-let* ((parsed (remoto--parse-path (remoto--normalize-shorthand dir))))
+  (when-let* ((parsed (remoto--parse-path
+                       (remoto--normalize-shorthand (substring-no-properties dir)))))
     (let* ((tree (remoto--ensure-tree parsed))
            (key (remoto--tree-lookup-key (remoto-path-path parsed)))
            (under (if (string-empty-p key) "" (concat key "/")))
