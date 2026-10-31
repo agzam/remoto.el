@@ -43,7 +43,7 @@ REMOTO_E2E_ONLY='^ff /gh:agzam' make test-keys-vanilla    # some cases
 
 * make test-keys-scenarios
 
-Each scenario is a vanilla profile with a git config, an auth-source and an init of its own, in =.keys/scenarios/=.  Its cases print the lines and run the checks of =make test-keys=; its probes print lines of their own, such as =logins=, =auth= (per host: requests, those with a token, those with GitHub's token) and =forges=.
+Each scenario is a profile, vanilla unless it names another, with a git config, an auth-source and an init of its own, in =.keys/scenarios/=.  Its cases print the lines and run the checks of =make test-keys=; its probes print lines of their own, such as =logins=, =auth= (per host: requests, those with a token, those with GitHub's token) and =forges=; its checks print a =PASS= or =FAIL= line each, and a =FAIL= makes the run exit 1.
 
 | Scenario    | Setup                                                              | What it shows                                                                                                                                                                       |
 |-------------+--------------------------------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -55,10 +55,25 @@ Each scenario is a vanilla profile with a git config, an auth-source and an init
 | =mock=      | a Forgejo instance in the runner, answering 429, 503, 502, 500     | the message of each fault, then the repository once it relays Codeberg                                                                                                              |
 | =instances= | =remoto-forgejo-instances= set at run time with =M-:=              | gitea.com, refused prefixes and hosts, removal, two hosts with one topic                                                                                                            |
 
+The login scenarios play a new user: each gets a HOME of its own under =/tmp=, so Emacs's default =auth-sources= find nothing of yours and =remoto-login= writes only there, and a =~/.gnupg= whose pinentry opens no window.  The token is pasted through tmux, as a terminal pastes it.
+
+| Scenario                                                    | Setup                                                                                     | What it shows                                                                                      |
+|-------------------------------------------------------------+-------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------|
+| =first-PROFILE=                                             | no token, no git config; vanilla, evil and full                                           | public repositories open, the hint once, "not found or private", =/gh:= asks to log in             |
+| =store-...=                                                 | no =~/.authinfo.gpg=, with loopback, no gpg, read-only, no browser, symmetric, plain only | where the token goes, what is asked on the way, the other rows kept, mode 600                      |
+| =mistyped=, =revoked=                                       | a token GitHub refuses, typed or stored                                                   | the message or the question to log in again, then the new row in place of the old                  |
+| =option-stale=                                              | a refused token in =remoto-github-auth=                                                   | the stored login in the next session                                                               |
+| =existing-...=, =accounts=                                  | ghub's, Forge's and netrc rows, two accounts, no git config                               | the token found and sent, no hint and no question                                                  |
+| =codeberg-login=                                            | no Codeberg token                                                                         | =/cb:= asks, the permissions named, the account listed, nothing sent to GitHub                     |
+| =dired-ret=, =option-none=, =entry-points=, =login-PROFILE= | GitHub's limit for reads without a token run out, every profile                           | when remoto asks to log in and when it never does, =y=, =n= and =C-g=, the login, the next session |
+
+The last row spends what is left of GitHub's hourly requests without a token for your IP, so those scenarios run only by name; anything else of yours that reads GitHub without a token fails until the reset the run prints.
+
 #+begin_src sh
 make test-keys-scenarios                                    # all; lit and cbtoken skip without their tokens
 REMOTO_KEYS_SCENARIOS='none mock' make test-keys-scenarios  # some
 REMOTO_E2E_CODEBERG_TOKEN=TOKEN REMOTO_KEYS_SCENARIOS=cbtoken make test-keys-scenarios
+REMOTO_E2E_TOKEN=$(gh auth token) REMOTO_KEYS_SCENARIOS='login-vanilla login-evil' make test-keys-scenarios
 #+end_src
 
 The Codeberg token needs read access to repositories, issues, organizations and your user; the run asks Codeberg for its account, and stops with exit 1 when Codeberg names none.  It goes into =.keys/scenarios/fixtures/sc-cbtoken.authinfo=, readable by you only, which the run deletes when the scenario ends; with =REMOTO_KEYS_KEEP= it stays until =make clean=.

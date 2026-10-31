@@ -393,11 +393,15 @@ comes from a list or a search endpoint."
 
 (defun remoto--account-entries (forge dir)
   "Return listing entries for the token's account on FORGE and its organizations.
-DIR is the root being listed.  Signal a `user-error' without a token,
-since no other request names them."
-  (let ((user (or (remoto--get-authenticated-user forge)
-                  (user-error "Remoto: %s lists your account and \
-organizations, which needs a token for %s" dir (remoto--api-host forge)))))
+DIR is the root being listed.  Without a token no request names them:
+offer a login when remoto may ask, and signal a `user-error' otherwise."
+  (let* ((title (remoto-forge-title forge))
+         (user (or (remoto--get-authenticated-user forge)
+                   (and (remoto--offer-login
+                         forge (format "%s needs a %s token. Log in now? " dir title))
+                        (remoto--get-authenticated-user forge))
+                   (user-error "Remoto: %s needs a %s token%s"
+                               dir title (remoto--login-tail)))))
     (mapcar (lambda (account)
               (let ((type (or (get-text-property 0 'remoto-acct-type account)
                               "User"))
@@ -1082,6 +1086,11 @@ opens need the file-name handler for as long as they live."
   ;; the URL parser would make of it.
   (when-let* ((topic (remoto--parse-topic-url input)))
     (setq input (apply #'format "%s/%s#%s" topic)))
+  (let ((remoto--may-ask t))
+    (remoto--browse-input input)))
+
+(defun remoto--browse-input (input)
+  "Open INPUT, a GitHub name `remoto-browse' read, as a topic, file or tree."
   (remoto--with-fetch-indicator
     (cond
      ;; Issue/PR mode: owner/repo#NUM
@@ -1103,9 +1112,12 @@ opens need the file-name handler for as long as they live."
       (let* ((owner (match-string 1 input))
              (repo (match-string 2 input))
              (subpath (match-string 3 input))
-             (canonical (remoto--maybe-rewrite
-                         (format "%s%s/%s/%s" (remoto--prefix remoto--github)
-                                 owner repo subpath))))
+             (canonical (remoto--or-private
+                         remoto--github owner repo
+                         (lambda ()
+                           (remoto--maybe-rewrite
+                            (format "%s%s/%s/%s" (remoto--prefix remoto--github)
+                                    owner repo subpath))))))
         (if (and (remoto--parse-path canonical)
                  (equal "tree"
                         (alist-get 'type
@@ -1123,7 +1135,9 @@ opens need the file-name handler for as long as they live."
                                 (match-string 2 input))
                       input))
              (parsed (remoto--parse-input clean))
-             (resolved (remoto--resolve-ref parsed))
+             (resolved (remoto--or-private
+                        remoto--github (remoto-path-owner parsed) (remoto-path-repo parsed)
+                        (lambda () (remoto--resolve-ref parsed))))
              (canonical (remoto--canonical-path resolved)))
         (if (equal "tree"
                    (alist-get 'type (remoto--tree-entry resolved)))

@@ -116,18 +116,23 @@ A custom `:reader` function (`remoto--json-reader`) is used instead of ghub's de
 
 ### Authentication
 
-Public repos work without any token - `remoto--api` automatically falls back to unauthenticated requests (60 req/hr) when no auth-source entry is found.
+Public repos work without any token. When remoto finds none for a forge, it reads that forge anonymously (GitHub allows 60 requests an hour) until `remoto-reset-auth` or `remoto-login`.
 
-For private repos (or higher rate limits at 5000 req/hr), tokens are resolved via `auth-source`. The `remoto-github-auth` defcustom controls which token is used:
+`M-x remoto-login` asks for a token, checks it with `/user` and stores it as `ACCOUNT^remoto` under the forge's web host, in the first `.gpg` file of `auth-sources`; without one, or when the file cannot be written, the token lasts the session. The file is written as `auth-source-netrc-saver` writes it: with `auth-source-gpg-encrypt-to` non-nil, `epa-file-encrypt-to` is buffer-local, so a new file gets a passphrase and no list of keys to pick. The token page's address goes to `*Messages*`, and into the prompt when `browse-url` fails; a pasted token is taken out of the kill ring. The lookup reads every row under the API host or the web host and ranks them: `^remoto`, `^forge`, `^ghub`, untagged, with the account git config names first within a tag; a macOS keychain is read only when no other source holds a token. It needs no git config: remoto hands ghub the row's account as `:username`, so ghub never asks git for one.
 
-- `nil` (default) - tries the standard `ghub` token (`USERNAME^ghub` in auth-source), falls back to unauthenticated
-- `'none` - always unauthenticated
-- A symbol like `'forge` - uses that package's token
-- A string - literal token value
+A token the forge refuses stays refused for the session: the lookup skips it, `remoto-github-auth`'s included, and the next token auth-source holds takes its place before remoto asks to log in again. A login kept by an older remoto, whose struct has fewer slots, is forgotten when remoto loads again.
 
-Auth-source entry format:
+The `remoto-github-auth` defcustom:
+
+- `nil` (default) - look the token up in auth-source
+- `'none` - never send a token
+- A string - the token itself
+
+Auth-source entry formats remoto reads, for example:
 ```
-machine api.github.com login USERNAME^ghub password ghp_TOKEN
+machine github.com login USERNAME^remoto password ghp_TOKEN
+machine api.github.com login USERNAME^forge password ghp_TOKEN
+machine codeberg.org login USERNAME password TOKEN
 ```
 
 Requests are synchronous (`ghub-get` without `:callback`). No sentinels, no async complexity. Browsing is inherently interactive and sequential - the user waits for the dired buffer or file to appear.
@@ -532,7 +537,7 @@ Other Forgejo and Gitea servers come from `remoto-forgejo-instances`, `(PREFIX H
 
 ### Login per host
 
-The login state (`remoto--login`: failed, token, user) is kept per API host in `remoto--logins`, so a GitHub token and a Codeberg token live apart and a failure on one host leaves the other alone. The token lookup follows ghub's conventions for the kind of forge: the user name from git config (`github.user`, `forgejo.user`), the secret in auth-source under the API host or the web host as `USER^forge`, `USER^ghub` or `USER`. A forge with no user name in git config is read anonymously, said once. `remoto-reset-auth` forgets every host, or one with a prefix argument. A request runs under `remoto-auth-timeout` only while ghub looks its token up itself; one with the token in hand waits for its answer. The token's account heads the root listing and the completion at a forge's root: GitHub's idle warm-up learns it once the mode is on, and the root completion of any forge learns it after `remoto-debounce-delay` of idle time and refreshes, asking `/user` only with a token.
+The login state (`remoto--login`: failed, token, user, account, hinted, declined) is kept per API host in `remoto--logins`, so a GitHub token and a Codeberg token live apart and a failure on one host leaves the other alone. The token lookup (see Authentication) needs no git config; a forge with no token is read anonymously from its first request. A request that needs a token offers `remoto-login` when a command of the user's runs a remoto entry point (`remoto--may-ask`, bound by the `find-file-noselect` and `dired-noselect` advice and by `remoto-browse`): an anonymous rate limit, a refused token, the root listing. During completion, from timers and from process filters it only says so; after a "no" too, for the session. `remoto-reset-auth` forgets every host, or one with a prefix argument, and auth-source's cache. The token's account heads the root listing and the completion at a forge's root: GitHub's idle warm-up learns it once the mode is on, and the root completion of any forge learns it after `remoto-debounce-delay` of idle time and refreshes, asking `/user` only with a token.
 
 ### Caches per forge
 
