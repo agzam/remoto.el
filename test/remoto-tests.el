@@ -1028,6 +1028,16 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
               :to-equal (string-search "N2" (cadr lines)))
       (expect (cadr lines) :to-match " 1234567890 .* abcdef    N2\n")))
 
+  (it "shows sizes as ls -h does when asked, and lines them up"
+    (let* ((entries '(("a" (type . "tree") (size . 7))
+                      ("b" (type . "tree") (size . 1234567890))))
+           (widths (remoto--listing-widths entries nil t)))
+      (expect widths :to-equal '(8 . 1))
+      (expect (remoto--format-dired-entry "b" (cdr (cadr entries)) nil widths t)
+              :to-match " github     1\\.2G Jan  1  2000 b\n")
+      (expect (remoto--format-dired-entry "b" (cdr (cadr entries)))
+              :to-match " 1234567890 ")))
+
   (it "lets a name past 40 columns move only its own note"
     (let* ((long (make-string 60 ?x))
            (entries `(("a" (type . "tree") (note . "N1"))
@@ -1048,7 +1058,69 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
   (it "rejects the option inside a long option or an argument"
     (expect (remoto--ls-switch-p "-al --time-style=+%F" "t") :not :to-be-truthy)
     (expect (remoto--ls-switch-p "-al" "t") :not :to-be-truthy)
-    (expect (remoto--ls-switch-p nil "t") :not :to-be-truthy)))
+    (expect (remoto--ls-switch-p nil "t") :not :to-be-truthy))
+
+  (it "finds an option that has only a long form"
+    (expect (remoto--ls-switch-p "-al --group-directories-first" nil
+                                 "group-directories-first")
+            :to-be-truthy)
+    (expect (remoto--ls-switch-p "-aBhlt" nil "group-directories-first")
+            :not :to-be-truthy)))
+
+(defconst remoto-test--unsorted
+  `(("b.el" (type . "blob") (size . 10)
+     (time . ,(encode-time (iso8601-parse "2024-01-01T00:00:00Z"))))
+    ("Docs" (type . "tree") (size . 0))
+    ("a.el" (type . "blob") (size . 300)
+     (time . ,(encode-time (iso8601-parse "2020-01-01T00:00:00Z"))))
+    ("Makefile" (type . "blob") (size . 300))
+    ("lisp" (type . "tree") (size . 0)))
+  "Files and directories in mixed case, in no order of their own.")
+
+(defun remoto-test--sorted-names (switches)
+  "Return the names of `remoto-test--unsorted' sorted under ls SWITCHES."
+  (mapcar #'car (remoto--sort-entries remoto-test--unsorted switches)))
+
+(describe "remoto--sort-entries"
+  ;; The orders are those gls gives for the same names and switches.
+  (it "sorts by name, ignoring case"
+    (expect (remoto-test--sorted-names "-al")
+            :to-equal '("a.el" "b.el" "Docs" "lisp" "Makefile")))
+
+  (it "puts directories first under --group-directories-first"
+    (expect (remoto-test--sorted-names "-al --group-directories-first")
+            :to-equal '("Docs" "lisp" "a.el" "b.el" "Makefile")))
+
+  (it "sorts by size under -S, largest first, and ties by name"
+    (dolist (switches '("-alS" "-al --sort=size"))
+      (expect (remoto-test--sorted-names switches)
+              :to-equal '("a.el" "Makefile" "b.el" "Docs" "lisp"))))
+
+  (it "sorts by time under -t, newest first, and puts entries without one last"
+    (dolist (switches '("-alt" "-al --sort=time"))
+      (expect (remoto-test--sorted-names switches)
+              :to-equal '("b.el" "a.el" "Docs" "lisp" "Makefile"))))
+
+  (it "reverses the order under -r, directories still first"
+    (dolist (switches '("-alr" "-al --reverse"))
+      (expect (remoto-test--sorted-names switches)
+              :to-equal '("Makefile" "lisp" "Docs" "b.el" "a.el")))
+    (expect (remoto-test--sorted-names "-alr --group-directories-first")
+            :to-equal '("lisp" "Docs" "Makefile" "b.el" "a.el")))
+
+  (it "keeps the given order under -U, which ignores -r and the grouping"
+    (dolist (switches '("-alU" "-alUr --group-directories-first" "-al --sort=none"))
+      (expect (remoto-test--sorted-names switches)
+              :to-equal '("b.el" "Docs" "a.el" "Makefile" "lisp")))))
+
+(describe "remoto--human-size"
+  (it "prints a size as gls -h does"
+    (pcase-dolist (`(,size . ,text)
+                   '((0 . "0") (549 . "549") (1023 . "1023") (1024 . "1.0K")
+                     (1025 . "1.1K") (1421 . "1.4K") (10239 . "10K") (10240 . "10K")
+                     (26187 . "26K") (1048575 . "1.0M") (1048576 . "1.0M")
+                     (2726297 . "2.6M")))
+      (expect (cons size (remoto--human-size size)) :to-equal (cons size text)))))
 
 (describe "remoto--classify-p"
   (it "recognizes the switches Dired reads as -F"
@@ -4775,10 +4847,35 @@ Return the buffer that RET leaves current."
       (remoto-test-with-listing switches
         (expect (remoto-test--listed-names
                  "/github:testowner/testrepo@main:/" switches)
-                :to-equal '("." ".." "CHANGELOG" "README.md" "a" "bin" "src"))
+                :to-equal '("." ".." "a" "bin" "CHANGELOG" "README.md" "src"))
         (expect (remoto-test--listed-names
                  "/github:testowner/testrepo@main:/bin/" switches)
                 :to-equal '("." ".." "run")))))
+
+  (it "orders a repository directory as the switches ask, . and .. first"
+    ;; README.md has 500 bytes and CHANGELOG 16; a directory has none.
+    (pcase-dolist (`(,switches . ,names)
+                   '(("-al" "a" "bin" "CHANGELOG" "README.md" "src")
+                     ("-al --group-directories-first"
+                      "a" "bin" "src" "CHANGELOG" "README.md")
+                     ("-aBhlt --group-directories-first"
+                      "a" "bin" "src" "CHANGELOG" "README.md")
+                     ("-alr --group-directories-first"
+                      "src" "bin" "a" "README.md" "CHANGELOG")
+                     ("-alS" "README.md" "CHANGELOG" "a" "bin" "src")
+                     ("-alU" "CHANGELOG" "README.md" "a" "bin" "src")))
+      (remoto-test-with-listing switches
+        (expect (cons switches (remoto-test--listed-names
+                                "/github:testowner/testrepo@main:/" switches))
+                :to-equal (cons switches (append '("." "..") names))))))
+
+  (it "shows the sizes of a repository directory as ls -h does"
+    (remoto-test-with-listing "-alh"
+      (puthash "LICENSE" '((type . "blob") (size . 35149) (sha . "jjj") (mode . "100644"))
+               (gethash "/github:testowner/testrepo@main" remoto--tree-cache))
+      (let ((text (remoto-test--listing-text "/github:testowner/testrepo@main:/" "-alh")))
+        (expect text :to-match " 35K Jan  1  2000 LICENSE$")
+        (expect text :to-match " 500 Jan  1  2000 README\\.md$"))))
 
   (it "shows the -F indicators under -F only"
     (remoto-test-with-listing "-alF"
@@ -5390,17 +5487,17 @@ repository."
               :to-equal '("search/users?q=qlik&per_page=100"))))
 
   (it "puts the account typed first, whatever its case"
-    ;; Capitals sort first, which put Qlik-PE and QlikSense above qlik.
+    ;; By name AQlik would come above qlik.
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake
               (lambda (_forge endpoint)
                 (if (string-prefix-p "search/users?" endpoint)
                     `((items ,@(mapcar (lambda (login) `((login . ,login) (type . "User")))
-                                       '("qlik-trial" "QlikSense" "qlik" "Qlik-PE"))))
+                                       '("qlik-trial" "QlikSense" "qlik" "Qlik-PE" "AQlik"))))
                   (remoto-test--listing-api forge endpoint))))
       (with-current-buffer (find-file-noselect "/gh:Qlik")
         (expect (cdr dired-directory)
-                :to-equal '("qlik" "Qlik-PE" "QlikSense" "qlik-trial"))
+                :to-equal '("qlik" "AQlik" "Qlik-PE" "qlik-trial" "QlikSense"))
         (expect (dired-get-filename 'verbatim t) :to-equal "qlik"))))
 
   (it "searches for the typed name, though completion cached a narrowed list"
