@@ -2219,36 +2219,115 @@ names an option that has only its LONG form."
 SWITCHES holds the options as a string, the way Dired passes them."
   (remoto--ls-switch-p switches "F" "classify"))
 
-(defun remoto--human-p (switches)
-  "Return non-nil when ls options ask for -h sizes.
-SWITCHES holds the options as a string, the way Dired passes them."
-  (remoto--ls-switch-p switches "h" "human-readable"))
+(defconst remoto--ls-short-options
+  '((?U (:sort . none)) (?f (:sort . none) (:show . all)) (?S (:sort . size))
+    (?t (:sort . time)) (?v (:sort . version)) (?X (:sort . extension))
+    (?r (:reverse . t)) (?h (:human . 1024)) (?a (:show . all))
+    (?A (:show . almost)) (?B (:backups . t)))
+  "The settings each short ls option makes, in the order it makes them.")
 
-(defun remoto--human-size (size)
+(defconst remoto--ls-long-options
+  '(("reverse" (:reverse . t)) ("group-directories-first" (:group . t))
+    ("human-readable" (:human . 1024)) ("si" (:human . 1000))
+    ("all" (:show . all)) ("almost-all" (:show . almost))
+    ("ignore-backups" (:backups . t)))
+  "The settings each long ls option without an argument makes.")
+
+(defun remoto--ls-sort-key (word)
+  "Return the sort key that GNU ls's --sort=WORD asks for."
+  (pcase word
+    ("none" 'none) ("size" 'size) ("time" 'time) ("version" 'version)
+    ("extension" 'extension) ("width" 'width) (_ 'name)))
+
+(defun remoto--ls-argument (name value)
+  "Return the settings of the ls option NAME with the argument VALUE."
+  (pcase name
+    ("sort" `((:sort . ,(remoto--ls-sort-key value))))
+    ("ignore" `((:ignore . ,value)))
+    ("hide" `((:hide . ,value)))))
+
+(defun remoto--ls-word (word)
+  "Return (SETTINGS . WAITING) for WORD of the ls options, SETTINGS in order.
+WAITING names the option that takes the next word as its argument.  In
+a group of short options, -I, -T and -w take the rest of the group."
+  (let ((case-fold-search nil))
+    (cond
+     ((string-match "\\`--\\([^=]+\\)\\(?:=\\(.*\\)\\)?\\'" word)
+      (let ((name (match-string 1 word))
+            (value (match-string 2 word)))
+        (cond (value (list (remoto--ls-argument name value)))
+              ((member name '("sort" "ignore" "hide")) (cons nil name))
+              (t (list (cdr (assoc name remoto--ls-long-options)))))))
+     ((string-match "\\`-\\([^ITw]*\\)\\([ITw]\\)?\\(.*\\)\\'" word)
+      (let ((settings (seq-mapcat (lambda (char) (alist-get char remoto--ls-short-options))
+                                  (match-string 1 word)))
+            (name (pcase (match-string 2 word) ('nil nil) ("I" "ignore") (_ "skip")))
+            (value (match-string 3 word)))
+        (cond ((null name) (list settings))
+              ((string-empty-p value) (cons settings name))
+              (t (list (append settings (remoto--ls-argument name value))))))))))
+
+(defun remoto--ls-settings (words)
+  "Return the settings the ls option WORDS make, as (KEY . VALUE), last first.
+An option whose argument is not in its own word takes the next one."
+  (pcase-let ((`(,settings . ,waiting) (and words (remoto--ls-word (car words)))))
+    (cond ((null words) nil)
+          (waiting (append (remoto--ls-settings (cddr words))
+                           (and (cdr words) (remoto--ls-argument waiting (cadr words)))
+                           (reverse settings)))
+          (t (append (remoto--ls-settings (cdr words)) (reverse settings))))))
+
+(defun remoto--ls-options (switches)
+  "Return a plist of what the ls options ask of a listing.
+SWITCHES holds them as Dired passes them.  :sort, :reverse, :group and
+:human come as GNU ls reads them, the last given winning; :show is all,
+almost or nil, :backups is -B, :ignore and :hide those of -I and --hide."
+  (let ((settings (remoto--ls-settings
+                   (split-string (if (listp switches) (string-join switches " ") switches)))))
+    (list :sort (alist-get :sort settings 'name)
+          :reverse (alist-get :reverse settings)
+          :group (alist-get :group settings)
+          :human (alist-get :human settings)
+          :show (alist-get :show settings)
+          :backups (alist-get :backups settings)
+          :ignore (seq-keep (lambda (setting) (and (eq (car setting) :ignore) (cdr setting)))
+                            settings)
+          :hide (seq-keep (lambda (setting) (and (eq (car setting) :hide) (cdr setting)))
+                          settings))))
+
+(defun remoto--human-p (switches)
+  "Return 1024 when ls options ask for -h sizes, 1000 for --si, else nil.
+SWITCHES holds the options as a string, the way Dired passes them."
+  (plist-get (remoto--ls-options switches) :human))
+
+(defun remoto--human-size (size &optional base)
   "Return SIZE in bytes as ls -h prints it: 549, 1.4K, 26K, 2.6M.
-The digits come as GNU's human_readable makes them: rounded up, with one
-decimal below 10."
-  (let ((amount size) (tenths 0) (rounding 0)
-        (units '("K" "M" "G" "T" "P" "E")) unit)
-    (while (and (<= 1024 amount) units)
-      (let* ((r10 (+ (* (% amount 1024) 10) tenths))
-             (r2 (+ (* (% r10 1024) 2) (ash rounding -1))))
-        (setq amount (/ amount 1024)
-              tenths (/ r10 1024)
-              rounding (cond ((and (< r2 1024) (zerop (+ r2 rounding))) 0)
-                             ((< r2 1024) 1)
-                             ((< 1024 (+ r2 rounding)) 3)
-                             (t 2))
-              unit (pop units))))
-    (when (and unit (< amount 10) (< 0 rounding))
-      (setq tenths (1+ tenths) rounding 0)
-      (when (= tenths 10)
-        (setq amount (1+ amount) tenths 0)))
-    (cond ((null unit) (number-to-string amount))
-          ((< amount 10) (format "%d.%d%s" amount tenths unit))
-          ((zerop (+ tenths rounding)) (format "%d%s" amount unit))
-          ((and (= (1+ amount) 1024) units) (format "1.0%s" (car units)))
-          (t (format "%d%s" (1+ amount) unit)))))
+BASE 1000 prints it as --si does: 1.5k, 26k.  The digits come as GNU's
+human_readable makes them: rounded up, with one decimal below 10."
+  (let ((base (if (eql base 1000) 1000 1024)))
+    (named-let scale ((amount size) (tenths 0) (rounding 0) (unit nil)
+                      (units (list (if (= base 1000) "k" "K") "M" "G" "T" "P" "E")))
+      (if (and (<= base amount) units)
+          (let* ((r10 (+ (* (% amount base) 10) tenths))
+                 (r2 (+ (* (% r10 base) 2) (ash rounding -1))))
+            (scale (/ amount base) (/ r10 base)
+                   (cond ((and (< r2 base) (zerop (+ r2 rounding))) 0)
+                         ((< r2 base) 1)
+                         ((< base (+ r2 rounding)) 3)
+                         (t 2))
+                   (car units) (cdr units)))
+        ;; One decimal shows below 10, and its tenth rounds up.
+        (let* ((up (and unit (< amount 10) (< 0 rounding)))
+               (tenths (if up (1+ tenths) tenths))
+               (carry (= tenths 10))
+               (amount (if carry (1+ amount) amount))
+               (tenths (if carry 0 tenths))
+               (rounding (if up 0 rounding)))
+          (cond ((null unit) (number-to-string amount))
+                ((< amount 10) (format "%d.%d%s" amount tenths unit))
+                ((zerop (+ tenths rounding)) (format "%d%s" amount unit))
+                ((and (= (1+ amount) base) units) (format "1.0%s" (car units)))
+                (t (format "%d%s" (1+ amount) unit))))))))
 
 (defun remoto--ls-indicator (plist classify)
   "Return the ls -F type indicator for an entry with PLIST, if CLASSIFY."
@@ -2278,9 +2357,9 @@ A forge's description may span lines; a Dired line or an annotation cannot."
 
 (defun remoto--format-dired-entry (name plist &optional classify widths human)
   "Format a single Dired line for NAME with PLIST attributes.
-CLASSIFY appends the ls -F indicator, HUMAN prints the size as -h does.
-WIDTHS, the size and name column widths, line up a listing; a note in
-PLIST starts 4 columns past the names, where Dired hides link targets."
+CLASSIFY appends the ls -F indicator; HUMAN, 1024 or 1000, sizes as -h or
+--si do.  WIDTHS line up a listing's sizes and names; a note in PLIST
+starts 4 columns past the names, where Dired hides link targets."
   (let* ((dir? (equal "tree" (alist-get 'type plist)))
          (indicator (remoto--ls-indicator plist classify))
          (note (and (alist-get 'note plist) (remoto--one-line (alist-get 'note plist))))
@@ -2288,7 +2367,7 @@ PLIST starts 4 columns past the names, where Dired hides link targets."
     (concat (or (alist-get 'perms plist)
                 (remoto--mode-to-string (alist-get 'mode plist) dir?))
             "  1 github github "
-            (string-pad (if human (remoto--human-size size) (number-to-string size))
+            (string-pad (if human (remoto--human-size size human) (number-to-string size))
                         (or (car widths) 8) nil t)
             " " (remoto--ls-time (alist-get 'time plist)) " "
             ;; Dired reads exactly the name by this property, whatever
@@ -2305,12 +2384,12 @@ PLIST starts 4 columns past the names, where Dired hides link targets."
 
 (defun remoto--listing-widths (entries classify &optional human)
   "Return the size and name column widths that line up ENTRIES.
-CLASSIFY counts the ls -F indicator into the name, HUMAN takes -h sizes.
-The name column stops at 40, so that one long name moves only its note."
+CLASSIFY counts the ls -F indicator into the name, HUMAN takes -h or --si
+sizes.  The name column stops at 40, so one long name moves only its note."
   (cons (apply #'max 8 (mapcar (lambda (entry)
                                  (let ((size (or (alist-get 'size (cdr entry)) 0)))
                                    (length (if human
-                                               (remoto--human-size size)
+                                               (remoto--human-size size human)
                                              (number-to-string size)))))
                                entries))
         (min 40 (apply #'max 0 (mapcar (lambda (entry)
@@ -2330,50 +2409,239 @@ Not the total line: Dired deletes that under the default `dired-free-space'."
       ('failed (format "%d, the rest failed to load; `remoto-refresh' retries"
                        count)))))
 
-(defun remoto--name-lessp (a b)
-  "Return non-nil when the name A comes before B in the order of ls.
-Case counts only between names that differ in nothing else."
-  (let ((order (compare-strings a nil nil b nil nil t)))
-    (if (eq order t) (string< a b) (< order 0))))
+(defun remoto--ls-locale ()
+  "Return the locale ls takes its order of names from, or nil for none.
+That is LC_ALL, else LC_COLLATE, else LANG, from `process-environment',
+which ls inherits."
+  (seq-some (lambda (var)
+              (let ((value (getenv var)))
+                (and value (not (string-empty-p value)) value)))
+            '("LC_ALL" "LC_COLLATE" "LANG")))
+
+(defconst remoto--macos-ascii-keys
+  (let ((order " _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$0123456789abcdefghijklmnopqrstuvwxyz"))
+    (vconcat (mapcar (lambda (char)
+                       (when-let* ((index (string-search (string (downcase char)) order)))
+                         (list (1+ index) 1 (if (<= ?A char ?Z) 2 1))))
+                     (number-sequence 0 127))))
+  "The (WEIGHT ACCENT CASE) of each ASCII character in the order of macOS.
+Symbols weigh least, then digits, then letters, both cases of a letter
+alike, capitals after lowercase; a character with none counts for nothing.")
+
+(defconst remoto--macos-accents
+  "\u0301\u0300\u0306\u0302\u030c\u030a\u0308\u030b\u0303\u0307\u0327\u0328\u0304"
+  "Combining accents in the order macOS sorts the letters that bear them.")
+
+(defun remoto--macos-key (name)
+  "Return a string whose `string<' order is that of NAME on macOS.
+The weights count first, then accents, then case, lowercase first.  An
+accented letter weighs as its base; any other character outside ASCII
+counts for nothing, as a Cyrillic or CJK one does on macOS."
+  (let ((keys (delq nil (mapcar #'remoto--macos-char-key name))))
+    (concat (mapcar #'car keys) "\0" (mapcar #'cadr keys) "\0" (mapcar #'caddr keys))))
+
+(defun remoto--macos-char-key (char)
+  "Return (WEIGHT ACCENT CASE) of CHAR in the order of names on macOS.
+Return nil for a character that counts for nothing there."
+  (if (< char 128)
+      (aref remoto--macos-ascii-keys char)
+    (let* ((parts (get-char-code-property char 'decomposition))
+           (base (car parts))
+           (accent (cadr parts))
+           (key (and (characterp base) (< base 128)
+                     (aref remoto--macos-ascii-keys base)))
+           (rank (and key (characterp accent)
+                      (string-search (string accent) remoto--macos-accents))))
+      (and key
+           (list (car key)
+                 (cond ((not (characterp accent)) 1)
+                       (rank (+ 2 rank))
+                       (t (+ 16 (logand accent #xff))))
+                 (nth 2 key))))))
+
+(defun remoto--name-lessp-function ()
+  "Return a predicate that orders names as ls does in its locale.
+`string-collate-lessp' has no locales on macOS, so the order ls has there
+is copied; the C locale orders by bytes.  Names alike in order go by bytes."
+  (let ((locale (remoto--ls-locale)))
+    (cond ((or (null locale) (member locale '("C" "POSIX"))
+               (and (eq system-type 'darwin) (string-prefix-p "C." locale)))
+           #'string<)
+          ((eq system-type 'darwin)
+           (let ((keys (make-hash-table :test #'equal)))
+             (lambda (a b)
+               (let ((key-a (with-memoization (gethash a keys) (remoto--macos-key a)))
+                     (key-b (with-memoization (gethash b keys) (remoto--macos-key b))))
+                 (or (string< key-a key-b)
+                     (and (string= key-a key-b) (string< a b)))))))
+          ((condition-case nil
+               (or (string-collate-lessp "a" "b" locale) t)
+             (error nil))
+           (lambda (a b)
+             (or (string-collate-lessp a b locale)
+                 (and (not (string-collate-lessp b a locale)) (string< a b)))))
+          (t #'string<))))
+
+(defun remoto--version-lessp (a b)
+  "Return non-nil when the name A comes before B under ls -v.
+`string-version-lessp' compares as gnulib's filevercmp, which GNU ls -v
+uses; names it finds alike go by bytes, as GNU ls has them."
+  (or (string-version-lessp a b)
+      (and (not (string-version-lessp b a)) (string< a b))))
+
+(defun remoto--extension (name)
+  "Return the extension of NAME for ls -X: NAME from its last dot, or nothing."
+  (if (string-match "\\.[^.]*\\'" name)
+      (substring name (match-beginning 0))
+    ""))
+
+(defun remoto--dot-entry-p (entry)
+  "Return non-nil when ENTRY is the . or .. of a listing."
+  (member (car entry) '("." "..")))
+
+(defvar ls-lisp-use-insert-directory-program)
+(defvar ls-lisp-dirs-first)
+(declare-function ls-lisp-handle-switches "ls-lisp" (file-alist switches))
+(declare-function ls-lisp--sanitize-switches "ls-lisp" (switches))
+
+(defun remoto--ls-lisp-p ()
+  "Return non-nil when ls-lisp lists local directories, not ls."
+  (and (featurep 'ls-lisp) (not ls-lisp-use-insert-directory-program)))
+
+(defun remoto--ls-lisp-switches (switches)
+  "Return the characters that stand for the ls options in ls-lisp.
+SWITCHES holds the options as Dired passes them."
+  (seq-remove (lambda (char) (memq char '(?\s ?-)))
+              (ls-lisp--sanitize-switches (or switches ""))))
+
+(defun remoto--ls-lisp-sort (entries switches)
+  "Return ENTRIES in the order ls-lisp gives the files of a local directory.
+SWITCHES are the ls options.  ls-lisp sorts ENTRIES itself, from file
+attributes made of theirs, and reads the options as its
+`insert-directory' does."
+  ;; ls-lisp compares the variable with t, and binds t itself for a local
+  ;; directory listed with --group-directories-first.
+  (let ((ls-lisp-dirs-first (if (string-search "--group-directories-first"
+                                               (or switches ""))
+                                t
+                              ls-lisp-dirs-first)))
+    ;; Each file carries its entry after its twelve file attributes.
+    (mapcar (lambda (file) (car (last file)))
+            (ls-lisp-handle-switches
+             (mapcar (lambda (entry)
+                       (let* ((dot (remoto--dot-entry-p entry))
+                              (time (if dot most-positive-fixnum
+                                      (or (alist-get 'time (cdr entry)) 0))))
+                         (list (car entry) (equal "tree" (alist-get 'type (cdr entry)))
+                               1 0 0 time time time
+                               (if dot most-positive-fixnum
+                                 (or (alist-get 'size (cdr entry)) 0))
+                               "-rw-r--r--" nil 0 0 entry)))
+                     entries)
+             (remq ?F (remoto--ls-lisp-switches switches))))))
 
 (defun remoto--sort-entries (entries switches)
   "Return ENTRIES, each (NAME . ATTRIBUTES), in the order ls gives them.
-The ls options SWITCHES pick the key: -U keeps ENTRIES as they are, -S
-sorts by size and -t by time, largest and newest first, else by name;
-ties go by name.  -r reverses, --group-directories-first groups."
-  (if (remoto--ls-switch-p switches "U" "sort=none")
-      (copy-sequence entries)
-    (let* ((key (cond ((remoto--ls-switch-p switches "S" "sort=size")
-                       (lambda (entry) (- (or (alist-get 'size (cdr entry)) 0))))
-                      ((remoto--ls-switch-p switches "t" "sort=time")
-                       (lambda (entry)
-                         (- (float-time (or (alist-get 'time (cdr entry)) 0)))))))
-           (sorted (sort (copy-sequence entries)
-                         (lambda (a b)
-                           (let ((ka (and key (funcall key a)))
-                                 (kb (and key (funcall key b))))
-                             (if (and key (/= ka kb))
-                                 (< ka kb)
-                               (remoto--name-lessp (car a) (car b)))))))
-           (sorted (if (remoto--ls-switch-p switches "r" "reverse")
-                       (nreverse sorted)
-                     sorted)))
-      (if (remoto--ls-switch-p switches nil "group-directories-first")
-          (let ((dir-p (lambda (entry) (equal "tree" (alist-get 'type (cdr entry))))))
-            (append (seq-filter dir-p sorted) (seq-remove dir-p sorted)))
-        sorted))))
+SWITCHES are the ls options, read as GNU ls reads them, or as ls-lisp
+does when it lists local directories.  remoto knows no size or time of
+the entries . and .., so they lead under -S and -t."
+  (let* ((options (remoto--ls-options switches))
+         (sort (plist-get options :sort)))
+    (cond
+     ((remoto--ls-lisp-p) (remoto--ls-lisp-sort entries switches))
+     ((eq sort 'none) (copy-sequence entries))
+     (t
+      (let* ((name< (if (eq sort 'version)
+                        #'remoto--version-lessp
+                      (remoto--name-lessp-function)))
+             (lessp
+              (pcase sort
+                ((or 'size 'time)
+                 (let ((key (if (eq sort 'size)
+                                (lambda (entry) (or (alist-get 'size (cdr entry)) 0))
+                              (lambda (entry)
+                                (float-time (or (alist-get 'time (cdr entry)) 0))))))
+                   (lambda (a b)
+                     (let ((key-a (if (remoto--dot-entry-p a) 1.0e+INF (funcall key a)))
+                           (key-b (if (remoto--dot-entry-p b) 1.0e+INF (funcall key b))))
+                       (if (= key-a key-b)
+                           (funcall name< (car a) (car b))
+                         (< key-b key-a))))))
+                ('width
+                 (lambda (a b)
+                   (let ((width-a (string-width (car a)))
+                         (width-b (string-width (car b))))
+                     (if (= width-a width-b)
+                         (funcall name< (car a) (car b))
+                       (< width-a width-b)))))
+                ('extension
+                 (lambda (a b)
+                   (let ((ext-a (remoto--extension (car a)))
+                         (ext-b (remoto--extension (car b))))
+                     (cond ((funcall name< ext-a ext-b) t)
+                           ((funcall name< ext-b ext-a) nil)
+                           (t (funcall name< (car a) (car b)))))))
+                (_ (lambda (a b) (funcall name< (car a) (car b))))))
+             (sorted (sort (copy-sequence entries) lessp))
+             (ordered (if (plist-get options :reverse) (reverse sorted) sorted)))
+        (if (plist-get options :group)
+            (let ((dir-p (lambda (entry)
+                           (equal "tree" (alist-get 'type (cdr entry))))))
+              (append (seq-filter dir-p ordered) (seq-remove dir-p ordered)))
+          ordered))))))
+
+(defun remoto--ls-pattern-p (pattern name)
+  "Return non-nil when the shell PATTERN of -I or --hide matches NAME.
+A dot that starts NAME matches only a dot that starts PATTERN, as ls has it."
+  (and (condition-case nil
+           (let ((case-fold-search nil))
+             (string-match-p (wildcard-to-regexp pattern) name))
+         (invalid-regexp nil))
+       (or (not (string-prefix-p "." name)) (string-prefix-p "." pattern))))
+
+(defun remoto--shown-entries (entries switches)
+  "Return the ENTRIES of a listing that ls would list.
+SWITCHES are the ls options: dot names need -a, or -A, which leaves
+out only . and ..; -B leaves out backups, -I and --hide what their
+patterns match.  ls-lisp reads only -a, -A and -B."
+  (if (remoto--ls-lisp-p)
+      (let ((chars (remoto--ls-lisp-switches switches)))
+        (seq-remove (lambda (entry)
+                      (or (if (memq ?A chars)
+                              (remoto--dot-entry-p entry)
+                            (and (not (memq ?a chars))
+                                 (string-prefix-p "." (car entry))))
+                          (and (memq ?B chars) (string-suffix-p "~" (car entry)))))
+                    entries))
+    (let* ((options (remoto--ls-options switches))
+           (show (plist-get options :show))
+           (patterns (append (plist-get options :ignore)
+                             (and (plist-get options :backups) '("*~" ".*~"))
+                             (and (not show) (plist-get options :hide)))))
+      (seq-remove (lambda (entry)
+                    (or (pcase show
+                          ('all nil)
+                          ('almost (remoto--dot-entry-p entry))
+                          (_ (string-prefix-p "." (car entry))))
+                        (seq-some (lambda (pattern)
+                                    (remoto--ls-pattern-p pattern (car entry)))
+                                  patterns)))
+                  entries))))
 
 (defun remoto--insert-listing (dir switches)
   "Insert the Dired listing of DIR, accounts or repositories.
-SWITCHES are the ls options, which decide the order."
+SWITCHES are the ls options, which decide what shows and in what order."
   (let* ((listing (remoto--listing dir))
          (classify (remoto--classify-p switches))
          (human (remoto--human-p switches))
-         (lines (append (list (cons "." `((note . ,(remoto--listing-note listing))
-                                          ,@remoto--dir-entry))
-                              (cons ".." remoto--dir-entry))
-                        (remoto--sort-entries (remoto--listing-entries listing)
-                                              switches)))
+         (lines (remoto--sort-entries
+                 (remoto--shown-entries
+                  (append (list (cons "." `((note . ,(remoto--listing-note listing))
+                                            ,@remoto--dir-entry))
+                                (cons ".." remoto--dir-entry))
+                          (remoto--listing-entries listing))
+                  switches)
+                 switches))
          (widths (remoto--listing-widths lines classify human)))
     (insert "total 0\n")
     (dolist (line lines)
@@ -2441,10 +2709,13 @@ line, as with ls-lisp.  /github: and /github:OWNER/ list accounts and repos."
         (if full-directory-p
             (progn
               (insert "total 0\n")
-              (insert (remoto--format-dired-entry "." remoto--dir-entry classify))
-              (insert (remoto--format-dired-entry ".." remoto--dir-entry classify))
-              (dolist (child (remoto--sort-entries (remoto--tree-children parsed)
-                                                   switches))
+              (dolist (child (remoto--sort-entries
+                              (remoto--shown-entries
+                               (append (list (cons "." remoto--dir-entry)
+                                             (cons ".." remoto--dir-entry))
+                                       (remoto--tree-children parsed))
+                               switches)
+                              switches))
                 (insert (remoto--format-dired-entry
                          (car child) (cdr child) classify nil human))))
           (insert "  " (remoto--format-dired-entry
@@ -3267,8 +3538,12 @@ same as the account typed as a query."
   (and (derived-mode-p 'dired-mode)
        (save-excursion (dired-goto-file name))))
 
+(defvar remoto--dired-switches nil
+  "The ls options of the Dired being made, nil for `dired-listing-switches'.
+A Dired of the names that match what was typed takes its order from them.")
+
 (defun remoto--sorted-names (dir names query)
-  "Return NAMES, lines of a Dired of DIR, in the order of `dired-listing-switches'.
+  "Return NAMES, lines of a Dired of DIR, in the order of its ls options.
 A name that is QUERY, ignoring case, comes first, wherever the switches
 would put it: it is what was typed.  Their text properties go."
   (let* ((sorted (mapcar #'car
@@ -3277,7 +3552,7 @@ would put it: it is what was typed.  Their text properties go."
                                     (let ((name (substring-no-properties name)))
                                       (cons name (remoto--entry-for (concat dir name)))))
                                   names)
-                          dired-listing-switches)))
+                          (or remoto--dired-switches dired-listing-switches))))
          (exact (seq-find (lambda (name) (string-equal-ignore-case name query))
                           sorted)))
     (if exact (cons exact (delete exact sorted)) sorted)))
@@ -3376,8 +3651,8 @@ them for an empty QUERY; DIR is /github:OWNER/REPO@.  Signal a
 (defun remoto--file-matches (filename)
   "Return (DIR . NAMES) when the canonical FILENAME is missing from its tree.
 NAMES are the entries of its directory DIR that hold each word of its
-name.  A name with a trailing slash or a wildcard is no query, and one
-that nothing matches visits a new file, as a local name does."
+name, in the order of the Dired's ls options.  A name with a trailing
+slash or a wildcard is no query; one that nothing matches is a new file."
   (when-let* ((parsed (remoto--parse-path filename))
               (path (remoto-path-path parsed))
               (name (file-name-nondirectory path))
@@ -3388,9 +3663,12 @@ that nothing matches visits a new file, as a local name does."
                            (or (file-name-directory path) "/")))
               (dir-parsed (remoto--parse-path dir))
               ((equal "tree" (alist-get 'type (remoto--tree-entry dir-parsed))))
-              (names (seq-filter (lambda (child)
-                                   (remoto--words-match-p name child))
-                                 (mapcar #'car (remoto--tree-children dir-parsed)))))
+              (names (mapcar #'car
+                             (remoto--sort-entries
+                              (seq-filter (lambda (child)
+                                            (remoto--words-match-p name (car child)))
+                                          (remoto--tree-children dir-parsed))
+                              (or remoto--dired-switches dired-listing-switches)))))
     (cons dir names)))
 
 (defun remoto--query-matches (filename)
@@ -3502,7 +3780,8 @@ every Dired command calls, so each buffer gets a canonical directory."
         (apply orig-fn
                (if (consp dir-or-list)
                    (cons (remoto--maybe-rewrite dir) (cdr dir-or-list))
-                 (remoto--name-or-matches dir))
+                 (let ((remoto--dired-switches (car args)))
+                   (remoto--name-or-matches dir)))
                args))
     (apply orig-fn dir-or-list args)))
 

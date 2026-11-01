@@ -23,6 +23,10 @@
                                                     buffer-file-name)))
   "Where the fixtures and the expected states live.")
 
+;; Dired orders names by the locale ls gets; in the C locale that is the
+;; order of their bytes on every system, which the expected states hold.
+(setenv "LC_ALL" "C")
+
 (defconst remoto-e2e-profile (or (getenv "REMOTO_E2E_PROFILE") "vanilla")
   "The completion setup the cases run under.")
 
