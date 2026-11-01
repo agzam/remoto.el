@@ -1121,6 +1121,49 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
                       :to-equal '("testowner" "testrepo" "src/main.el" "main")))
           (delete-file dest)))))
 
+  (it "gives a new copy the git mode of its file, masked by the default modes"
+    ;; As `cp' does; the copy comes from a temporary file of mode 600.
+    (remoto-test-with-cache
+      (puthash "link" '((type . "blob") (size . 6) (sha . "lll") (mode . "120000"))
+               (gethash "/github:testowner/testrepo@main" remoto--tree-cache))
+      (spy-on 'remoto--fetch-file-content :and-return-value "data\n")
+      (let ((dir (make-temp-file "remoto-copy-modes-" t)))
+        (unwind-protect
+            (pcase-dolist (`(,umask-modes ,path ,modes)
+                           '((#o755 "README.md" #o644) (#o755 "bin/run" #o755)
+                             (#o755 "link" #o644) (#o700 "README.md" #o600)
+                             (#o700 "bin/run" #o700)))
+              (let ((dest (expand-file-name
+                           (format "%o-%s" umask-modes (file-name-nondirectory path))
+                           dir)))
+                (with-file-modes umask-modes
+                  (copy-file (concat "/github:testowner/testrepo@main:/" path) dest))
+                (expect (list path umask-modes (file-modes dest))
+                        :to-equal (list path umask-modes modes))))
+          (delete-directory dir t)))))
+
+  (it "copies the git mode unmasked under PRESERVE-PERMISSIONS"
+    (remoto-test-with-cache
+      (spy-on 'remoto--fetch-file-content :and-return-value "data\n")
+      (let ((dir (make-temp-file "remoto-copy-modes-" t)))
+        (unwind-protect
+            (let ((dest (expand-file-name "run" dir)))
+              (with-file-modes #o700
+                (copy-file "/github:testowner/testrepo@main:/bin/run" dest nil nil nil t))
+              (expect (file-modes dest) :to-equal #o755))
+          (delete-directory dir t)))))
+
+  (it "keeps the modes of a file it overwrites"
+    (remoto-test-with-cache
+      (spy-on 'remoto--fetch-file-content :and-return-value "data\n")
+      (let ((dest (make-temp-file "remoto-copy-over-")))
+        (unwind-protect
+            (progn
+              (set-file-modes dest #o640)
+              (copy-file "/github:testowner/testrepo@main:/bin/run" dest t)
+              (expect (file-modes dest) :to-equal #o640))
+          (delete-file dest)))))
+
   (it "signals read-only when destination is remoto"
     (remoto-test-with-cache
       (expect (copy-file "/github:testowner/testrepo@main:/src/main.el"

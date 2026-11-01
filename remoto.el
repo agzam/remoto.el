@@ -2530,12 +2530,15 @@ word of the command line after its -c."
 (defun remoto--handle-copy-file (file newname
                                       &optional ok-if-already-exists keep-time
                                       preserve-uid-gid preserve-permissions)
-  "Copy FILE to NEWNAME.  Works when destination is outside remoto.
-OK-IF-ALREADY-EXISTS, KEEP-TIME, PRESERVE-UID-GID, and
-PRESERVE-PERMISSIONS are passed through to `copy-file'."
+  "Copy FILE to NEWNAME outside remoto, as `copy-file' copies a local file.
+OK-IF-ALREADY-EXISTS, KEEP-TIME and PRESERVE-UID-GID go to `copy-file'.
+A new copy, and any under PRESERVE-PERMISSIONS, gets the git mode of FILE
+rather than the mode of the temporary file it comes from."
   (if (remoto--parse-path newname)
       (remoto--read-only 'copy-file file newname)
-    (let ((local-copy (remoto--handle-file-local-copy file)))
+    (let* ((file (remoto--maybe-rewrite file))
+           (local-copy (remoto--handle-file-local-copy file))
+           (new (not (file-exists-p newname))))
       (unless local-copy
         (error "Remoto: failed to download %s" file))
       (unwind-protect
@@ -2547,7 +2550,15 @@ PRESERVE-PERMISSIONS are passed through to `copy-file'."
             (copy-file local-copy newname ok-if-already-exists keep-time
                        preserve-uid-gid preserve-permissions))
         (when (file-exists-p local-copy)
-          (delete-file local-copy))))))
+          (delete-file local-copy)))
+      (when (or new preserve-permissions)
+        (let ((modes (if (equal "100755" (alist-get 'mode (remoto--tree-entry
+                                                           (remoto--parse-path file))))
+                         #o755
+                       #o644)))
+          (set-file-modes newname (if preserve-permissions
+                                      modes
+                                    (logand modes (default-file-modes)))))))))
 (defalias 'remoto--handle-set-file-modes #'remoto--read-only)
 (defalias 'remoto--handle-set-file-times #'remoto--read-only)
 

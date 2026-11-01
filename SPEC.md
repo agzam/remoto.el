@@ -213,6 +213,8 @@ A program started in a remoto directory, through `process-file`, `start-file-pro
 
 `write-region`, `delete-file`, `delete-directory`, `rename-file`, `copy-file`, `set-file-modes`, `set-file-times` - all signal `(user-error "Remoto: repository is read-only")`.
 
+`copy-file` to a name outside remoto works, from a short name too. The copy comes from a temporary file of mode 600, so remoto gives it the git mode of the file, 755 for an executable and 644 for anything else, as `copy-file` gives a local copy the modes of its source: masked by the default file modes for a new file, unmasked under PRESERVE-PERMISSIONS, untouched for a file it overwrites.
+
 `make-directory` succeeds silently for directories that already exist (required by dired), signals read-only error for new directories. A name below an owner is a directory by its shape, so it must also exist, as a listed repository does; otherwise Dired's `+` would add a line for a repository it never made.
 
 ### Delegated to defaults
