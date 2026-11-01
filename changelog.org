@@ -7,6 +7,7 @@ Changes to the project, following Keep a Changelog conventions.
 
 ** Fixed
 - a remoto file no longer opens in the buffer of another remoto file of the same size
+- ~copy-file~ from a short name, such as ~/gh:OWNER/REPO/FILE~, copies the file
 
 * [2.6.0] - 2026-10-31
 
