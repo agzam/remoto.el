@@ -17,7 +17,7 @@
 ("dired + in an owner listing" :mode dired-mode :dired
  "/github:agzam/" :names
  ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
-  ".stumpwm.d" "Adv360-Pro-ZMK" "aero" "ag-themes.el")
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
  :count 145 :point ".doom.d" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
   "Remoto: listed all 143 repositories of agzam")

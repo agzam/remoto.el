@@ -14,23 +14,23 @@
   "/user/orgs?per_page=100&page=1" "/user/orgs?per_page=100&page=1"))
 
 ("ff /gh:agzam" :mode dired-mode :dired "/github:" :matches t :names
- ("agzam" "Agzam-Ar" "agzam-asadullaev" "agzam-dev" "agzam-juraev786"
-  "Agzam-lev" "agzam-zham" "agzam009" "Agzam020" "agzam05")
+ ("agzam" "AGZAMOVVVS21" "AGZamu" "AGzamDev" "AgZaMhOdJ" "AgZaMiC"
+  "Agzam-Ar" "Agzam-lev" "Agzam020" "Agzam06")
  :count 94 :point "agzam" :requests
  ("async /user/orgs?per_page=100&page=1"
   "/search/users?q=agzam&per_page=100"))
 
 ("ff /gh:qlik" :mode dired-mode :dired "/github:" :matches t :names
- ("qlik" "andre-ferreira-qlik" "CodeQlik" "qlik-all" "Qlik-Branch"
-  "Qlik-BT" "Qlik-Data-Integration-Team" "qlik-download" "qlik-hhe"
-  "qlik-ktg")
+ ("qlik" "CodeQlik" "Qlik-BT" "Qlik-Branch"
+  "Qlik-Data-Integration-Team" "Qlik-PE" "Qlik-Sense-Extensions"
+  "QlikDeploymentFramework" "QlikFrancePlatform" "QlikFreak")
  :count 31 :point "qlik" :requests
  ("async /user/orgs?per_page=100&page=1"
   "/search/users?q=qlik&per_page=100"))
 
 ("ff /gh:agzam/" :mode dired-mode :dired "/github:agzam/" :names
  ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
-  ".stumpwm.d" "Adv360-Pro-ZMK" "aero" "ag-themes.el")
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
  :count 145 :point ".doom.d" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
   "Remoto: listed all 143 repositories of agzam")
@@ -43,8 +43,8 @@
 
 ("ff /gh:agzam/remoto.el" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
@@ -59,8 +59,8 @@
 
 ("ff /gh:agzam/remoto.el/" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
@@ -130,8 +130,8 @@
 
 ("ff /gh:agzam/remoto.el@main" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
@@ -141,8 +141,8 @@
 
 ("ff /gh:agzam/remoto.el@main:" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
@@ -243,8 +243,8 @@
 
 ("ff /gh:agzam/remoto.el@2.2.0:/" :mode dired-mode :dired
  "/github:agzam/remoto.el@2.2.0:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
@@ -275,8 +275,8 @@
 
 ("ff /gh:agzam/remoto.el@ceaf310:/" :mode dired-mode :dired
  "/github:agzam/remoto.el@ceaf310:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
@@ -319,7 +319,7 @@
 ("ff /gh:agzam/remoto.el/.." :mode dired-mode :dired "/github:agzam/"
  :names
  ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
-  ".stumpwm.d" "Adv360-Pro-ZMK" "aero" "ag-themes.el")
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
  :count 145 :point ".doom.d" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
   "Remoto: listed all 143 repositories of agzam")
@@ -335,8 +335,8 @@
 
 ("ff /gh:agzam/remoto.el@main:/test/.." :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
@@ -363,8 +363,8 @@
 
 ("ff /gh:agzam/.emacs.d" :mode dired-mode :dired
  "/github:agzam/.emacs.d@main:/" :names
- ("." ".." ".github" ".gitignore" ".rgignore" "AGENTS.md" "bb.edn"
-  "config.el" "early-init.el" "init.el")
+ ("." ".." ".github" ".gitignore" ".rgignore" "AGENTS.md" "README.md"
+  "bb.edn" "config.el" "early-init.el")
  :count 16 :point ".github" :requests
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
@@ -379,8 +379,8 @@
 
 ("ff /gh:Agzam/Remoto.el" :mode dired-mode :dired
  "/github:Agzam/Remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3AAgzam&sort=updated&per_page=30"
@@ -442,8 +442,8 @@
 
 ("ff https://github.com/agzam/remoto.el" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el"
   "/repos/agzam/remoto.el/git/trees/main?recursive=1"))
@@ -462,23 +462,23 @@
 
 ("dired /gh:agzam" :mode dired-mode :dired "/github:" :matches t
  :names
- ("agzam" "Agzam-Ar" "agzam-asadullaev" "agzam-dev" "agzam-juraev786"
-  "Agzam-lev" "agzam-zham" "agzam009" "Agzam020" "agzam05")
+ ("agzam" "AGZAMOVVVS21" "AGZamu" "AGzamDev" "AgZaMhOdJ" "AgZaMiC"
+  "Agzam-Ar" "Agzam-lev" "Agzam020" "Agzam06")
  :count 94 :point "agzam" :requests
  ("async /user/orgs?per_page=100&page=1"
   "/search/users?q=agzam&per_page=100"))
 
 ("dired /gh:qlik" :mode dired-mode :dired "/github:" :matches t :names
- ("qlik" "andre-ferreira-qlik" "CodeQlik" "qlik-all" "Qlik-Branch"
-  "Qlik-BT" "Qlik-Data-Integration-Team" "qlik-download" "qlik-hhe"
-  "qlik-ktg")
+ ("qlik" "CodeQlik" "Qlik-BT" "Qlik-Branch"
+  "Qlik-Data-Integration-Team" "Qlik-PE" "Qlik-Sense-Extensions"
+  "QlikDeploymentFramework" "QlikFrancePlatform" "QlikFreak")
  :count 31 :point "qlik" :requests
  ("async /user/orgs?per_page=100&page=1"
   "/search/users?q=qlik&per_page=100"))
 
 ("dired /gh:agzam/" :mode dired-mode :dired "/github:agzam/" :names
  ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
-  ".stumpwm.d" "Adv360-Pro-ZMK" "aero" "ag-themes.el")
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
  :count 145 :point ".doom.d" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
   "Remoto: listed all 143 repositories of agzam")
@@ -491,8 +491,8 @@
 
 ("dired /gh:agzam/remoto.el" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
@@ -507,8 +507,8 @@
 
 ("dired /gh:agzam/remoto.el/" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
@@ -574,8 +574,8 @@
 
 ("dired /gh:agzam/remoto.el@main" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
@@ -585,8 +585,8 @@
 
 ("dired /gh:agzam/remoto.el@main:" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
@@ -687,8 +687,8 @@
 
 ("dired /gh:agzam/remoto.el@2.2.0:/" :mode dired-mode :dired
  "/github:agzam/remoto.el@2.2.0:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
@@ -719,8 +719,8 @@
 
 ("dired /gh:agzam/remoto.el@ceaf310:/" :mode dired-mode :dired
  "/github:agzam/remoto.el@ceaf310:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
@@ -760,7 +760,7 @@
 ("dired /gh:agzam/remoto.el/.." :mode dired-mode :dired
  "/github:agzam/" :names
  ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
-  ".stumpwm.d" "Adv360-Pro-ZMK" "aero" "ag-themes.el")
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
  :count 145 :point ".doom.d" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
   "Remoto: listed all 143 repositories of agzam")
@@ -776,8 +776,8 @@
 
 ("dired /gh:agzam/remoto.el@main:/test/.." :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
@@ -804,8 +804,8 @@
 
 ("dired /gh:agzam/.emacs.d" :mode dired-mode :dired
  "/github:agzam/.emacs.d@main:/" :names
- ("." ".." ".github" ".gitignore" ".rgignore" "AGENTS.md" "bb.edn"
-  "config.el" "early-init.el" "init.el")
+ ("." ".." ".github" ".gitignore" ".rgignore" "AGENTS.md" "README.md"
+  "bb.edn" "config.el" "early-init.el")
  :count 16 :point ".github" :requests
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3Aagzam&sort=updated&per_page=30"
@@ -820,8 +820,8 @@
 
 ("dired /gh:Agzam/Remoto.el" :mode dired-mode :dired
  "/github:Agzam/Remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("async /user/orgs?per_page=100&page=1"
   "async /search/repositories?q=user%3AAgzam&sort=updated&per_page=30"
@@ -883,8 +883,8 @@
 
 ("dired https://github.com/agzam/remoto.el" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el"
   "/repos/agzam/remoto.el/git/trees/main?recursive=1"))

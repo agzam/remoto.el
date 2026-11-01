@@ -25,6 +25,11 @@
 (setq url-proxy-services '(("http" . "127.0.0.1:9") ("https" . "127.0.0.1:9"))
       auth-sources nil)
 
+;; Dired orders names by the locale ls gets.  The C locale orders them by
+;; bytes on every system, so the specs read the same everywhere; the specs
+;; of the name order bind a locale of their own.
+(setenv "LC_ALL" "C")
+
 ;;; Helpers
 
 (defvar remoto-test--mock-tree
@@ -1082,36 +1087,193 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
   (mapcar #'car (remoto--sort-entries remoto-test--unsorted switches)))
 
 (describe "remoto--sort-entries"
-  ;; The orders are those gls gives for the same names and switches.
-  (it "sorts by name, ignoring case"
+  ;; The orders are those gls gives for the same names and switches, in
+  ;; the C locale the suite runs in.
+  (it "sorts by name, in the C locale by bytes"
     (expect (remoto-test--sorted-names "-al")
-            :to-equal '("a.el" "b.el" "Docs" "lisp" "Makefile")))
+            :to-equal '("Docs" "Makefile" "a.el" "b.el" "lisp")))
 
   (it "puts directories first under --group-directories-first"
     (expect (remoto-test--sorted-names "-al --group-directories-first")
-            :to-equal '("Docs" "lisp" "a.el" "b.el" "Makefile")))
+            :to-equal '("Docs" "lisp" "Makefile" "a.el" "b.el")))
 
   (it "sorts by size under -S, largest first, and ties by name"
     (dolist (switches '("-alS" "-al --sort=size"))
       (expect (remoto-test--sorted-names switches)
-              :to-equal '("a.el" "Makefile" "b.el" "Docs" "lisp"))))
+              :to-equal '("Makefile" "a.el" "b.el" "Docs" "lisp"))))
 
   (it "sorts by time under -t, newest first, and puts entries without one last"
     (dolist (switches '("-alt" "-al --sort=time"))
       (expect (remoto-test--sorted-names switches)
-              :to-equal '("b.el" "a.el" "Docs" "lisp" "Makefile"))))
+              :to-equal '("b.el" "a.el" "Docs" "Makefile" "lisp"))))
 
   (it "reverses the order under -r, directories still first"
     (dolist (switches '("-alr" "-al --reverse"))
       (expect (remoto-test--sorted-names switches)
-              :to-equal '("Makefile" "lisp" "Docs" "b.el" "a.el")))
+              :to-equal '("lisp" "b.el" "a.el" "Makefile" "Docs")))
     (expect (remoto-test--sorted-names "-alr --group-directories-first")
-            :to-equal '("lisp" "Docs" "Makefile" "b.el" "a.el")))
+            :to-equal '("lisp" "Docs" "b.el" "a.el" "Makefile")))
 
-  (it "keeps the given order under -U, which ignores -r and the grouping"
-    (dolist (switches '("-alU" "-alUr --group-directories-first" "-al --sort=none"))
+  (it "keeps the given order under -U and -f, which ignore -r and the grouping"
+    (dolist (switches '("-alU" "-alUr --group-directories-first" "-al --sort=none"
+                        "-lf"))
       (expect (remoto-test--sorted-names switches)
-              :to-equal '("b.el" "Docs" "a.el" "Makefile" "lisp")))))
+              :to-equal '("b.el" "Docs" "a.el" "Makefile" "lisp"))))
+
+  (it "takes the last sort option given, as GNU ls does"
+    ;; Dired's sort toggle appends t to -alS: the order has to follow it.
+    (pcase-dolist (`(,switches . ,names)
+                   '(("-alSt" "b.el" "a.el" "Docs" "Makefile" "lisp")
+                     ("-altS" "Makefile" "a.el" "b.el" "Docs" "lisp")
+                     ("-alS --sort=time" "b.el" "a.el" "Docs" "Makefile" "lisp")
+                     ("-alU -S" "Makefile" "a.el" "b.el" "Docs" "lisp")
+                     ("-alS -U" "b.el" "Docs" "a.el" "Makefile" "lisp")
+                     ("-alS -f" "b.el" "Docs" "a.el" "Makefile" "lisp")
+                     ("-alt -S --sort=name" "Docs" "Makefile" "a.el" "b.el" "lisp")))
+      (expect (cons switches (remoto-test--sorted-names switches))
+              :to-equal (cons switches names))))
+
+  (it "sorts by version under -v, as GNU ls -v does"
+    ;; gls -1av: . and .. first, then dot names; letters before other
+    ;; characters, digits by value, a ~ before the end of a name.
+    (let ((entries (mapcar #'list '("_types.py" "a10" "README" "." "b~" "a9" ".x"
+                                    "b" "a.txt" ".." "aC" "b.c" "big"))))
+      (dolist (switches '("-alv" "-al --sort=version"))
+        (expect (mapcar #'car (remoto--sort-entries entries switches))
+                :to-equal '("." ".." ".x" "README" "a.txt" "a9" "a10" "aC"
+                            "b~" "b" "b.c" "big" "_types.py")))))
+
+  (it "sorts by extension under -X, names without one first, then by name"
+    (let ((entries (mapcar #'list '("c.b" "noext" "." "b.c" ".hidden" "a.txt" ".."
+                                    "10.txt" "Ab"))))
+      (dolist (switches '("-alX" "-al --sort=extension"))
+        (expect (mapcar #'car (remoto--sort-entries entries switches))
+                :to-equal '("Ab" "noext" "." ".." "c.b" "b.c" ".hidden" "10.txt"
+                            "a.txt")))))
+
+  (it "sorts . and .. by name, so -r puts them last, and leads with them under -S and -t"
+    ;; In the C locale # and - come before the dot, as ls has them.
+    (let ((entries `(("." (type . "tree")) (".." (type . "tree"))
+                     ("-flag" (type . "blob") (size . 9))
+                     ("#notes" (type . "blob") (size . 1))
+                     ("src" (type . "tree") (size . 0))
+                     ("big" (type . "blob") (size . 900)))))
+      (pcase-dolist (`(,switches . ,names)
+                     '(("-al" "#notes" "-flag" "." ".." "big" "src")
+                       ("-alr" "src" "big" ".." "." "-flag" "#notes")
+                       ("-alr --group-directories-first"
+                        "src" ".." "." "big" "-flag" "#notes")
+                       ("-alS" "." ".." "big" "-flag" "#notes" "src")
+                       ("-alSr" "src" "#notes" "-flag" "big" ".." ".")
+                       ("-alt" "." ".." "#notes" "-flag" "big" "src")))
+        (expect (cons switches (mapcar #'car (remoto--sort-entries entries switches)))
+                :to-equal (cons switches names))))))
+
+(describe "remoto--name-lessp-function"
+  (it "orders names by bytes in the C locale, or without a locale"
+    (dolist (env '(("LC_ALL=C") ("LC_ALL=POSIX") ("LC_ALL" "LC_COLLATE" "LANG")))
+      (let ((process-environment (append env process-environment)))
+        (expect (sort (list "b" "_a" "B" "a") (remoto--name-lessp-function))
+                :to-equal '("B" "_a" "a" "b")))))
+
+  (it "orders names as ls on macOS does: symbols, digits, letters, lowercase first"
+    ;; The order gls and /bin/ls give on macOS in en_US.UTF-8.
+    (let ((process-environment (cons "LC_ALL=en_US.UTF-8" process-environment))
+          (system-type 'darwin))
+      (expect (sort (list "Makefile" "xt_DSCP.h" "aC" "makefile" "9" "Ab" "_a" "."
+                          "a.txt" "-b" "xt_dscp.h" "10" " d" "#c" "utils.py"
+                          "__init__.py")
+                    (remoto--name-lessp-function))
+              :to-equal '(" d" "__init__.py" "_a" "-b" "." "#c" "10" "9" "a.txt" "Ab"
+                          "aC" "makefile" "Makefile" "utils.py" "xt_dscp.h"
+                          "xt_DSCP.h"))))
+
+  (it "puts an accented letter by its base on macOS, and counts other scripts for nothing"
+    (let ((process-environment (cons "LC_ALL=en_US.UTF-8" process-environment))
+          (system-type 'darwin))
+      (expect (sort (list "f" "É" "Тb" "e" "é" "E" "a" "è") (remoto--name-lessp-function))
+              :to-equal '("a" "Тb" "e" "E" "é" "É" "è" "f"))))
+
+  (it "orders by bytes on macOS in a C locale"
+    (let ((process-environment (cons "LC_ALL=C.UTF-8" process-environment))
+          (system-type 'darwin))
+      (expect (sort (list "b" "_a" "B" "a") (remoto--name-lessp-function))
+              :to-equal '("B" "_a" "a" "b"))))
+
+  (it "asks string-collate-lessp about the locale ls gets, LC_ALL before LC_COLLATE and LANG"
+    (let ((system-type 'gnu/linux)
+          (locales nil))
+      (spy-on 'string-collate-lessp :and-call-fake
+              (lambda (a b locale &rest _)
+                (push locale locales)
+                (string< a b)))
+      (pcase-dolist (`(,env . ,locale)
+                     '((("LC_ALL=de_DE.UTF-8" "LC_COLLATE=fr_FR.UTF-8" "LANG=sv_SE.UTF-8")
+                        . "de_DE.UTF-8")
+                       (("LC_ALL=" "LC_COLLATE=fr_FR.UTF-8" "LANG=sv_SE.UTF-8")
+                        . "fr_FR.UTF-8")
+                       (("LC_ALL" "LC_COLLATE" "LANG=sv_SE.UTF-8") . "sv_SE.UTF-8")))
+        (setq locales nil)
+        (let ((process-environment (append env process-environment)))
+          (expect (sort (list "b" "a") (remoto--name-lessp-function))
+                  :to-equal '("a" "b"))
+          (expect (seq-uniq locales) :to-equal (list locale))))))
+
+  (it "orders by bytes when the locale ls gets does not exist"
+    (let ((system-type 'gnu/linux)
+          (process-environment (cons "LC_ALL=xx_YY.UTF-8" process-environment)))
+      (spy-on 'string-collate-lessp :and-call-fake
+              (lambda (&rest _) (error "Invalid locale xx_YY.UTF-8")))
+      (expect (remoto--name-lessp-function) :to-be #'string<))))
+
+(describe "remoto--ls-options"
+  (it "reads the options in the order given, the last sort one winning"
+    (expect (remoto--ls-options "-aBhlt --group-directories-first")
+            :to-equal '(:sort time :reverse nil :group t :human 1024 :show all
+                              :backups t :ignore nil :hide nil))
+    (expect (plist-get (remoto--ls-options "-al --sort extension -r") :sort)
+            :to-be 'extension)
+    (expect (plist-get (remoto--ls-options '("-al" "--reverse")) :reverse) :to-be t)
+    (expect (plist-get (remoto--ls-options nil) :sort) :to-be 'name))
+
+  (it "takes -h and --si as the last one given sets them"
+    (expect (plist-get (remoto--ls-options "-alh --si") :human) :to-be 1000)
+    (expect (plist-get (remoto--ls-options "-al --si -h") :human) :to-be 1024))
+
+  (it "reads the argument of -I, -T and -w as no options"
+    ;; f in an argument would be -f, which unsorts.
+    (expect (remoto--ls-options "-alIfoo -T 4 -w80")
+            :to-equal '(:sort name :reverse nil :group nil :human nil :show all
+                              :backups nil :ignore ("foo") :hide nil))
+    (expect (plist-get (remoto--ls-options "-al -I *.o --ignore=*.a --hide *.so") :ignore)
+            :to-equal '("*.a" "*.o"))
+    ;; An option whose argument never comes asks for nothing.
+    (expect (plist-get (remoto--ls-options "-al -I") :ignore) :to-be nil)
+    (expect (plist-get (remoto--ls-options "-alt --sort") :sort) :to-be 'time)))
+
+(describe "remoto--shown-entries"
+  (let ((entries (mapcar #'list '("." ".." ".env" "a.c" "a.c~" ".b~" "b.o" "README"))))
+    (it "shows dot names under -a only, and all but . and .. under -A"
+      (expect (mapcar #'car (remoto--shown-entries entries "-l"))
+              :to-equal '("a.c" "a.c~" "b.o" "README"))
+      (expect (mapcar #'car (remoto--shown-entries entries "-lA"))
+              :to-equal '(".env" "a.c" "a.c~" ".b~" "b.o" "README"))
+      (expect (mapcar #'car (remoto--shown-entries entries "-lA -a"))
+              :to-equal (mapcar #'car entries)))
+
+    (it "leaves out backups under -B and what -I matches, a dot name only by a dot"
+      (expect (mapcar #'car (remoto--shown-entries entries "-alB"))
+              :to-equal '("." ".." ".env" "a.c" "b.o" "README"))
+      (expect (mapcar #'car (remoto--shown-entries entries "-al -I *.o -I *E*"))
+              :to-equal '("." ".." ".env" "a.c" "a.c~" ".b~"))
+      (expect (mapcar #'car (remoto--shown-entries entries "-al --ignore=.*"))
+              :to-equal '("a.c" "a.c~" "b.o" "README")))
+
+    (it "leaves out what --hide matches only without -a and -A"
+      (expect (mapcar #'car (remoto--shown-entries entries "-l --hide=*.o"))
+              :to-equal '("a.c" "a.c~" "README"))
+      (expect (mapcar #'car (remoto--shown-entries entries "-la --hide=*.o"))
+              :to-equal (mapcar #'car entries)))))
 
 (describe "remoto--human-size"
   (it "prints a size as gls -h does"
@@ -1120,7 +1282,14 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
                      (1025 . "1.1K") (1421 . "1.4K") (10239 . "10K") (10240 . "10K")
                      (26187 . "26K") (1048575 . "1.0M") (1048576 . "1.0M")
                      (2726297 . "2.6M")))
-      (expect (cons size (remoto--human-size size)) :to-equal (cons size text)))))
+      (expect (cons size (remoto--human-size size)) :to-equal (cons size text))))
+
+  (it "prints a size as gls --si does, in powers of 1000"
+    (pcase-dolist (`(,size . ,text)
+                   '((999 . "999") (1000 . "1.0k") (1001 . "1.1k") (1500 . "1.5k")
+                     (1949 . "2.0k") (9999 . "10k") (10001 . "11k") (26187 . "27k")
+                     (999499 . "1.0M") (1000000 . "1.0M") (2726297 . "2.8M")))
+      (expect (cons size (remoto--human-size size 1000)) :to-equal (cons size text)))))
 
 (describe "remoto--classify-p"
   (it "recognizes the switches Dired reads as -F"
@@ -4839,6 +5008,12 @@ Return the buffer that RET leaves current."
     (dired-find-file)
     (current-buffer)))
 
+;; Bound by the spec of a listing under ls-lisp, which loads it there.
+(defvar ls-lisp-use-insert-directory-program)
+(defvar ls-lisp-dirs-first)
+(defvar ls-lisp-ignore-case)
+(defvar ls-lisp-use-string-collate)
+
 (describe "Dired listing under dired-listing-switches"
   ;; Dired cuts one character off a directory or executable name under -F
   ;; unless the listing marks the name, and needs " -> " on a symlink line.
@@ -4847,27 +5022,78 @@ Return the buffer that RET leaves current."
       (remoto-test-with-listing switches
         (expect (remoto-test--listed-names
                  "/github:testowner/testrepo@main:/" switches)
-                :to-equal '("." ".." "a" "bin" "CHANGELOG" "README.md" "src"))
+                :to-equal '("." ".." "CHANGELOG" "README.md" "a" "bin" "src"))
         (expect (remoto-test--listed-names
                  "/github:testowner/testrepo@main:/bin/" switches)
                 :to-equal '("." ".." "run")))))
 
-  (it "orders a repository directory as the switches ask, . and .. first"
+  (it "orders a repository directory as the switches ask, . and .. among the names"
     ;; README.md has 500 bytes and CHANGELOG 16; a directory has none.
     (pcase-dolist (`(,switches . ,names)
-                   '(("-al" "a" "bin" "CHANGELOG" "README.md" "src")
+                   '(("-al" "." ".." "CHANGELOG" "README.md" "a" "bin" "src")
                      ("-al --group-directories-first"
-                      "a" "bin" "src" "CHANGELOG" "README.md")
+                      "." ".." "a" "bin" "src" "CHANGELOG" "README.md")
                      ("-aBhlt --group-directories-first"
-                      "a" "bin" "src" "CHANGELOG" "README.md")
+                      "." ".." "a" "bin" "src" "CHANGELOG" "README.md")
+                     ("-alr" "src" "bin" "a" "README.md" "CHANGELOG" ".." ".")
                      ("-alr --group-directories-first"
-                      "src" "bin" "a" "README.md" "CHANGELOG")
-                     ("-alS" "README.md" "CHANGELOG" "a" "bin" "src")
-                     ("-alU" "CHANGELOG" "README.md" "a" "bin" "src")))
+                      "src" "bin" "a" ".." "." "README.md" "CHANGELOG")
+                     ("-alS" "." ".." "README.md" "CHANGELOG" "a" "bin" "src")
+                     ("-alU" "." ".." "CHANGELOG" "README.md" "a" "bin" "src")))
       (remoto-test-with-listing switches
         (expect (cons switches (remoto-test--listed-names
                                 "/github:testowner/testrepo@main:/" switches))
-                :to-equal (cons switches (append '("." "..") names))))))
+                :to-equal (cons switches names)))))
+
+  (it "follows Dired's sort toggle, which appends t to -alS"
+    (remoto-test-with-listing "-alS"
+      (with-current-buffer (dired-noselect "/github:testowner/testrepo@main:/" "-alS")
+        (dired-sort-toggle-or-edit)
+        (expect dired-actual-switches :to-equal "-alSt")
+        (expect (remoto-test--listed-names "/github:testowner/testrepo@main:/" "-alSt")
+                :to-equal '("." ".." "CHANGELOG" "README.md" "a" "bin" "src")))))
+
+  (it "lists only the entries the switches show"
+    (remoto-test-with-listing "-al"
+      (let ((tree (gethash "/github:testowner/testrepo@main" remoto--tree-cache)))
+        (puthash ".editorconfig" '((type . "blob") (size . 3) (sha . "k") (mode . "100644"))
+                 tree)
+        (puthash "notes~" '((type . "blob") (size . 4) (sha . "l") (mode . "100644")) tree))
+      (pcase-dolist (`(,switches . ,names)
+                     '(("-l" "CHANGELOG" "README.md" "a" "bin" "notes~" "src")
+                       ("-lA" ".editorconfig" "CHANGELOG" "README.md" "a" "bin" "notes~"
+                        "src")
+                       ("-alB" "." ".." ".editorconfig" "CHANGELOG" "README.md" "a" "bin"
+                        "src")
+                       ("-al -I *.md --hide=a" "." ".." ".editorconfig" "CHANGELOG" "a"
+                        "bin" "notes~" "src")
+                       ("-l --hide=a" "CHANGELOG" "README.md" "bin" "notes~" "src")))
+        (expect (cons switches (remoto-test--listed-names
+                                "/github:testowner/testrepo@main:/" switches))
+                :to-equal (cons switches names)))))
+
+  (it "orders a listing as ls-lisp does when ls-lisp lists local directories"
+    ;; ls-lisp groups directories by `ls-lisp-dirs-first', and -S wins
+    ;; over -t wherever they stand.
+    (require 'ls-lisp)
+    (let ((ls-lisp-use-insert-directory-program nil)
+          (ls-lisp-dirs-first t)
+          (ls-lisp-ignore-case t)
+          (ls-lisp-use-string-collate nil))
+      (pcase-dolist (`(,switches . ,names)
+                     '(("-al" "." ".." "a" "bin" "src" "CHANGELOG" "README.md")
+                       ("-alSt" "." ".." "a" "bin" "src" "README.md" "CHANGELOG")
+                       ("-l" "a" "bin" "src" "CHANGELOG" "README.md")))
+        (remoto-test-with-listing switches
+          (expect (cons switches (remoto-test--listed-names
+                                  "/github:testowner/testrepo@main:/" switches))
+                  :to-equal (cons switches names))))
+      ;; --group-directories-first groups as `ls-lisp-dirs-first' does.
+      (let ((ls-lisp-dirs-first nil)
+            (switches "-al --group-directories-first"))
+        (remoto-test-with-listing switches
+          (expect (remoto-test--listed-names "/github:testowner/testrepo@main:/" switches)
+                  :to-equal '("." ".." "a" "bin" "src" "CHANGELOG" "README.md"))))))
 
   (it "shows the sizes of a repository directory as ls -h does"
     (remoto-test-with-listing "-alh"
@@ -4875,6 +5101,15 @@ Return the buffer that RET leaves current."
                (gethash "/github:testowner/testrepo@main" remoto--tree-cache))
       (let ((text (remoto-test--listing-text "/github:testowner/testrepo@main:/" "-alh")))
         (expect text :to-match " 35K Jan  1  2000 LICENSE$")
+        (expect text :to-match " 500 Jan  1  2000 README\\.md$"))))
+
+  (it "shows the sizes in powers of 1000 under --si"
+    (remoto-test-with-listing "-al --si"
+      (puthash "LICENSE" '((type . "blob") (size . 35149) (sha . "jjj") (mode . "100644"))
+               (gethash "/github:testowner/testrepo@main" remoto--tree-cache))
+      (let ((text (remoto-test--listing-text "/github:testowner/testrepo@main:/"
+                                             "-al --si")))
+        (expect text :to-match " 36k Jan  1  2000 LICENSE$")
         (expect text :to-match " 500 Jan  1  2000 README\\.md$"))))
 
   (it "shows the -F indicators under -F only"
@@ -5368,6 +5603,13 @@ repository than tool, and a search for anything else finds none."
       (expect (buffer-local-value 'dired-directory (dired-noselect "/github:acme/stitch"))
               :to-equal '("/github:acme/" "stitch-api" "stitch-env"))))
 
+  (it "orders the matches by the switches given to dired-noselect, as C-u C-x d gives them"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
+      (expect (cdr (buffer-local-value 'dired-directory
+                                       (dired-noselect "/github:acme/stitch" "-alt")))
+              :to-equal '("stitch-env" "stitch-api"))))
+
   (it "opens an existing repository as before, with no search"
     (remoto-test-with-listings
       (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
@@ -5497,7 +5739,7 @@ repository."
                   (remoto-test--listing-api forge endpoint))))
       (with-current-buffer (find-file-noselect "/gh:Qlik")
         (expect (cdr dired-directory)
-                :to-equal '("qlik" "AQlik" "Qlik-PE" "qlik-trial" "QlikSense"))
+                :to-equal '("qlik" "AQlik" "Qlik-PE" "QlikSense" "qlik-trial"))
         (expect (dired-get-filename 'verbatim t) :to-equal "qlik"))))
 
   (it "searches for the typed name, though completion cached a narrowed list"
@@ -5700,6 +5942,20 @@ release-2, and only main and release-1 have a tree."
       (expect (buffer-local-value 'dired-directory
                                   (dired-noselect "/gh:testowner/testrepo/src/ma"))
               :to-equal '("/github:testowner/testrepo@main:/src/" "main.el"))))
+
+  (it "orders the matches as the switches ask, those given to dired-noselect first"
+    ;; README.md has 500 bytes and CHANGELOG 16.
+    (remoto-test-with-listing "-alS"
+      (expect (cdr (buffer-local-value 'dired-directory
+                                       (find-file-noselect "/gh:testowner/testrepo/e")))
+              :to-equal '("README.md" "CHANGELOG"))
+      (let ((dired-listing-switches "-al"))
+        (expect (cdr (buffer-local-value
+                      'dired-directory (dired-noselect "/gh:testowner/testrepo/e" "-alS")))
+                :to-equal '("README.md" "CHANGELOG"))
+        (expect (cdr (buffer-local-value
+                      'dired-directory (dired-noselect "/gh:testowner/testrepo/e")))
+                :to-equal '("CHANGELOG" "README.md")))))
 
   (it "is no query when it exists, ends in a slash, holds a wildcard or matches nothing"
     ;; One that matches nothing visits a new file, as a local name does.
