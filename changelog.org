@@ -5,6 +5,10 @@ Changes to the project, following Keep a Changelog conventions.
 
 * [Unreleased]
 
+** Changed
+- Dired in a repository follows ~dired-listing-switches~: ~--group-directories-first~, ~-S~, ~-t~, ~-r~, ~-U~ and ~-h~
+- names in remoto's Dired sort ignoring case, as ~ls~ sorts them
+
 ** Fixed
 - a remoto file no longer opens in the buffer of another remoto file of the same size
 - ~copy-file~ from a short name, such as ~/gh:OWNER/REPO/FILE~, copies the file

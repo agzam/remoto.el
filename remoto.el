@@ -2204,12 +2204,13 @@ VISIT, BEG, END, REPLACE as per `insert-file-contents'."
 (defun remoto--ls-switch-p (switches short &optional long)
   "Return non-nil when ls options ask for SHORT, or for LONG spelled out.
 SWITCHES holds the options as a string, the way Dired passes them.
-Like Dired, look for SHORT in a group of short options."
+Like Dired, look for SHORT in a group of short options; a nil SHORT
+names an option that has only its LONG form."
   (and (stringp switches)
        (let ((case-fold-search nil))
          (string-match-p
           (rx-to-string `(seq (or bos " ")
-                              (or (seq "-" (* alnum) ,short)
+                              (or ,@(and short `((seq "-" (* alnum) ,short)))
                                   ,@(and long `((seq "--" ,long eow))))))
           switches))))
 
@@ -2217,6 +2218,37 @@ Like Dired, look for SHORT in a group of short options."
   "Return non-nil when ls options ask for -F file type indicators.
 SWITCHES holds the options as a string, the way Dired passes them."
   (remoto--ls-switch-p switches "F" "classify"))
+
+(defun remoto--human-p (switches)
+  "Return non-nil when ls options ask for -h sizes.
+SWITCHES holds the options as a string, the way Dired passes them."
+  (remoto--ls-switch-p switches "h" "human-readable"))
+
+(defun remoto--human-size (size)
+  "Return SIZE in bytes as ls -h prints it: 549, 1.4K, 26K, 2.6M.
+The digits come as GNU's human_readable makes them: rounded up, with one
+decimal below 10."
+  (let ((amount size) (tenths 0) (rounding 0)
+        (units '("K" "M" "G" "T" "P" "E")) unit)
+    (while (and (<= 1024 amount) units)
+      (let* ((r10 (+ (* (% amount 1024) 10) tenths))
+             (r2 (+ (* (% r10 1024) 2) (ash rounding -1))))
+        (setq amount (/ amount 1024)
+              tenths (/ r10 1024)
+              rounding (cond ((and (< r2 1024) (zerop (+ r2 rounding))) 0)
+                             ((< r2 1024) 1)
+                             ((< 1024 (+ r2 rounding)) 3)
+                             (t 2))
+              unit (pop units))))
+    (when (and unit (< amount 10) (< 0 rounding))
+      (setq tenths (1+ tenths) rounding 0)
+      (when (= tenths 10)
+        (setq amount (1+ amount) tenths 0)))
+    (cond ((null unit) (number-to-string amount))
+          ((< amount 10) (format "%d.%d%s" amount tenths unit))
+          ((zerop (+ tenths rounding)) (format "%d%s" amount unit))
+          ((and (= (1+ amount) 1024) units) (format "1.0%s" (car units)))
+          (t (format "%d%s" (1+ amount) unit)))))
 
 (defun remoto--ls-indicator (plist classify)
   "Return the ls -F type indicator for an entry with PLIST, if CLASSIFY."
@@ -2244,18 +2276,19 @@ A forge's description may span lines; a Dired line or an annotation cannot."
       (mapconcat #'identity (split-string text "[\n\r\f\v]+" t "[ \t]+") " ")
     text))
 
-(defun remoto--format-dired-entry (name plist &optional classify widths)
+(defun remoto--format-dired-entry (name plist &optional classify widths human)
   "Format a single Dired line for NAME with PLIST attributes.
-CLASSIFY appends the ls -F type indicator.  WIDTHS, the size and name
-column widths, line up a listing; a note in PLIST starts 4 columns past
-the names, where `dired-hide-details-mode' hides it with symlink targets."
+CLASSIFY appends the ls -F indicator, HUMAN prints the size as -h does.
+WIDTHS, the size and name column widths, line up a listing; a note in
+PLIST starts 4 columns past the names, where Dired hides link targets."
   (let* ((dir? (equal "tree" (alist-get 'type plist)))
          (indicator (remoto--ls-indicator plist classify))
-         (note (and (alist-get 'note plist) (remoto--one-line (alist-get 'note plist)))))
+         (note (and (alist-get 'note plist) (remoto--one-line (alist-get 'note plist))))
+         (size (or (alist-get 'size plist) 0)))
     (concat (or (alist-get 'perms plist)
                 (remoto--mode-to-string (alist-get 'mode plist) dir?))
             "  1 github github "
-            (string-pad (number-to-string (or (alist-get 'size plist) 0))
+            (string-pad (if human (remoto--human-size size) (number-to-string size))
                         (or (car widths) 8) nil t)
             " " (remoto--ls-time (alist-get 'time plist)) " "
             ;; Dired reads exactly the name by this property, whatever
@@ -2270,13 +2303,15 @@ the names, where `dired-hide-details-mode' hides it with symlink targets."
                          note))
             "\n")))
 
-(defun remoto--listing-widths (entries classify)
+(defun remoto--listing-widths (entries classify &optional human)
   "Return the size and name column widths that line up ENTRIES.
-CLASSIFY counts the ls -F indicator into the name.  The name column
-stops at 40, so that one long name moves only its own note."
+CLASSIFY counts the ls -F indicator into the name, HUMAN takes -h sizes.
+The name column stops at 40, so that one long name moves only its note."
   (cons (apply #'max 8 (mapcar (lambda (entry)
-                                 (length (number-to-string
-                                          (or (alist-get 'size (cdr entry)) 0))))
+                                 (let ((size (or (alist-get 'size (cdr entry)) 0)))
+                                   (length (if human
+                                               (remoto--human-size size)
+                                             (number-to-string size)))))
                                entries))
         (min 40 (apply #'max 0 (mapcar (lambda (entry)
                                          (+ (string-width (car entry))
@@ -2295,34 +2330,55 @@ Not the total line: Dired deletes that under the default `dired-free-space'."
       ('failed (format "%d, the rest failed to load; `remoto-refresh' retries"
                        count)))))
 
+(defun remoto--name-lessp (a b)
+  "Return non-nil when the name A comes before B in the order of ls.
+Case counts only between names that differ in nothing else."
+  (let ((order (compare-strings a nil nil b nil nil t)))
+    (if (eq order t) (string< a b) (< order 0))))
+
 (defun remoto--sort-entries (entries switches)
-  "Return listing ENTRIES in the order that ls would give them.
-That is by name, or with -t in the ls options SWITCHES by the last push,
-newest first."
-  (let ((entries (sort (copy-sequence entries)
-                       (lambda (a b) (string< (car a) (car b))))))
-    (if (remoto--ls-switch-p switches "t")
-        (sort entries
-              (lambda (a b)
-                (time-less-p (or (alist-get 'time (cdr b)) 0)
-                             (or (alist-get 'time (cdr a)) 0))))
-      entries)))
+  "Return ENTRIES, each (NAME . ATTRIBUTES), in the order ls gives them.
+The ls options SWITCHES pick the key: -U keeps ENTRIES as they are, -S
+sorts by size and -t by time, largest and newest first, else by name;
+ties go by name.  -r reverses, --group-directories-first groups."
+  (if (remoto--ls-switch-p switches "U" "sort=none")
+      (copy-sequence entries)
+    (let* ((key (cond ((remoto--ls-switch-p switches "S" "sort=size")
+                       (lambda (entry) (- (or (alist-get 'size (cdr entry)) 0))))
+                      ((remoto--ls-switch-p switches "t" "sort=time")
+                       (lambda (entry)
+                         (- (float-time (or (alist-get 'time (cdr entry)) 0)))))))
+           (sorted (sort (copy-sequence entries)
+                         (lambda (a b)
+                           (let ((ka (and key (funcall key a)))
+                                 (kb (and key (funcall key b))))
+                             (if (and key (/= ka kb))
+                                 (< ka kb)
+                               (remoto--name-lessp (car a) (car b)))))))
+           (sorted (if (remoto--ls-switch-p switches "r" "reverse")
+                       (nreverse sorted)
+                     sorted)))
+      (if (remoto--ls-switch-p switches nil "group-directories-first")
+          (let ((dir-p (lambda (entry) (equal "tree" (alist-get 'type (cdr entry))))))
+            (append (seq-filter dir-p sorted) (seq-remove dir-p sorted)))
+        sorted))))
 
 (defun remoto--insert-listing (dir switches)
   "Insert the Dired listing of DIR, accounts or repositories.
 SWITCHES are the ls options, which decide the order."
   (let* ((listing (remoto--listing dir))
          (classify (remoto--classify-p switches))
+         (human (remoto--human-p switches))
          (lines (append (list (cons "." `((note . ,(remoto--listing-note listing))
                                           ,@remoto--dir-entry))
                               (cons ".." remoto--dir-entry))
                         (remoto--sort-entries (remoto--listing-entries listing)
                                               switches)))
-         (widths (remoto--listing-widths lines classify)))
+         (widths (remoto--listing-widths lines classify human)))
     (insert "total 0\n")
     (dolist (line lines)
       (insert (remoto--format-dired-entry (car line) (cdr line)
-                                          classify widths)))))
+                                          classify widths human)))))
 
 (defvar-local remoto--entry-widths nil
   "(NAMES . WIDTHS) for the Dired of a list of names in this buffer.
@@ -2334,6 +2390,7 @@ the first name of each reading computes them again.")
 SWITCHES are the ls options.  A Dired of a list of names asks for each
 line on its own; the names in `dired-directory' line the notes up."
   (let* ((classify (remoto--classify-p switches))
+         (human (remoto--human-p switches))
          (dir (remoto--handle-file-name-directory filename))
          (name (remoto--handle-file-name-nondirectory filename))
          (listed (bound-and-true-p dired-directory))
@@ -2351,26 +2408,27 @@ line on its own; the names in `dired-directory' line the notes up."
                              (cons each (or (remoto--entry-for (concat dir each))
                                             remoto--dir-entry)))
                            names)
-                   classify))))
+                   classify human))))
     ;; Two columns of our own: Dired gives a list of names whose lines
     ;; bring none one column per line and then two more.
     (insert "  " (remoto--format-dired-entry
                   name (or (remoto--entry-for filename) remoto--dir-entry)
-                  classify (cdr remoto--entry-widths)))))
+                  classify (cdr remoto--entry-widths) human))))
 
 (defun remoto--handle-insert-directory
     (filename switches &optional _wildcard full-directory-p)
   "Insert a Dired-format listing for remote FILENAME.
-SWITCHES may ask for -F indicators; FULL-DIRECTORY-P asks for a listing
-and without it FILENAME gets its one line, as with ls-lisp.  /github: and
-/github:OWNER/ list accounts and repositories."
+SWITCHES, the ls options, decide the order, -F indicators and -h sizes.
+FULL-DIRECTORY-P asks for a listing; without it FILENAME gets its one
+line, as with ls-lisp.  /github: and /github:OWNER/ list accounts and repos."
   ;; A Dired of a list of names passes each one relative to its directory,
   ;; and the first Dired of a session passes a short form as typed.
   (let* ((filename (expand-file-name filename))
          (entry (and (not full-directory-p) (remoto--entry-name-p filename)))
          (filename (if entry filename (remoto--maybe-rewrite filename)))
          (dir (and (not entry) (remoto--listing-dir filename)))
-         (classify (remoto--classify-p switches)))
+         (classify (remoto--classify-p switches))
+         (human (remoto--human-p switches)))
     (cond
      (entry (remoto--insert-entry-line filename switches))
      (dir (when (or full-directory-p
@@ -2385,13 +2443,14 @@ and without it FILENAME gets its one line, as with ls-lisp.  /github: and
               (insert "total 0\n")
               (insert (remoto--format-dired-entry "." remoto--dir-entry classify))
               (insert (remoto--format-dired-entry ".." remoto--dir-entry classify))
-              (dolist (child (remoto--tree-children parsed))
+              (dolist (child (remoto--sort-entries (remoto--tree-children parsed)
+                                                   switches))
                 (insert (remoto--format-dired-entry
-                         (car child) (cdr child) classify))))
+                         (car child) (cdr child) classify nil human))))
           (insert "  " (remoto--format-dired-entry
                         (file-name-nondirectory
                          (directory-file-name (remoto-path-path parsed)))
-                        entry classify))))))))
+                        entry classify nil human))))))))
 
 (defun remoto--handle-file-local-copy (filename)
   "Download remote FILENAME to a temp file, return temp path.
@@ -3210,8 +3269,8 @@ same as the account typed as a query."
 
 (defun remoto--sorted-names (dir names query)
   "Return NAMES, lines of a Dired of DIR, in the order of `dired-listing-switches'.
-A name that is QUERY, ignoring case, comes first: it is what was typed,
-and capitals sort first.  Their text properties go."
+A name that is QUERY, ignoring case, comes first, wherever the switches
+would put it: it is what was typed.  Their text properties go."
   (let* ((sorted (mapcar #'car
                          (remoto--sort-entries
                           (mapcar (lambda (name)
