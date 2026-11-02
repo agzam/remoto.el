@@ -107,11 +107,12 @@ URL keeps its first segment as the ref."
 (defun remoto--url-ref (forge owner repo ref rest)
   "Return (REF . PATH) for REF/REST, the tail of a URL into OWNER/REPO on FORGE.
 The URL does not mark where a ref with a slash ends: the longest branch,
-or else tag, that starts REF/REST is the ref.  A full commit SHA, or a
-branch named REF, needs no lookup past it: git allows no branch below one."
+or else tag, that starts REF/REST is the ref.  A full commit SHA, a
+branch named REF or a nil `remoto--url-ref-lookup' needs no lookup past it."
   (let ((full (if rest (concat ref "/" rest) ref))
         (best ref))
-    (when (and rest (not (string-match-p (rx bos (= 40 hex) eos) ref)))
+    (when (and rest remoto--url-ref-lookup
+               (not (string-match-p (rx bos (= 40 hex) eos) ref)))
       (catch 'done
         (dolist (kind '("heads" "tags"))
           (dolist (name (remoto--matching-refs forge owner repo kind ref))
@@ -154,7 +155,7 @@ name no part of the path."
            (rest (remoto--url-unescape raw-rest))
            (split (and ref (remoto--url-ref remoto--github owner repo ref rest))))
       (remoto-path-create
-       :owner owner :repo repo
+       :owner owner :repo repo :level 'tree
        :ref (car split)
        :path (if split (cdr split) "/"))))
    ((string-match
@@ -168,7 +169,7 @@ name no part of the path."
     (remoto-path-create
      :owner (match-string 1 input)
      :repo (match-string 2 input)
-     :ref nil
+     :ref nil :level 'tree
      :path "/"))))
 
 (defun remoto--parse-topic-url (input)
@@ -200,23 +201,16 @@ Return nil for any other input."
        :repo (if (string-suffix-p ".git" repo)
                  (substring repo 0 -4)
                repo)
-       :ref nil
+       :ref nil :level 'tree
        :path "/"))))
 
 (defun remoto--parse-repo-shorthand (input)
   "Parse owner/repo INPUT into a `remoto-path' struct."
-  (when (string-match
-         (rx bos
-             (group (+ (not (in "/@"))))
-             "/"
-             (group (+ (not (in "/@"))))
-             (? "@" (group (+ nonl)))
-             eos)
-         input)
+  (when (string-match remoto--shorthand-regexp input)
     (remoto-path-create
      :owner (match-string 1 input)
      :repo (match-string 2 input)
-     :ref (match-string 3 input)
+     :ref (match-string 3 input) :level 'tree
      :path "/")))
 
 (defun remoto--parse-input (input)
@@ -1084,8 +1078,10 @@ opens need the file-name handler for as long as they live."
   (remoto--ensure-global-mode)
   ;; A pull request or issue web URL is the topic, not the repository root
   ;; the URL parser would make of it.
-  (when-let* ((topic (remoto--parse-topic-url input)))
-    (setq input (apply #'format "%s/%s#%s" topic)))
+  (when-let* ((url (remoto--url-shape input))
+              ((eq (remoto-path-level url) 'topics)))
+    (setq input (format "%s/%s#%s" (remoto-path-owner url) (remoto-path-repo url)
+                        (remoto-path-query url))))
   (let ((remoto--may-ask t))
     (remoto--browse-input input)))
 
@@ -1143,16 +1139,6 @@ opens need the file-name handler for as long as they live."
                    (alist-get 'type (remoto--tree-entry resolved)))
             (dired canonical)
           (find-file canonical)))))))
-
-(defun remoto--github-input-p (input)
-  "Return non-nil if INPUT can look like a GitHub URL or shorthand."
-  (and (stringp input)
-       (string-match-p
-        (rx bos
-            (or "https://github.com/"
-                "git@github.com:"
-                (or "github.com/" "/github.com/")))
-        input)))
 
 ;; A /github: or /gh: path at a file prompt loads remoto before the mode
 ;; is on, as a remote path loads TRAMP.
@@ -1412,23 +1398,23 @@ See `remoto-forge-account-entries'."
 
 
 
-(cl-defmethod remoto-forge-url-input-p ((_forge remoto-github) input)
-  "GitHub's `url-input-p' for INPUT, see `remoto-forge-url-input-p'."
-  (remoto--github-input-p input))
-
-(cl-defmethod remoto-forge-parse-url ((_forge remoto-github) input)
-  "GitHub's `parse-url' for INPUT, see `remoto-forge-parse-url'."
-  (let* ((clean (replace-regexp-in-string "\\`/?" "" input))
-         (clean (if (string-match-p "\\`github\\.com/" clean)
-                    (concat "https://" clean)
-                  clean)))
-    (condition-case nil
-        (remoto--parse-input clean)
-      (error nil))))
-
-(cl-defmethod remoto-forge-parse-topic-url ((_forge remoto-github) input)
-  "GitHub's `parse-topic-url' for INPUT, see `remoto-forge-parse-topic-url'."
-  (remoto--parse-topic-url input))
+(cl-defmethod remoto-forge-parse-url ((forge remoto-github) input)
+  "GitHub's `parse-url' for INPUT on FORGE, see `remoto-forge-parse-url'."
+  (let* ((input (string-trim input))
+         (web (replace-regexp-in-string "\\`/?github\\.com/" "https://github.com/"
+                                        input)))
+    (or (when-let* ((topic (remoto--parse-topic-url input)))
+          (apply #'remoto--path-at forge 'topics topic))
+        (remoto--remote-path forge input)
+        (remoto--parse-github-url web)
+        (when (string-match (rx bos "https://github.com"
+                                (? "/" (? (group (+ (not (in "/?#")))) (? "/")))
+                                (? (in "?#") (* nonl)) eos)
+                            web)
+          (if-let* ((owner (match-string 1 web)))
+              (remoto--path-at forge 'owner owner)
+            (remoto--path-at forge 'root)))
+        (remoto--parse-repo-shorthand input))))
 
 (provide 'remoto-github)
 

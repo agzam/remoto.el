@@ -484,7 +484,21 @@ with that property intact and no live minibuffer."
   (it "opens a forge URL as a remoto path"
     (spy-on 'find-file)
     (remoto-embark-open-in-remoto "https://github.com/o/r")
-    (expect 'find-file :to-have-been-called-with "/github:o/r:/")))
+    (expect 'find-file :to-have-been-called-with "/github:o/r:/"))
+
+  (it "opens a Codeberg URL, a topic URL and the shorthand at their repository"
+    (spy-on 'find-file)
+    (dolist (case '(("https://codeberg.org/o/r" . "/codeberg:o/r:/")
+                    ("https://codeberg.org/o/r/pulls/7" . "/codeberg:o/r:/")
+                    ("https://github.com/o/r/issues/42" . "/github:o/r:/")
+                    ("o/r@v1" . "/github:o/r@v1:/")))
+      (remoto-embark-open-in-remoto (car case))
+      (expect 'find-file :to-have-been-called-with (cdr case))))
+
+  (it "signals for a URL of no registered host"
+    (spy-on 'find-file)
+    (expect (remoto-embark-open-in-remoto "https://gitlab.com/o/r") :to-throw 'user-error)
+    (expect 'find-file :not :to-have-been-called)))
 
 ;;; Input-form equivalence: /gh:, /github: file-name, and canonical must
 ;;; all behave identically (regression for the shorthand/file-name hole).

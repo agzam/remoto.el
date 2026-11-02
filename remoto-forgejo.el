@@ -326,41 +326,8 @@ A hex name that is no branch is a commit."
   (let ((host (regexp-quote (remoto-forge-host forge))))
     (concat "\\`\\(?:https://" host "/\\|git@" host ":\\|/?" host "/\\)")))
 
-(cl-defmethod remoto-forge-url-input-p ((forge remoto-forgejo) input)
-  "Non-nil when INPUT is a URL of the host of FORGE, or its ssh remote."
-  (and (stringp input)
-       (string-match-p (remoto-forgejo--host-regexp forge) input)))
-
-(cl-defmethod remoto-forge-parse-url ((forge remoto-forgejo) input)
-  "The repository, tree or file that INPUT, a web URL or remote of FORGE, names.
-The path after src, raw or blame carries the kind of the ref, or not;
-either way the ref may hold a slash, which `remoto--url-ref' settles."
-  (let ((rest (string-trim input)))
-    (when (string-match (remoto-forgejo--host-regexp forge) rest)
-      (setq rest (substring rest (match-end 0)))
-      (when (string-match
-             (rx bos
-                 (group (+ (not "/")))
-                 "/"
-                 (group (+ (not (in "/#?"))))
-                 (? "/" (or "src" "raw" "blame") "/"
-                    (? (or "branch" "tag" "commit") "/")
-                    (group (+ (not (in "/?#"))))
-                    (? "/" (group (+ (not (in "?#"))))))
-                 (* nonl)
-                 eos)
-             rest)
-        (let* ((owner (match-string 1 rest))
-               (repo (string-remove-suffix ".git" (match-string 2 rest)))
-               (ref (remoto--url-unescape (match-string 3 rest)))
-               (path (remoto--url-unescape (match-string 4 rest)))
-               (split (and ref (remoto--url-ref forge owner repo ref path))))
-          (remoto-path-create :forge forge :owner owner :repo repo
-                              :ref (car split)
-                              :path (if split (cdr split) "/")))))))
-
-(cl-defmethod remoto-forge-parse-topic-url ((forge remoto-forgejo) input)
-  "The (OWNER REPO NUMBER) of INPUT, an issue or pull request web URL of FORGE."
+(defun remoto-forgejo--topic-url (forge input)
+  "Return the topic path that INPUT, an issue or pull URL of FORGE, names."
   (when (string-match (rx-to-string
                        `(seq bos (? "/") (? "https://") ,(remoto-forge-host forge) "/"
                              (group (+ (not (in "/#?")))) "/"
@@ -369,7 +336,55 @@ either way the ref may hold a slash, which `remoto--url-ref' settles."
                              (group (+ digit))
                              (or eos (in "/#?"))))
                       input)
-    (list (match-string 1 input) (match-string 2 input) (match-string 3 input))))
+    (remoto--path-at forge 'topics (match-string 1 input) (match-string 2 input)
+                     (match-string 3 input))))
+
+(defun remoto-forgejo--account-url (forge input)
+  "Return the root or owner path that INPUT, a URL of FORGE, names."
+  (when-let* (((string-match (remoto-forgejo--host-regexp forge) input))
+              (rest (substring input (match-end 0)))
+              ((string-match (rx bos (? (group (+ (not (in "/?#")))) (? "/"))
+                                 (? (in "?#") (* nonl)) eos)
+                             rest)))
+    (if-let* ((owner (match-string 1 rest)))
+        (remoto--path-at forge 'owner owner)
+      (remoto--path-at forge 'root))))
+
+(defun remoto-forgejo--tree-url (forge input)
+  "Return the repository, tree or file that INPUT, a URL of FORGE, names.
+The path after src, raw or blame carries the kind of the ref, or not;
+either way the ref may hold a slash, which `remoto--url-ref' settles."
+  (when-let* (((string-match (remoto-forgejo--host-regexp forge) input))
+              (rest (substring input (match-end 0)))
+              ((string-match
+                (rx bos
+                    (group (+ (not "/")))
+                    "/"
+                    (group (+ (not (in "/#?"))))
+                    (? "/" (or "src" "raw" "blame") "/"
+                       (? (or "branch" "tag" "commit") "/")
+                       (group (+ (not (in "/?#"))))
+                       (? "/" (group (+ (not (in "?#"))))))
+                    (* nonl)
+                    eos)
+                rest)))
+    (let* ((owner (match-string 1 rest))
+           (repo (string-remove-suffix ".git" (match-string 2 rest)))
+           (ref (remoto--url-unescape (match-string 3 rest)))
+           (path (remoto--url-unescape (match-string 4 rest)))
+           (split (and ref (remoto--url-ref forge owner repo ref path))))
+      (remoto-path-create :forge forge :owner owner :repo repo :level 'tree
+                          :ref (car split)
+                          :path (if split (cdr split) "/")))))
+
+(cl-defmethod remoto-forge-parse-url ((forge remoto-forgejo) input)
+  "The account, topic, repository, tree or file that INPUT names on FORGE.
+INPUT is a web URL or a git remote of the host of FORGE."
+  (let ((input (string-trim input)))
+    (or (remoto-forgejo--topic-url forge input)
+        (remoto--remote-path forge input)
+        (remoto-forgejo--tree-url forge input)
+        (remoto-forgejo--account-url forge input))))
 
 ;;;; Codeberg and the other servers
 

@@ -297,22 +297,52 @@ Those are the account of the token and its organizations."
 Later pages may keep loading in the background."
   (remoto--unsupported forge 'owner-listing))
 
-(cl-defgeneric remoto-forge-url-input-p (_forge _input)
-  "Return non-nil when INPUT has the shape of a URL or remote of FORGE."
-  nil)
-
 (cl-defgeneric remoto-forge-parse-url (_forge _input)
-  "Return the `remoto-path' that the URL or remote INPUT names on FORGE, or nil."
+  "Return the `remoto-path' that INPUT names on FORGE, or nil.
+INPUT is a web URL, a git remote or a shorthand, at any level: the URL
+of a topic gives the topics level with the topic key as its query."
   nil)
 
-(cl-defgeneric remoto-forge-parse-topic-url (_forge _input)
-  "Return (OWNER REPO NUMBER) when INPUT is the web URL of a topic on FORGE."
-  nil)
+(defvar remoto--url-ref-lookup t
+  "Non-nil when a forge may ask for its refs to split the ref of a URL.")
+
+(defconst remoto--shorthand-regexp
+  (rx bos (group (+ (not (in "/@")))) "/" (group (+ (not (in "/@"))))
+      (? "@" (group (+ nonl))) eos)
+  "Regexp of the bare OWNER/REPO[@REF], a GitHub name without a host.")
+
+(defun remoto--parse-url (input &optional hosted)
+  "Return the `remoto-path' that INPUT, a URL, remote or shorthand, names.
+Each forge answers for a host in INPUT first; the bare OWNER/REPO[@REF],
+GitHub's, comes last, so it never claims a URL of another forge.  Nil
+when none answers.  HOSTED leaves the shorthand out: a relative file
+name has its shape."
+  (when (stringp input)
+    (let ((shorthand (string-match-p remoto--shorthand-regexp input)))
+      (or (seq-some (lambda (forge)
+                      (and (not (and shorthand (eq forge remoto--github)))
+                           (remoto-forge-parse-url forge input)))
+                    (seq-uniq (mapcar #'cdr remoto--forges)))
+          (and shorthand (not hosted)
+               (remoto-forge-parse-url remoto--github input))))))
+
+(defun remoto--url-shape (input)
+  "Return the `remoto-path' of the URL or remote INPUT, refs not looked up.
+The shape of INPUT is enough to tell its forge, level and topic."
+  (let ((remoto--url-ref-lookup nil))
+    (remoto--parse-url input t)))
 
 (defun remoto--url-forge (input)
   "Return the forge for which INPUT is a URL or remote, or nil."
-  (seq-find (lambda (forge) (remoto-forge-url-input-p forge input))
-            (seq-uniq (mapcar #'cdr remoto--forges))))
+  (when-let* ((parsed (remoto--url-shape input)))
+    (remoto-path-forge parsed)))
+
+(defun remoto--path-at (forge level &optional owner repo query)
+  "Return the `remoto-path' at LEVEL of FORGE that OWNER, REPO and QUERY name.
+LEVEL is `root', `owner' or the level of a delimiter, such as `topics'."
+  (remoto--parse (remoto--unparse
+                  (remoto-path-create :forge forge :level level :owner owner
+                                      :repo repo :query (or query "")))))
 
 ;;;; Path parsing
 
@@ -3053,9 +3083,10 @@ Used for permalinks so the link survives the ref moving on."
 
 (defun remoto--url-path (input)
   "Return the `remoto-path' that the URL, remote or shorthand INPUT names.
-Each forge is asked in turn; signal a `user-error' when none answers."
-  (or (seq-some (lambda (forge) (remoto-forge-parse-url forge input))
-                (seq-uniq (mapcar #'cdr remoto--forges)))
+Signal a `user-error' when no forge answers, see `remoto--parse-url'."
+  (or (when-let* ((url (remoto--parse-url input))
+                  ((remoto-path-repo url)))
+        url)
       (user-error "Remoto: cannot parse input: %s" input)))
 
 (defun remoto--path-context (path &optional line-start line-end)
@@ -3755,12 +3786,11 @@ components resolve first: a short form reads /github:OWNER/.. as a repo."
      ;; Partial canonical path: /github:owner/repo or /github:owner/repo@ref
      (root
       (remoto--canonical-path (remoto--resolve-ref root)))
-     ;; A URL or remote of a forge
-     ((remoto--url-forge input)
-      (if-let* ((parsed (remoto-forge-parse-url (remoto--url-forge input) input)))
-          (remoto--canonical-path (remoto--resolve-ref parsed))
-        input))
-     (t input))))
+     ;; A URL or remote of a repository; a topic URL names its root
+     (t (if-let* ((url (remoto--parse-url input t))
+                  ((remoto-path-repo url)))
+            (remoto--canonical-path (remoto--resolve-ref url))
+          input)))))
 
 (defun remoto--dired-around-a (orig-fn dir-or-list &rest args)
   "Rewrite GitHub URLs and short remoto paths for Dired, then call ORIG-FN.
@@ -3788,10 +3818,10 @@ Call ORIG-FN with FILENAME and ARGS after any rewrite.  A name that names
 nothing opens a Dired of the names that match it."
   (setq filename (remoto--normalize-shorthand filename))
   ;; A pull request or issue web URL is the topic, not the repository root
-  ;; the URL parser would make of it.
-  (when-let* ((forge (remoto--url-forge filename))
-              (topic (remoto-forge-parse-topic-url forge filename)))
-    (setq filename (apply #'format "%s%s/%s#%s" (remoto--prefix forge) topic)))
+  ;; its canonical name would be.
+  (when-let* ((url (remoto--url-shape filename))
+              ((eq (remoto-path-level url) 'topics)))
+    (setq filename (remoto--unparse url)))
   ;; Check for #NUM BEFORE rewrite (rewrite would mangle the # delimiter)
   (let ((remoto--may-ask t))
     (if-let* ((topic (remoto--topic-path filename)))
@@ -4223,11 +4253,30 @@ run it in."
     (when (eq 0 (ignore-errors (apply #'process-file "git" nil '(t nil) nil args)))
       (string-remove-suffix "\n" (buffer-string)))))
 
-(defun remoto--forge-of-host (host)
-  "Return the forge whose web host is HOST, or nil."
-  (and host
-       (seq-find (lambda (forge) (string-equal-ignore-case host (remoto-forge-host forge)))
-                 (seq-uniq (mapcar #'cdr remoto--forges)))))
+(defun remoto--remote-parts (url)
+  "Return (SCHEME HOST OWNER REPO) of the git remote URL, or nil.
+SCHEME is nil for the scp form, USER@HOST:OWNER/REPO."
+  (when (and (stringp url)
+             (string-match
+              (rx bos (or (seq (group-n 1 (+ (in "a-z+"))) "://"
+                               (? (* (not (in "@/"))) "@")
+                               (group-n 2 (+ (not (in "/:"))))
+                               (? ":" (* digit)) (+ "/"))
+                          (seq (? (* (not (in "@/"))) "@")
+                               (group-n 2 (+ (not (in "/:")))) ":" (? "/")))
+                  (group-n 3 (+ (not "/"))) "/"
+                  (group-n 4 (+? (not "/"))) (? ".git") (* "/") eos)
+              url))
+    (mapcar (lambda (group) (match-string group url)) '(1 2 3 4))))
+
+(defun remoto--remote-path (forge url)
+  "Return the root `remoto-path' of the git remote URL on FORGE, or nil.
+URL names FORGE when its host is the host of FORGE."
+  (pcase (remoto--remote-parts url)
+    (`(,_ ,host ,owner ,repo)
+     (when (string-equal-ignore-case host (remoto-forge-host forge))
+       (remoto-path-create :forge forge :owner owner :repo repo
+                           :level 'tree :path "/")))))
 
 (defun remoto--ssh-hostname (host)
   "Return the name that ssh connects to for HOST, which may be an alias."
@@ -4241,25 +4290,14 @@ run it in."
   "Return the root of the repository that the git remote URL names, or nil.
 The root is a `remoto-path'.  An ssh host that is no forge's can be an
 alias of the ssh configuration, which ssh -G resolves."
-  (when (string-match
-         (rx bos (or (seq (group-n 1 (+ (in "a-z+"))) "://"
-                          (? (* (not (in "@/"))) "@")
-                          (group-n 2 (+ (not (in "/:"))))
-                          (? ":" (* digit)) (+ "/"))
-                     (seq (? (* (not (in "@/"))) "@")
-                          (group-n 2 (+ (not (in "/:")))) ":" (? "/")))
-             (group-n 3 (+ (not "/"))) "/"
-             (group-n 4 (+? (not "/"))) (? ".git") (* "/") eos)
-         url)
-    (let* ((scheme (match-string 1 url))
-           (host (match-string 2 url))
-           (owner (match-string 3 url))
-           (repo (match-string 4 url))
-           (forge (or (remoto--forge-of-host host)
-                      (and (not (member scheme '("http" "https")))
-                           (remoto--forge-of-host (remoto--ssh-hostname host))))))
-      (and forge
-           (remoto-path-create :forge forge :owner owner :repo repo :path "/")))))
+  (or (when-let* ((root (remoto--parse-url url t))
+                  ((remoto-path-repo root)))
+        root)
+      (pcase (remoto--remote-parts url)
+        (`(,scheme ,host ,owner ,repo)
+         (when-let* (((not (member scheme '("http" "https"))))
+                     (name (remoto--ssh-hostname host)))
+           (remoto--parse-url (format "git@%s:%s/%s" name owner repo) t))))))
 
 (defun remoto--git-remotes ()
   "Return (NAME . URL) for each remote of the repository, as git lists them."

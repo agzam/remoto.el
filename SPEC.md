@@ -50,7 +50,7 @@ When `@REF` is omitted, the first access resolves the default branch via the rep
 
 ### URL rewriting
 
-GitHub URLs are also detected and rewritten automatically in `dired` and `find-file-noselect` via `:around` advice. The function `remoto--github-input-p` detects GitHub-like inputs (https URLs, git SSH URLs, `/github.com/...` paths), and `remoto--maybe-rewrite` converts them to canonical remoto paths. This lets users do:
+GitHub URLs are also detected and rewritten automatically in `dired` and `find-file-noselect` via `:around` advice. The function `remoto--url-forge` detects forge inputs (https URLs, git SSH URLs, `/github.com/...` paths), and `remoto--maybe-rewrite` converts them to canonical remoto paths. This lets users do:
 
 ```
 C-x d /github.com/torvalds/linux RET

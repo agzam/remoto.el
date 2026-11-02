@@ -290,21 +290,28 @@ PROPS are the slots of `remoto--login': :failed, :token and :user."
 
 ;;; GitHub input detection
 
-(describe "remoto--github-input-p"
+(describe "remoto--url-forge"
   (it "detects https URLs"
-    (expect (remoto--github-input-p "https://github.com/a/b") :to-be-truthy))
+    (expect (remoto--url-forge "https://github.com/a/b") :to-be remoto--github))
 
   (it "detects git SSH URLs"
-    (expect (remoto--github-input-p "git@github.com:a/b.git") :to-be-truthy))
+    (expect (remoto--url-forge "git@github.com:a/b.git") :to-be remoto--github))
 
   (it "detects /github.com/ paths"
-    (expect (remoto--github-input-p "/github.com/a/b") :to-be-truthy))
+    (expect (remoto--url-forge "/github.com/a/b") :to-be remoto--github))
 
-  (it "rejects local paths"
-    (expect (remoto--github-input-p "/home/user/file") :not :to-be-truthy))
+  (it "rejects local paths, relative ones in the shape of a shorthand too"
+    (expect (remoto--url-forge "/home/user/file") :to-be nil)
+    (expect (remoto--url-forge "src/main.el") :to-be nil))
 
   (it "rejects nil"
-    (expect (remoto--github-input-p nil) :not :to-be-truthy)))
+    (expect (remoto--url-forge nil) :to-be nil))
+
+  (it "asks for no ref to tell the forge of a URL"
+    (spy-on 'remoto--matching-refs)
+    (expect (remoto--url-forge "https://github.com/o/r/blob/main/src/x.el")
+            :to-be remoto--github)
+    (expect 'remoto--matching-refs :not :to-have-been-called)))
 
 ;;; Tree cache operations
 
@@ -3552,6 +3559,19 @@ using unauthenticated access until M-x remoto-reset-auth")
         (expect (mapcar #'substring-no-properties names) :to-equal '("a.txt" "lib/"))
         (expect (get-text-property 0 'remoto-target (car names)) :to-equal "/rl:o/r:/a.txt")))))
 
+(cl-defstruct (remoto-test-hosted (:include remoto-forge)
+                                   (:constructor remoto-test-hosted-create)
+                                   (:copier nil))
+  "A forge whose names, HOST:OWNER/REPO, have the shape of a shorthand.")
+
+(cl-defmethod remoto-forge-parse-url ((forge remoto-test-hosted) input)
+  "The repository root of INPUT, the HOST:OWNER/REPO of FORGE."
+  (when (string-match (concat "\\`" (regexp-quote (remoto-forge-host forge))
+                              ":\\([^/]+\\)/\\([^/]+\\)\\'")
+                      input)
+    (remoto-path-create :forge forge :owner (match-string 1 input)
+                        :repo (match-string 2 input) :path "/")))
+
 (describe "the forge contract"
   :var ((fake (remoto-forge-create :name 'fake :prefixes '("fake") :delimiters '(?@))))
 
@@ -3570,9 +3590,8 @@ using unauthenticated access until M-x remoto-reset-auth")
   (it "answers nil, not an error, where nothing is a fine answer"
     (expect (remoto-forge-user fake) :to-be nil)
     (expect (remoto-forge-entry-notes fake "o" "r" "main" "" '("a")) :to-be nil)
-    (expect (remoto-forge-url-input-p fake "https://x/o/r") :to-be nil)
     (expect (remoto-forge-parse-url fake "https://x/o/r") :to-be nil)
-    (expect (remoto-forge-parse-topic-url fake "https://x/o/r/pull/1") :to-be nil)
+    (expect (remoto-forge-parse-url fake "https://x/o/r/pull/1") :to-be nil)
     (expect (remoto-forge-forget fake "o" "r") :to-be nil)
     (expect (remoto-forge-forget fake) :to-be nil)
     (expect (remoto-forge-topic-extra fake "o" "r" "1") :to-be nil))
@@ -3628,6 +3647,57 @@ using unauthenticated access until M-x remoto-reset-auth")
     (expect (remoto--canonical-path (remoto--url-path "o/r@v1"))
             :to-equal "/github:o/r@v1:/")
     (expect (remoto--url-path "not a repo") :to-throw 'user-error))
+
+  (it "parses a topic URL of GitHub or Codeberg into a topics path with its key"
+    (dolist (case '(("https://github.com/o/r/issues/42" . "/github:o/r#42")
+                    ("https://github.com/o/r/pull/42/files" . "/github:o/r#42")
+                    ("https://codeberg.org/o/r/issues/8#x" . "/codeberg:o/r#8")
+                    ("https://codeberg.org/o/r/pulls/7" . "/codeberg:o/r#7")))
+      (let ((parsed (remoto--parse-url (car case))))
+        (expect (remoto-path-level parsed) :to-be 'topics)
+        (expect (remoto-path-query parsed) :to-equal
+                (substring (cdr case) (1+ (string-search "#" (cdr case)))))
+        (expect (remoto--unparse parsed) :to-equal (cdr case)))))
+
+  (it "parses the URL of a forge or an account into the root or owner level"
+    (dolist (case '(("https://github.com/" . "/github:")
+                    ("https://github.com/torvalds?tab=repositories" . "/github:torvalds/")
+                    ("https://codeberg.org/" . "/codeberg:")
+                    ("codeberg.org/forgejo/" . "/codeberg:forgejo/")))
+      (expect (remoto--unparse (remoto--parse-url (car case))) :to-equal (cdr case)))
+    (expect (remoto--url-path "https://codeberg.org/forgejo") :to-throw 'user-error)
+    (expect (remoto--maybe-rewrite "https://github.com/torvalds")
+            :to-equal "https://github.com/torvalds"))
+
+  (it "gives a Codeberg URL to Codeberg, GitHub first in the registry"
+    (expect (cdar remoto--forges) :to-be remoto--github)
+    (dolist (url '("https://codeberg.org/o/r" "codeberg.org/o/r"
+                   "git@codeberg.org:o/r.git" "ssh://git@codeberg.org/o/r.git"))
+      (expect (remoto-path-forge (remoto--parse-url url)) :to-be remoto--codeberg)))
+
+  (it "gives the shorthand to GitHub, and leaves it out when asked for a host"
+    (let ((parsed (remoto--parse-url "o/r@v1")))
+      (expect (remoto-path-forge parsed) :to-be remoto--github)
+      (expect (remoto--canonical-path parsed) :to-equal "/github:o/r@v1:/"))
+    (expect (remoto--parse-url "o/r@v1" t) :to-be nil))
+
+  (it "answers nil for a URL of no registered host, and remoto--url-path signals"
+    (expect (remoto--parse-url "https://gitlab.com/o/r") :to-be nil)
+    (expect (remoto--parse-url "git@gitlab.com:o/r.git") :to-be nil)
+    (expect (remoto--parse-url nil) :to-be nil)
+    (expect (remoto--url-path "https://gitlab.com/o/r") :to-throw 'user-error))
+
+  (it "asks a forge of another host before the GitHub shorthand"
+    (let ((remoto--forges (copy-alist remoto--forges))
+          (remoto--handler-regexp remoto--handler-regexp)
+          (file-name-handler-alist (copy-alist file-name-handler-alist))
+          (hosted (remoto-test-hosted-create :name 'hosted :prefixes '("hosted")
+                                             :host "hosted.example" :delimiters '(?@))))
+      (remoto-register-forge hosted)
+      (let ((parsed (remoto--parse-url "hosted.example:o/r")))
+        (expect (remoto-path-forge parsed) :to-be hosted)
+        (expect (remoto-path-owner parsed) :to-equal "o"))
+      (expect (remoto-path-forge (remoto--parse-url "o/r")) :to-be remoto--github)))
 
   (it "finds a registered forge by name"
     (expect (remoto--forge-named 'github) :to-be remoto--github)
@@ -4291,15 +4361,14 @@ using unauthenticated access until M-x remoto-reset-auth")
                (remoto-forge-parse-url remoto--codeberg (car case)))
               :to-equal (cdr case)))
     (expect (remoto-forge-parse-url remoto--codeberg "https://github.com/o/r") :to-be nil)
-    (expect (remoto-forge-url-input-p remoto--codeberg "https://codeberg.org/o/r") :to-be-truthy)
-    (expect (remoto-forge-url-input-p remoto--codeberg "https://github.com/o/r") :to-be nil)
-    (expect (remoto-forge-parse-topic-url remoto--codeberg
-                                          "https://codeberg.org/o/r/pulls/7/files")
-            :to-equal '("o" "r" "7"))
-    (expect (remoto-forge-parse-topic-url remoto--codeberg "codeberg.org/o/r/issues/8#x")
-            :to-equal '("o" "r" "8"))
-    (expect (remoto-forge-parse-topic-url remoto--codeberg "https://codeberg.org/o/r")
-            :to-be nil))
+    (dolist (case '(("https://codeberg.org/o/r/pulls/7/files" . "/codeberg:o/r#7")
+                    ("codeberg.org/o/r/issues/8#x" . "/codeberg:o/r#8")))
+      (let ((parsed (remoto-forge-parse-url remoto--codeberg (car case))))
+        (expect (remoto-path-level parsed) :to-be 'topics)
+        (expect (remoto--unparse parsed) :to-equal (cdr case))))
+    (expect (remoto-path-level (remoto-forge-parse-url remoto--codeberg
+                                                       "https://codeberg.org/o/r"))
+            :to-be 'tree))
 
   (it "routes a URL to the forge of its host"
     (expect (remoto--url-forge "https://codeberg.org/o/r") :to-be remoto--codeberg)
