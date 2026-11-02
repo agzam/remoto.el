@@ -10,21 +10,21 @@
  :requests ("/user/orgs?per_page=100&page=1"))
 
 ("ff /gh:agzam" :mode dired-mode :dired "/github:" :matches t :names
- ("agzam" "Agzam-Ar" "agzam-asadullaev" "agzam-dev" "agzam-juraev786"
-  "Agzam-lev" "agzam-zham" "agzam009" "Agzam020" "agzam05")
+ ("agzam" "AGZAMOVVVS21" "AGZamu" "AGzamDev" "AgZaMhOdJ" "AgZaMiC"
+  "Agzam-Ar" "Agzam-lev" "Agzam020" "Agzam06")
  :count 94 :point "agzam" :requests
  ("/search/users?q=agzam&per_page=100"))
 
 ("ff /gh:qlik" :mode dired-mode :dired "/github:" :matches t :names
- ("qlik" "andre-ferreira-qlik" "CodeQlik" "qlik-all" "Qlik-Branch"
-  "Qlik-BT" "Qlik-Data-Integration-Team" "qlik-download" "qlik-hhe"
-  "qlik-ktg")
+ ("qlik" "CodeQlik" "Qlik-BT" "Qlik-Branch"
+  "Qlik-Data-Integration-Team" "Qlik-PE" "Qlik-Sense-Extensions"
+  "QlikDeploymentFramework" "QlikFrancePlatform" "QlikFreak")
  :count 31 :point "qlik" :requests
  ("/search/users?q=qlik&per_page=100"))
 
 ("ff /gh:agzam/" :mode dired-mode :dired "/github:agzam/" :names
  ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
-  ".stumpwm.d" "Adv360-Pro-ZMK" "aero" "ag-themes.el")
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
  :count 145 :point ".doom.d" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
   "Remoto: listed all 143 repositories of agzam")
@@ -35,8 +35,8 @@
 
 ("ff /gh:agzam/remoto.el" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el"
   "/repos/agzam/remoto.el/git/trees/main?recursive=1"))
@@ -48,8 +48,8 @@
 
 ("ff /gh:agzam/remoto.el/" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el"
   "/repos/agzam/remoto.el/git/trees/main?recursive=1"))
@@ -88,15 +88,15 @@
 
 ("ff /gh:agzam/remoto.el@main" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el/git/trees/main?recursive=1"))
 
 ("ff /gh:agzam/remoto.el@main:" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el/git/trees/main?recursive=1"))
 
@@ -123,8 +123,8 @@
 
 ("ff /gh:agzam/remoto.el@2.2.0:/" :mode dired-mode :dired
  "/github:agzam/remoto.el@2.2.0:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el/git/trees/2.2.0?recursive=1"))
 
@@ -137,8 +137,8 @@
 
 ("ff /gh:agzam/remoto.el@ceaf310:/" :mode dired-mode :dired
  "/github:agzam/remoto.el@ceaf310:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el/git/trees/ceaf310?recursive=1"))
 
@@ -156,7 +156,7 @@
 ("ff /gh:agzam/remoto.el/.." :mode dired-mode :dired "/github:agzam/"
  :names
  ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
-  ".stumpwm.d" "Adv360-Pro-ZMK" "aero" "ag-themes.el")
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
  :count 145 :point ".doom.d" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
   "Remoto: listed all 143 repositories of agzam")
@@ -167,15 +167,15 @@
 
 ("ff /gh:agzam/remoto.el@main:/test/.." :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el/git/trees/main?recursive=1"))
 
 ("ff /gh:agzam/.emacs.d" :mode dired-mode :dired
  "/github:agzam/.emacs.d@main:/" :names
- ("." ".." ".github" ".gitignore" ".rgignore" "AGENTS.md" "bb.edn"
-  "config.el" "early-init.el" "init.el")
+ ("." ".." ".github" ".gitignore" ".rgignore" "AGENTS.md" "README.md"
+  "bb.edn" "config.el" "early-init.el")
  :count 16 :point ".github" :requests
  ("/repos/agzam/.emacs.d"
   "/repos/agzam/.emacs.d/git/trees/main?recursive=1"))
@@ -187,8 +187,8 @@
 
 ("ff /gh:Agzam/Remoto.el" :mode dired-mode :dired
  "/github:Agzam/Remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/Agzam/Remoto.el"
   "/repos/Agzam/Remoto.el/git/trees/main?recursive=1"))
@@ -229,8 +229,8 @@
 
 ("ff https://github.com/agzam/remoto.el" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el"
   "/repos/agzam/remoto.el/git/trees/main?recursive=1"))
@@ -245,21 +245,21 @@
 
 ("dired /gh:agzam" :mode dired-mode :dired "/github:" :matches t
  :names
- ("agzam" "Agzam-Ar" "agzam-asadullaev" "agzam-dev" "agzam-juraev786"
-  "Agzam-lev" "agzam-zham" "agzam009" "Agzam020" "agzam05")
+ ("agzam" "AGZAMOVVVS21" "AGZamu" "AGzamDev" "AgZaMhOdJ" "AgZaMiC"
+  "Agzam-Ar" "Agzam-lev" "Agzam020" "Agzam06")
  :count 94 :point "agzam" :requests
  ("/search/users?q=agzam&per_page=100"))
 
 ("dired /gh:qlik" :mode dired-mode :dired "/github:" :matches t :names
- ("qlik" "andre-ferreira-qlik" "CodeQlik" "qlik-all" "Qlik-Branch"
-  "Qlik-BT" "Qlik-Data-Integration-Team" "qlik-download" "qlik-hhe"
-  "qlik-ktg")
+ ("qlik" "CodeQlik" "Qlik-BT" "Qlik-Branch"
+  "Qlik-Data-Integration-Team" "Qlik-PE" "Qlik-Sense-Extensions"
+  "QlikDeploymentFramework" "QlikFrancePlatform" "QlikFreak")
  :count 31 :point "qlik" :requests
  ("/search/users?q=qlik&per_page=100"))
 
 ("dired /gh:agzam/" :mode dired-mode :dired "/github:agzam/" :names
  ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
-  ".stumpwm.d" "Adv360-Pro-ZMK" "aero" "ag-themes.el")
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
  :count 145 :point ".doom.d" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
   "Remoto: listed all 143 repositories of agzam")
@@ -270,8 +270,8 @@
 
 ("dired /gh:agzam/remoto.el" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el"
   "/repos/agzam/remoto.el/git/trees/main?recursive=1"))
@@ -283,8 +283,8 @@
 
 ("dired /gh:agzam/remoto.el/" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el"
   "/repos/agzam/remoto.el/git/trees/main?recursive=1"))
@@ -323,15 +323,15 @@
 
 ("dired /gh:agzam/remoto.el@main" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el/git/trees/main?recursive=1"))
 
 ("dired /gh:agzam/remoto.el@main:" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el/git/trees/main?recursive=1"))
 
@@ -358,8 +358,8 @@
 
 ("dired /gh:agzam/remoto.el@2.2.0:/" :mode dired-mode :dired
  "/github:agzam/remoto.el@2.2.0:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el/git/trees/2.2.0?recursive=1"))
 
@@ -372,8 +372,8 @@
 
 ("dired /gh:agzam/remoto.el@ceaf310:/" :mode dired-mode :dired
  "/github:agzam/remoto.el@ceaf310:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el/git/trees/ceaf310?recursive=1"))
 
@@ -388,7 +388,7 @@
 ("dired /gh:agzam/remoto.el/.." :mode dired-mode :dired
  "/github:agzam/" :names
  ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
-  ".stumpwm.d" "Adv360-Pro-ZMK" "aero" "ag-themes.el")
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
  :count 145 :point ".doom.d" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
   "Remoto: listed all 143 repositories of agzam")
@@ -399,15 +399,15 @@
 
 ("dired /gh:agzam/remoto.el@main:/test/.." :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el/git/trees/main?recursive=1"))
 
 ("dired /gh:agzam/.emacs.d" :mode dired-mode :dired
  "/github:agzam/.emacs.d@main:/" :names
- ("." ".." ".github" ".gitignore" ".rgignore" "AGENTS.md" "bb.edn"
-  "config.el" "early-init.el" "init.el")
+ ("." ".." ".github" ".gitignore" ".rgignore" "AGENTS.md" "README.md"
+  "bb.edn" "config.el" "early-init.el")
  :count 16 :point ".github" :requests
  ("/repos/agzam/.emacs.d"
   "/repos/agzam/.emacs.d/git/trees/main?recursive=1"))
@@ -419,8 +419,8 @@
 
 ("dired /gh:Agzam/Remoto.el" :mode dired-mode :dired
  "/github:Agzam/Remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/Agzam/Remoto.el"
   "/repos/Agzam/Remoto.el/git/trees/main?recursive=1"))
@@ -462,8 +462,8 @@
 
 ("dired https://github.com/agzam/remoto.el" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el"
   "/repos/agzam/remoto.el/git/trees/main?recursive=1"))
@@ -521,8 +521,8 @@
 
 ("dired RET on a repository line" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
   "Remoto: listed all 143 repositories of agzam")
@@ -540,8 +540,8 @@
 
 ("dired RET on a ref line" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el/branches?per_page=100&page=1"
   "/repos/agzam/remoto.el/tags?per_page=100&page=1"
@@ -555,8 +555,8 @@
 
 ("dired RET on a match line" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto"
   "/search/repositories?q=remoto%20in%3Aname%20user%3Aagzam&per_page=100"
@@ -565,7 +565,7 @@
 ("dired RET on .. at a repository root" :mode dired-mode :dired
  "/github:agzam/" :names
  ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
-  ".stumpwm.d" "Adv360-Pro-ZMK" "aero" "ag-themes.el")
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
  :count 145 :point ".doom.d" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
   "Remoto: listed all 143 repositories of agzam")
@@ -588,8 +588,8 @@
 
 ("dired ^ at a repository root" :mode dired-mode :dired
  "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "changelog.org" "LICENSE" "Makefile"
-  "plan.md" "README.org" "remoto-embark.el")
+ ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
+  "SPEC.md" "changelog.org" "plan.md")
  :count 14 :point ".github" :requests
  ("/repos/agzam/remoto.el"
   "/repos/agzam/remoto.el/git/trees/main?recursive=1"))
@@ -597,7 +597,7 @@
 ("dired g in an owner listing" :mode dired-mode :dired
  "/github:agzam/" :names
  ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
-  ".stumpwm.d" "Adv360-Pro-ZMK" "aero" "ag-themes.el")
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
  :count 145 :point ".doom.d" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
   "Remoto: listed all 143 repositories of agzam")
@@ -622,7 +622,7 @@
 ("dired ( in an owner listing" :mode dired-mode :dired
  "/github:agzam/" :names
  ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
-  ".stumpwm.d" "Adv360-Pro-ZMK" "aero" "ag-themes.el")
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
  :count 145 :point ".doom.d" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
   "Remoto: listed all 143 repositories of agzam")
@@ -634,7 +634,7 @@
 ("dired i on a repository line" :mode dired-mode :dired
  "/github:agzam/" :names
  ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
-  ".stumpwm.d" "Adv360-Pro-ZMK" "aero" "ag-themes.el")
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
  :count 159 :point ".github" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
   "Remoto: listed all 143 repositories of agzam")
@@ -647,7 +647,7 @@
 ("dired + in an owner listing" :mode dired-mode :dired
  "/github:agzam/" :names
  ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
-  ".stumpwm.d" "Adv360-Pro-ZMK" "aero" "ag-themes.el")
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
  :count 145 :point ".doom.d" :error "Remoto: repository is read-only"
  :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
@@ -660,7 +660,7 @@
 ("dired D on a repository line" :mode dired-mode :dired
  "/github:agzam/" :names
  ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
-  ".stumpwm.d" "Adv360-Pro-ZMK" "aero" "ag-themes.el")
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
  :count 145 :point "remoto.el" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
   "Remoto: listed all 143 repositories of agzam")
@@ -672,7 +672,7 @@
 ("dired R on a repository line" :mode dired-mode :dired
  "/github:agzam/" :names
  ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
-  ".stumpwm.d" "Adv360-Pro-ZMK" "aero" "ag-themes.el")
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
  :count 145 :point "remoto.el" :error
  "Remoto: repository is read-only" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
@@ -685,7 +685,7 @@
 ("dired remoto-refresh in an owner listing" :mode dired-mode :dired
  "/github:agzam/" :names
  ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
-  ".stumpwm.d" "Adv360-Pro-ZMK" "aero" "ag-themes.el")
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
  :count 145 :point ".doom.d" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
   "Remoto: cache cleared for /github:agzam/"
@@ -710,7 +710,7 @@
 ("dired owner listing whose pages outlast its cache" :mode dired-mode
  :dired "/github:agzam/" :names
  ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
-  ".stumpwm.d" "Adv360-Pro-ZMK" "aero" "ag-themes.el")
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
  :count 145 :point ".doom.d" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
   "Remoto: listed all 143 repositories of agzam")

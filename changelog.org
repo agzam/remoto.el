@@ -6,8 +6,12 @@ Changes to the project, following Keep a Changelog conventions.
 * [Unreleased]
 
 ** Changed
-- Dired in a repository follows ~dired-listing-switches~: ~--group-directories-first~, ~-S~, ~-t~, ~-r~, ~-U~ and ~-h~
-- names in remoto's Dired sort ignoring case, as ~ls~ sorts them
+- Dired in a repository follows ~dired-listing-switches~ as ~ls~ reads them: ~--group-directories-first~, ~-S~, ~-t~, ~-v~, ~-X~, ~-r~, ~-U~, ~-h~ and ~--si~, the last sort option winning
+- names in remoto's Dired sort as the local ~ls~ sorts them: by the locale's collation, as macOS sorts them on macOS, by bytes in the C locale
+- ~.~ and ~..~ sort among the names, so ~-r~ puts them last
+- a listing leaves out what ~ls~ leaves out: dot names without ~-a~, ~.~ and ~..~ under ~-A~, backups under ~-B~, and what ~-I~ and ~--hide~ match
+- under ls-lisp, remoto's Dired takes ls-lisp's order, ~ls-lisp-dirs-first~ included
+- a Dired of the names that match what was typed takes its order from its switches, those of ~C-u C-x d~ too
 
 ** Fixed
 - a remoto file no longer opens in the buffer of another remoto file of the same size
