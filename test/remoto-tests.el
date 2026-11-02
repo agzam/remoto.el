@@ -67,6 +67,13 @@ PROPS are the slots of `remoto--login': :failed, :token and :user."
   "Return the login state of GitHub's API host."
   (remoto--login "api.github.com"))
 
+(defun remoto-test--url (name kind owner repo ref path &optional start end)
+  "Return the URL of KIND on the forge NAME, for OWNER/REPO at REF and PATH.
+START and END are the lines, see `remoto-forge-url'."
+  (remoto-forge-url (remoto--forge-named name) kind
+                    (list :owner owner :repo repo :ref ref :path path
+                          :line-start start :line-end end)))
+
 (defmacro remoto-test-with-cache (&rest body)
   "Run BODY with a mock tree cache installed."
   (declare (indent 0))
@@ -245,7 +252,7 @@ PROPS are the slots of `remoto--login': :failed, :token and :user."
         (setq refs (list ref))
         (dolist (kind '(blob tree))
           (let ((p (remoto--parse-input
-                    (remoto--forge-url 'github kind "o" "r" ref path nil nil))))
+                    (remoto-test--url 'github kind "o" "r" ref path nil nil))))
             (expect (list (remoto-path-ref p) (remoto-path-path p))
                     :to-equal (list ref (concat "/" path))))))))
 
@@ -1454,70 +1461,98 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
     (expect (remoto--forge-type "/home/me/x.el") :to-be nil)
     (expect (remoto--forge-type nil) :to-be nil)))
 
-(describe "remoto--forge-url"
+(describe "remoto-forge-url"
   (it "builds a blob URL with a single line"
-    (expect (remoto--forge-url 'github 'blob "o" "r" "main" "src/main.el" 3 nil)
+    (expect (remoto-test--url 'github 'blob "o" "r" "main" "src/main.el" 3 nil)
             :to-equal "https://github.com/o/r/blob/main/src/main.el#L3"))
 
   (it "builds a blob URL with a line range"
-    (expect (remoto--forge-url 'github 'blob "o" "r" "main" "src/main.el" 2 4)
+    (expect (remoto-test--url 'github 'blob "o" "r" "main" "src/main.el" 2 4)
             :to-equal "https://github.com/o/r/blob/main/src/main.el#L2-L4"))
 
   (it "percent-encodes path segments and keeps the slashes"
-    (expect (remoto--forge-url 'github 'blob "o" "r" "main" "docs/a b+c.md" nil nil)
+    (expect (remoto-test--url 'github 'blob "o" "r" "main" "docs/a b+c.md" nil nil)
             :to-equal "https://github.com/o/r/blob/main/docs/a%20b%2Bc.md")
-    (expect (remoto--forge-url 'github 'raw "o" "r" "main" "img/x y.png" nil nil)
+    (expect (remoto-test--url 'github 'raw "o" "r" "main" "img/x y.png" nil nil)
             :to-equal "https://raw.githubusercontent.com/o/r/main/img/x%20y.png"))
 
   (it "builds a blob URL with no line fragment"
-    (expect (remoto--forge-url 'github 'blob "o" "r" "main" "src/main.el" nil nil)
+    (expect (remoto-test--url 'github 'blob "o" "r" "main" "src/main.el" nil nil)
             :to-equal "https://github.com/o/r/blob/main/src/main.el"))
 
   (it "builds a tree URL"
-    (expect (remoto--forge-url 'github 'tree "o" "r" "main" "src" nil nil)
+    (expect (remoto-test--url 'github 'tree "o" "r" "main" "src" nil nil)
             :to-equal "https://github.com/o/r/tree/main/src"))
 
   (it "builds a blame URL with a line"
-    (expect (remoto--forge-url 'github 'blame "o" "r" "main" "src/main.el" 3 nil)
+    (expect (remoto-test--url 'github 'blame "o" "r" "main" "src/main.el" 3 nil)
             :to-equal "https://github.com/o/r/blame/main/src/main.el#L3"))
 
   (it "builds a raw URL"
-    (expect (remoto--forge-url 'github 'raw "o" "r" "main" "src/main.el" nil nil)
+    (expect (remoto-test--url 'github 'raw "o" "r" "main" "src/main.el" nil nil)
             :to-equal "https://raw.githubusercontent.com/o/r/main/src/main.el"))
 
   (it "builds a history URL"
-    (expect (remoto--forge-url 'github 'history "o" "r" "main" "src/main.el" nil nil)
+    (expect (remoto-test--url 'github 'history "o" "r" "main" "src/main.el" nil nil)
             :to-equal "https://github.com/o/r/commits/main/src/main.el"))
 
   (it "defaults a nil ref to HEAD instead of erroring"
-    (expect (remoto--forge-url 'github 'history "o" "r" nil "" nil nil)
+    (expect (remoto-test--url 'github 'history "o" "r" nil "" nil nil)
             :to-equal "https://github.com/o/r/commits/HEAD/")
-    (expect (remoto--forge-url 'github 'tree "o" "r" nil "" nil nil)
+    (expect (remoto-test--url 'github 'tree "o" "r" nil "" nil nil)
             :to-equal "https://github.com/o/r/tree/HEAD/"))
 
   (it "builds the repo web URL"
-    (expect (remoto--forge-url 'github 'repo "o" "r" nil nil nil nil)
+    (expect (remoto-test--url 'github 'repo "o" "r" nil nil nil nil)
             :to-equal "https://github.com/o/r"))
 
   (it "builds the SSH clone URL"
-    (expect (remoto--forge-url 'github 'ssh "o" "r" nil nil nil nil)
+    (expect (remoto-test--url 'github 'ssh "o" "r" nil nil nil nil)
             :to-equal "git@github.com:o/r.git"))
 
   (it "builds the HTTPS clone URL"
-    (expect (remoto--forge-url 'github 'https "o" "r" nil nil nil nil)
+    (expect (remoto-test--url 'github 'https "o" "r" nil nil nil nil)
             :to-equal "https://github.com/o/r.git"))
 
   (it "builds a compare URL"
-    (expect (remoto--forge-url 'github 'compare "o" "r" "main" nil nil nil)
+    (expect (remoto-test--url 'github 'compare "o" "r" "main" nil nil nil)
             :to-equal "https://github.com/o/r/compare/main"))
 
   (it "builds a new-pr URL"
-    (expect (remoto--forge-url 'github 'new-pr "o" "r" "main" nil nil nil)
+    (expect (remoto-test--url 'github 'new-pr "o" "r" "main" nil nil nil)
             :to-equal "https://github.com/o/r/pull/new/main"))
 
-  (it "signals for an unknown forge"
-    (expect (remoto--forge-url 'bogus 'blob "o" "r" "main" "x" nil nil)
-            :to-throw 'user-error)))
+  (it "answers from the template table for GitHub and Codeberg"
+    (spy-on 'remoto-forge-refs :and-return-value '(("branch" "main")))
+    (let ((ctx '(:owner "o" :repo "r" :ref "main" :path "a.el" :line-start 2)))
+      (expect (remoto-forge-url remoto--github 'blob ctx)
+              :to-equal "https://github.com/o/r/blob/main/a.el#L2")
+      (expect (remoto-forge-url remoto--codeberg 'blob ctx)
+              :to-equal "https://codeberg.org/o/r/src/branch/main/a.el#L2")
+      (expect (remoto-forge-url remoto--github 'pr '(:owner "o" :repo "r" :key "7"))
+              :to-equal "https://github.com/o/r/pull/7")
+      (expect (remoto-forge-url remoto--codeberg 'owner-repos '(:owner "o"))
+              :to-equal "https://codeberg.org/o")))
+
+  (it "answers nil for a kind missing from the table of the forge"
+    (let ((remoto-forge-url-templates
+           (cons (cons 'github (assq-delete-all
+                                'raw (copy-alist (alist-get 'github remoto-forge-url-templates))))
+                 remoto-forge-url-templates)))
+      (expect (remoto-forge-url remoto--github 'raw '(:owner "o" :repo "r")) :to-be nil)
+      (expect (remoto-forge-url remoto--github 'repo '(:owner "o" :repo "r"))
+              :to-equal "https://github.com/o/r"))
+    (expect (remoto-forge-url remoto--github 'no-such-kind '(:owner "o")) :to-be nil)
+    (expect (remoto-forge-url remoto--github 'line '(:line-start 1)) :to-be nil))
+
+  (it "answers nil for every kind of a forge with no table entry"
+    (let ((fake (remoto-forge-create :name 'fake :prefixes '("fake") :title "Fake")))
+      (dolist (kind (mapcar #'car (alist-get 'github remoto-forge-url-templates)))
+        (expect (remoto-forge-url fake kind '(:owner "o" :repo "r" :ref "main"))
+                :to-be nil))
+      (expect (condition-case err (remoto--url fake 'ssh '(:owner "o" :repo "r"))
+                (user-error (cadr err)))
+              :to-equal "Remoto: Fake has no ssh URL"))))
 
 ;;; remoto--path-context and target classification
 
@@ -1722,6 +1757,19 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
         (expect (car kill-ring)
                 :to-equal
                 "https://raw.githubusercontent.com/testowner/testrepo/main/src/main.el"))))
+
+  (it "refuses with one message when the forge has no raw URL"
+    (remoto-test-with-cache
+      (let ((remoto-forge-url-templates
+             (cons (cons 'github (assq-delete-all
+                                  'raw (copy-alist (alist-get 'github remoto-forge-url-templates))))
+                   remoto-forge-url-templates))
+            (kill-ring nil))
+        (with-temp-buffer
+          (setq-local buffer-file-name "/github:testowner/testrepo@main:/src/main.el")
+          (expect (condition-case err (remoto-copy-raw-url) (user-error (cadr err)))
+                  :to-equal "Remoto: GitHub has no raw URL")
+          (expect kill-ring :to-be nil)))))
 
   (it "signals when invoked on a directory"
     (remoto-test-with-cache
@@ -3557,7 +3605,24 @@ using unauthenticated access until M-x remoto-reset-auth")
       (remoto-register-forge rl)
       (let ((names (remoto--handle-file-name-all-completions "" "/rl:o/r/")))
         (expect (mapcar #'substring-no-properties names) :to-equal '("a.txt" "lib/"))
-        (expect (get-text-property 0 'remoto-target (car names)) :to-equal "/rl:o/r:/a.txt")))))
+        (expect (get-text-property 0 'remoto-target (car names)) :to-equal "/rl:o/r:/a.txt"))))
+
+  (it "answers no permalink, and the permalink command refuses"
+    (let ((remoto--forges (copy-alist remoto--forges))
+          (remoto--handler-regexp remoto--handler-regexp)
+          (file-name-handler-alist (copy-alist file-name-handler-alist))
+          (remoto--default-branch-cache (make-hash-table :test 'equal))
+          (remoto-forge-url-templates
+           (cons (cons 'rl (alist-get 'github remoto-forge-url-templates))
+                 remoto-forge-url-templates))
+          (ctx '(:forge rl :owner "o" :repo "r" :ref nil :path "a.txt" :kind blob)))
+      (spy-on 'remoto-forge-resolve-ref)
+      (spy-on 'remoto--buffer-file-context :and-return-value ctx)
+      (remoto-register-forge rl)
+      (expect (remoto--context-permalink ctx) :to-be nil)
+      (expect (condition-case err (remoto-copy-permalink) (user-error (cadr err)))
+              :to-equal "Remoto: rl has no permalink URL")
+      (expect 'remoto-forge-resolve-ref :not :to-have-been-called))))
 
 (cl-defstruct (remoto-test-hosted (:include remoto-forge)
                                    (:constructor remoto-test-hosted-create)
@@ -4307,32 +4372,36 @@ using unauthenticated access until M-x remoto-reset-auth")
   (it "spells the kind of the ref in the path, from the cached refs"
     (spy-on 'remoto-forge-refs :and-return-value '(("branch" "main" "v12.0/forgejo")
                                                     ("tag" "v1.0")))
-    (expect (remoto--forge-url 'codeberg 'blob "o" "r" "main" "go.mod" 5 10)
+    (expect (remoto-test--url 'codeberg 'blob "o" "r" "main" "go.mod" 5 10)
             :to-equal "https://codeberg.org/o/r/src/branch/main/go.mod#L5-L10")
-    (expect (remoto--forge-url 'codeberg 'raw "o" "r" "v1.0" "go.mod")
+    (expect (remoto-test--url 'codeberg 'raw "o" "r" "v1.0" "go.mod")
             :to-equal "https://codeberg.org/o/r/raw/tag/v1.0/go.mod")
-    (expect (remoto--forge-url 'codeberg 'tree "o" "r" "v12.0/forgejo" "models")
+    (expect (remoto-test--url 'codeberg 'tree "o" "r" "v12.0/forgejo" "models")
             :to-equal "https://codeberg.org/o/r/src/branch/v12.0/forgejo/models")
-    (expect (remoto--forge-url 'codeberg 'blame "o" "r" "1d9703c28a34" "go.mod" 3)
+    (expect (remoto-test--url 'codeberg 'blame "o" "r" "1d9703c28a34" "go.mod" 3)
             :to-equal "https://codeberg.org/o/r/blame/commit/1d9703c28a34/go.mod#L3")
-    (expect (remoto--forge-url 'codeberg 'history "o" "r" nil "")
+    (expect (remoto-test--url 'codeberg 'history "o" "r" nil "")
             :to-equal "https://codeberg.org/o/r/commits/branch/HEAD/")
-    (expect (remoto--forge-url 'codeberg 'repo "o" "r" nil "")
+    (expect (remoto-test--url 'codeberg 'repo "o" "r" nil "")
             :to-equal "https://codeberg.org/o/r")
-    (expect (remoto--forge-url 'codeberg 'ssh "o" "r" nil "")
+    (expect (remoto-test--url 'codeberg 'ssh "o" "r" nil "")
             :to-equal "git@codeberg.org:o/r.git")
-    (expect (remoto--forge-url 'codeberg 'compare "o" "r" "dev" "")
+    (expect (remoto-test--url 'codeberg 'compare "o" "r" "dev" "")
             :to-equal "https://codeberg.org/o/r/compare/dev")
-    (expect (remoto--forge-issue-url 'codeberg "o" "r" "7") :to-equal "https://codeberg.org/o/r/issues/7")
-    (expect (remoto--forge-issue-url 'codeberg "o" "r" "7" 'pr) :to-equal "https://codeberg.org/o/r/pulls/7")
-    (expect (remoto--forge-issue-url 'codeberg "o" "r" "7" 'pr-diff)
-            :to-equal "https://codeberg.org/o/r/pulls/7/files")
-    (expect (remoto--forge-owner-url 'codeberg "o") :to-equal "https://codeberg.org/o"))
+    (let ((topic '(:owner "o" :repo "r" :key "7")))
+      (expect (remoto-forge-url remoto--codeberg 'issue topic)
+              :to-equal "https://codeberg.org/o/r/issues/7")
+      (expect (remoto-forge-url remoto--codeberg 'pr topic)
+              :to-equal "https://codeberg.org/o/r/pulls/7")
+      (expect (remoto-forge-url remoto--codeberg 'pr-diff topic)
+              :to-equal "https://codeberg.org/o/r/pulls/7/files"))
+    (expect (remoto-forge-url remoto--codeberg 'owner '(:owner "o"))
+            :to-equal "https://codeberg.org/o"))
 
   (it "leaves GitHub's URLs as they were"
-    (expect (remoto--forge-url 'github 'blob "o" "r" "main" "a.el" 1)
+    (expect (remoto-test--url 'github 'blob "o" "r" "main" "a.el" 1)
             :to-equal "https://github.com/o/r/blob/main/a.el#L1")
-    (expect (remoto--forge-issue-url 'github "o" "r" "7" 'pr)
+    (expect (remoto-forge-url remoto--github 'pr '(:owner "o" :repo "r" :key "7"))
             :to-equal "https://github.com/o/r/pull/7"))
 
   (it "reads Codeberg's URLs and remotes, the kind of the ref spelled or not"
@@ -4426,7 +4495,7 @@ using unauthenticated access until M-x remoto-reset-auth")
       (expect (remoto--api-host forge) :to-equal "gitea.com/api/v1")
       (expect (remoto--canonical-path (remoto--parse-path "/gitea:o/r@main:/x"))
               :to-equal "/gitea:o/r@main:/x")
-      (expect (remoto--forge-url 'gitea 'repo "o" "r" nil "")
+      (expect (remoto-test--url 'gitea 'repo "o" "r" nil "")
               :to-equal "https://gitea.com/o/r")
       (expect (string-match-p remoto--handler-regexp "/gitea:o/r") :to-be 0))
     (remoto-forgejo--register-instances nil)
@@ -4525,13 +4594,17 @@ using unauthenticated access until M-x remoto-reset-auth")
     (let ((remoto--logins (remoto-test--logins)))
       (remoto-forgejo--register-instances '(("gitea" "gitea.com") ("cbx" "codeberg.org")))
       (remoto--login "gitea.com/api/v1")
-      (remoto-forgejo--register-instances nil)
-      (expect (assq 'gitea remoto-forge-url-templates) :to-be nil)
-      (expect (assq 'cbx remoto-forge-url-templates) :to-be nil)
-      (expect (gethash "gitea.com/api/v1" remoto--logins) :to-be nil)
-      ;; Codeberg itself still asks the host the second server shared.
-      (expect (gethash "codeberg.org/api/v1" remoto--logins) :to-be-truthy)
-      (expect (assq 'codeberg remoto-forge-url-templates) :to-be-truthy))))
+      (let ((gitea (cdr (remoto--prefix-of "/gitea:o/r")))
+            (cbx (cdr (remoto--prefix-of "/cbx:o/r")))
+            (repo '(:owner "o" :repo "r")))
+        (remoto-forgejo--register-instances nil)
+        (expect (remoto-forge-url gitea 'repo repo) :to-be nil)
+        (expect (remoto-forge-url cbx 'repo repo) :to-be nil)
+        (expect (gethash "gitea.com/api/v1" remoto--logins) :to-be nil)
+        ;; Codeberg itself still asks the host the second server shared.
+        (expect (gethash "codeberg.org/api/v1" remoto--logins) :to-be-truthy)
+        (expect (remoto-forge-url remoto--codeberg 'repo repo)
+                :to-equal "https://codeberg.org/o/r")))))
 
 ;;; Partial path file operations
 
@@ -8438,9 +8511,9 @@ three functions the indicator asks are answered by a temp buffer."
 
 (describe "remoto owner target plumbing"
   (it "builds the owner profile and repositories URLs"
-    (expect (remoto--forge-owner-url 'github "agzam")
+    (expect (remoto-forge-url remoto--github 'owner '(:owner "agzam"))
             :to-equal "https://github.com/agzam")
-    (expect (remoto--forge-owner-url 'github "agzam" 'owner-repos)
+    (expect (remoto-forge-url remoto--github 'owner-repos '(:owner "agzam"))
             :to-equal "https://github.com/agzam?tab=repositories"))
 
   (it "makes a root candidate carrying the canonical owner path"
@@ -8709,7 +8782,7 @@ three functions the indicator asks are answered by a temp buffer."
     (expect (car kill-ring) :to-equal "o/r#42"))
 
   (it "builds the issue web URL"
-    (expect (remoto--forge-issue-url 'github "o" "r" "42")
+    (expect (remoto-forge-url remoto--github 'issue '(:owner "o" :repo "r" :key "42"))
             :to-equal "https://github.com/o/r/issues/42"))
 
   (it "browses the issue web page"
@@ -8723,7 +8796,7 @@ three functions the indicator asks are answered by a temp buffer."
     (expect (car kill-ring) :to-equal "https://github.com/o/r/issues/42"))
 
   (it "builds the PR files-diff URL via the pr-diff template"
-    (expect (remoto--forge-issue-url 'github "o" "r" "42" 'pr-diff)
+    (expect (remoto-forge-url remoto--github 'pr-diff '(:owner "o" :repo "r" :key "42"))
             :to-equal "https://github.com/o/r/pull/42/files"))
 
   (it "browses the PR files-diff page"

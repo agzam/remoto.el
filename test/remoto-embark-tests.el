@@ -437,7 +437,16 @@ with that property intact and no live minibuffer."
   (it "copies a permalink pinned to the commit SHA"
     (spy-on 'remoto--resolve-commit-sha :and-return-value "sha123")
     (remoto-embark-copy-permalink "/github:o/r@main:/src/a.el")
-    (expect (car kill-ring) :to-equal "https://github.com/o/r/blob/sha123/src/a.el")))
+    (expect (car kill-ring) :to-equal "https://github.com/o/r/blob/sha123/src/a.el"))
+
+  (it "refuses with one message an action whose URL kind the forge lacks"
+    (let ((remoto-forge-url-templates
+           (cons (cons 'github (assq-delete-all
+                                'blame (copy-alist (alist-get 'github remoto-forge-url-templates))))
+                 remoto-forge-url-templates)))
+      (expect (condition-case err (remoto-embark-copy-blame-url "/github:o/r@main:/src/a.el")
+                (user-error (cadr err)))
+              :to-equal "Remoto: GitHub has no blame URL"))))
 
 (describe "remoto-embark issue actions"
   (it "browses the issue page"

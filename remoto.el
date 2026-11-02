@@ -2994,12 +2994,13 @@ line-fragment builders `line' and `region'.  Templates are expanded with
   %R  git ref (branch, tag, or commit SHA)
   %k  the kind of %R where the forge spells it out: branch, tag or commit
   %p  path relative to the repository root
+  %N  topic key, of an issue or pull request
   %L  line fragment built from the `line'/`region' templates
   %s  start line (in the `line' and `region' templates)
   %e  end line (in the `region' template)
 
-A forge registered with `remoto-register-forge' needs an entry here
-under its name.")
+The default `remoto-forge-url' answers from the entry under the name of
+the forge; a forge without one has no URLs unless its own method answers.")
 
 (cl-defgeneric remoto--ref-kind (_forge _owner _repo _ref)
   "Return \"branch\", \"tag\" or \"commit\" for REF of OWNER/REPO on FORGE.
@@ -3017,69 +3018,76 @@ Derived from the path prefix, e.g. \"/github:...\" -> `github'."
   "Percent-encode each segment of PATH for a web URL, keeping the slashes."
   (mapconcat #'url-hexify-string (split-string (or path "") "/") "/"))
 
-(defun remoto--forge-url (forge kind owner repo ref path &optional line-start line-end)
-  "Build a FORGE web URL of KIND for OWNER/REPO at REF and PATH.
-KIND is one of `blob', `tree', `blame', `history', `raw'.  A nil REF
-defaults to \"HEAD\" (the forge resolves it to the default branch), so a
-repo-level target with no ref still produces a valid URL.  LINE-START and
-LINE-END add a line or line-range fragment when KIND's template includes
-one."
-  (let* ((templates (or (alist-get forge remoto-forge-url-templates)
-                        (user-error "Remoto: no URL templates for forge `%s'"
-                                    forge)))
-         (template (or (alist-get kind templates)
-                       (user-error "Remoto: forge `%s' has no `%s' URL"
-                                   forge kind)))
-         (line (cond
-                ((and line-start line-end)
-                 (format-spec (alist-get 'region templates)
-                              `((?s . ,line-start) (?e . ,line-end))))
-                (line-start
-                 (format-spec (alist-get 'line templates)
-                              `((?s . ,line-start))))
-                (t "")))
-         (kind (and (string-search "%k" template)
-                    (remoto--ref-kind (remoto--forge-named forge) owner repo ref))))
+(cl-defgeneric remoto-forge-url (forge kind context)
+  "Return the web or clone URL of KIND for CONTEXT on FORGE, or nil.
+KIND is a key of the templates of `remoto-forge-url-templates', such as
+`blob' or `ssh'.  CONTEXT is a plist of :owner :repo :ref :path :key
+:line-start :line-end.  By default the templates of FORGE's name answer."
+  (when-let* ((templates (alist-get (remoto-forge-name forge)
+                                    remoto-forge-url-templates))
+              ((not (memq kind '(line region))))
+              (template (alist-get kind templates)))
+    (remoto--fill-url-template forge template templates context)))
+
+(defun remoto--fill-url-template (forge template templates context)
+  "Return TEMPLATE of FORGE filled from the plist CONTEXT.
+TEMPLATES give the line fragments.  A nil ref is \"HEAD\", which the
+forge resolves to the default branch."
+  (let* ((owner (plist-get context :owner))
+         (repo (plist-get context :repo))
+         (ref (plist-get context :ref))
+         (start (plist-get context :line-start))
+         (end (plist-get context :line-end))
+         (line (cond ((and start end)
+                      (format-spec (alist-get 'region templates)
+                                   `((?s . ,start) (?e . ,end))))
+                     (start (format-spec (alist-get 'line templates)
+                                         `((?s . ,start))))
+                     (t "")))
+         (ref-kind (and (string-search "%k" template)
+                        (remoto--ref-kind forge owner repo ref))))
     (format-spec template `((?o . ,owner)
                             (?r . ,repo)
                             (?R . ,(or ref "HEAD"))
-                            (?k . ,(or kind "branch"))
-                            (?p . ,(remoto--url-encode-path path))
+                            (?k . ,(or ref-kind "branch"))
+                            (?p . ,(remoto--url-encode-path
+                                    (plist-get context :path)))
+                            (?N . ,(plist-get context :key))
                             (?L . ,line)))))
 
-(defun remoto--forge-issue-url (forge owner repo number &optional kind)
-  "Build a web URL for issue/PR NUMBER in OWNER/REPO on FORGE.
-KIND selects the %N-based template (default `issue'); the PR files-diff
-page uses `pr-diff'."
-  (let* ((kind (or kind 'issue))
-         (template (or (alist-get kind (alist-get forge remoto-forge-url-templates))
-                       (user-error "Remoto: forge `%s' has no `%s' URL" forge kind))))
-    (format-spec template `((?o . ,owner) (?r . ,repo) (?N . ,number)))))
+(defun remoto--refuse-url (forge kind)
+  "Signal a `user-error' that FORGE has no URL of KIND."
+  (user-error "Remoto: %s has no %s URL"
+              (or (remoto-forge-title forge) (remoto-forge-name forge)) kind))
 
-(defun remoto--forge-owner-url (forge owner &optional kind)
-  "Build a web URL for the account/organization OWNER on FORGE.
-KIND selects the %o-based template (default `owner'); the repositories
-tab uses `owner-repos'."
-  (let* ((kind (or kind 'owner))
-         (template (or (alist-get kind (alist-get forge remoto-forge-url-templates))
-                       (user-error "Remoto: forge `%s' has no `%s' URL" forge kind))))
-    (format-spec template `((?o . ,owner)))))
+(defun remoto--url (forge kind context)
+  "Return the URL of KIND for CONTEXT on FORGE, or refuse when FORGE has none.
+See `remoto-forge-url'."
+  (or (remoto-forge-url forge kind context)
+      (remoto--refuse-url forge kind)))
 
 (defun remoto--forge-named (name)
   "Return the registered forge called NAME, a symbol, or nil."
   (seq-find (lambda (forge) (eq (remoto-forge-name forge) name))
             (mapcar #'cdr remoto--forges)))
 
-(defun remoto--context-commit-sha (ctx)
-  "Return the commit SHA that the ref of the context plist CTX names.
-Used for permalinks so the link survives the ref moving on."
-  (let ((owner (plist-get ctx :owner))
-        (repo (plist-get ctx :repo))
-        (ref (plist-get ctx :ref)))
-    (or (remoto-forge-resolve-ref (remoto--forge-named (plist-get ctx :forge))
-                                  owner repo ref)
-        (user-error "Remoto: could not resolve commit SHA for %s/%s@%s"
-                    owner repo ref))))
+(defun remoto--context-permalink (ctx)
+  "Return the URL of the context plist CTX pinned to a commit, or nil.
+A source whose default ref is nil has no refs to pin."
+  (let* ((forge (remoto--forge-named (plist-get ctx :forge)))
+         (owner (plist-get ctx :owner))
+         (repo (plist-get ctx :repo))
+         (ref (remoto-path-ref
+               (remoto--resolve-ref
+                (remoto-path-create :forge forge :owner owner :repo repo
+                                    :ref (plist-get ctx :ref) :path "/")))))
+    (when ref
+      (remoto-forge-url
+       forge (plist-get ctx :kind)
+       (plist-put (copy-sequence ctx) :ref
+                  (or (remoto-forge-resolve-ref forge owner repo ref)
+                      (user-error "Remoto: could not resolve commit SHA for %s/%s@%s"
+                                  owner repo ref)))))))
 
 (defun remoto--url-path (input)
   "Return the `remoto-path' that the URL, remote or shorthand INPUT names.
@@ -3146,17 +3154,15 @@ is not a remoto buffer."
            (line-end (and region (line-number-at-pos (region-end)))))
       (remoto--path-context canonical line-start line-end))))
 
-(defun remoto--context-url (ctx kind &optional ref)
-  "Build a URL of KIND from context plist CTX.
-Optional REF overrides the ref in CTX (used for permalinks)."
-  (remoto--forge-url (plist-get ctx :forge)
-                     kind
-                     (plist-get ctx :owner)
-                     (plist-get ctx :repo)
-                     (or ref (plist-get ctx :ref))
-                     (plist-get ctx :path)
-                     (plist-get ctx :line-start)
-                     (plist-get ctx :line-end)))
+(defun remoto--context-url (ctx kind)
+  "Return the URL of KIND for the context plist CTX, or refuse without one."
+  (remoto--url (remoto--forge-named (plist-get ctx :forge)) kind ctx))
+
+(defun remoto--context-permalink-or-refuse (ctx)
+  "Return the permalink of the context plist CTX, or refuse without one."
+  (or (remoto--context-permalink ctx)
+      (remoto--refuse-url (remoto--forge-named (plist-get ctx :forge))
+                          'permalink)))
 
 (defun remoto--context-web-url (ctx)
   "Return the human-facing web URL for context CTX, chosen by its :type.
@@ -3205,9 +3211,8 @@ the directory itself."
 Resolves the ref to a commit via the forge API so the link keeps
 pointing at the same content even after the branch advances."
   (interactive)
-  (let* ((ctx (remoto--buffer-file-context))
-         (sha (remoto--context-commit-sha ctx)))
-    (remoto--kill-url (remoto--context-url ctx (plist-get ctx :kind) sha))))
+  (remoto--kill-url
+   (remoto--context-permalink-or-refuse (remoto--buffer-file-context))))
 
 ;;;###autoload
 (defun remoto-copy-raw-url ()

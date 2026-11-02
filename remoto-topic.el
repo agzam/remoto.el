@@ -100,9 +100,8 @@
   (when-let* ((number remoto-topic--number)
               (parsed (remoto-topic--parse-repo-path remoto-topic--repo-path)))
     (pcase-let ((`(,forge ,owner ,repo) parsed))
-      (browse-url (remoto--forge-issue-url (remoto-forge-name forge) owner repo
-                                           number
-                                           (if remoto-topic--is-pr 'pr 'issue))))))
+      (browse-url (remoto--url forge (if remoto-topic--is-pr 'pr 'issue)
+                               (list :owner owner :repo repo :key number))))))
 
 (defun remoto-topic-refresh ()
   "Re-fetch and redisplay the current issue/PR."

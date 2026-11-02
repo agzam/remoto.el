@@ -203,9 +203,9 @@ generic `remoto' fallback keymap."
          (ctx (remoto--path-context path))
          (owner (remoto--embark-owner-parts path)))
     (cond
-     (issue (apply #'remoto--forge-issue-url issue))
+     (issue (remoto--embark-issue-url path))
      (ctx (remoto--context-web-url ctx))
-     (owner (apply #'remoto--forge-owner-url owner))
+     (owner (remoto--embark-owner-url path))
      (t (user-error "Remoto: no web URL for target `%s'" target)))))
 
 ;;;; Actions
@@ -263,9 +263,8 @@ TARGET may be a repository, directory, file, issue/PR, or owner."
 (defun remoto-embark-copy-permalink (target)
   "Copy a permalink, pinned to the commit SHA, for remoto file TARGET."
   (interactive "sRemoto file: ")
-  (let* ((ctx (remoto--embark-context target))
-         (sha (remoto--context-commit-sha ctx)))
-    (remoto--kill-url (remoto--context-url ctx (plist-get ctx :kind) sha))))
+  (remoto--kill-url
+   (remoto--context-permalink-or-refuse (remoto--embark-context target))))
 
 (defun remoto-embark-open-in-remoto (url)
   "Open the forge URL (or `owner/repo' shorthand) URL in remoto.
@@ -322,23 +321,29 @@ KEY matches the `topic-key' of the forge; FORGE is the forge's name."
     (list (remoto-forge-name forge) (remoto-path-owner parsed)
           (remoto-path-repo parsed) key)))
 
+(defun remoto--embark-issue-url (target &optional kind)
+  "Return the URL of KIND, `issue' by default, of the issue/PR TARGET."
+  (pcase-let ((`(,forge ,owner ,repo ,key)
+               (or (remoto--embark-issue-parts target)
+                   (user-error "Remoto: not an issue target: %s" target))))
+    (remoto--url (remoto--forge-named forge) (or kind 'issue)
+                 (list :owner owner :repo repo :key key))))
+
 (defun remoto-embark-browse-issue (target)
   "Open the web page for the remoto issue/PR TARGET in a browser."
   (interactive "sRemoto issue: ")
-  (browse-url (apply #'remoto--forge-issue-url (remoto--embark-issue-parts target))))
+  (browse-url (remoto--embark-issue-url target)))
 
 (defun remoto-embark-copy-issue-url (target)
   "Copy the web URL for the remoto issue/PR TARGET."
   (interactive "sRemoto issue: ")
-  (remoto--kill-url (apply #'remoto--forge-issue-url
-                           (remoto--embark-issue-parts target))))
+  (remoto--kill-url (remoto--embark-issue-url target)))
 
 (defun remoto-embark-browse-pr-diff (target)
   "Open the PR files-diff page for the remoto issue/PR TARGET in a browser.
 For an issue the forge redirects to the issue page."
   (interactive "sRemoto PR: ")
-  (browse-url (apply #'remoto--forge-issue-url
-                     (append (remoto--embark-issue-parts target) '(pr-diff)))))
+  (browse-url (remoto--embark-issue-url target 'pr-diff)))
 
 (defun remoto--embark-owner-parts (target)
   "Return (FORGE OWNER) for an account TARGET like /github:OWNER."
@@ -350,22 +355,28 @@ For an issue the forge redirects to the issue page."
     (let ((owner (match-string 1 target)))
       (list (remoto--forge-type target) owner))))
 
+(defun remoto--embark-owner-url (target &optional kind)
+  "Return the URL of KIND, `owner' by default, of the owner TARGET."
+  (pcase-let ((`(,forge ,owner)
+               (or (remoto--embark-owner-parts target)
+                   (user-error "Remoto: not an owner target: %s" target))))
+    (remoto--url (remoto--forge-named forge) (or kind 'owner)
+                 (list :owner owner))))
+
 (defun remoto-embark-browse-owner (target)
   "Open the account/organization page for the remoto owner TARGET."
   (interactive "sRemoto owner: ")
-  (browse-url (apply #'remoto--forge-owner-url (remoto--embark-owner-parts target))))
+  (browse-url (remoto--embark-owner-url target)))
 
 (defun remoto-embark-copy-owner-url (target)
   "Copy the account/organization page URL for the remoto owner TARGET."
   (interactive "sRemoto owner: ")
-  (remoto--kill-url (apply #'remoto--forge-owner-url
-                           (remoto--embark-owner-parts target))))
+  (remoto--kill-url (remoto--embark-owner-url target)))
 
 (defun remoto-embark-browse-owner-repos (target)
   "Open the repositories page for the remoto owner TARGET in a browser."
   (interactive "sRemoto owner: ")
-  (browse-url (apply #'remoto--forge-owner-url
-                     (append (remoto--embark-owner-parts target) '(owner-repos)))))
+  (browse-url (remoto--embark-owner-url target 'owner-repos)))
 
 (defun remoto--clone-directory ()
   "Return a local directory to run a clone in and resolve it against."
