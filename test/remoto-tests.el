@@ -3570,6 +3570,73 @@ using unauthenticated access until M-x remoto-reset-auth")
             (with-current-buffer buffer (setq buffer-file-name nil))
             (kill-buffer buffer)))))))
 
+(defmacro remoto-test-with-tramp-ignored (&rest body)
+  "Run BODY with copies of the registry and the TRAMP ignore regexp.
+Turn `global-remoto-mode' back to its state before BODY."
+  (declare (indent 0))
+  `(let ((on global-remoto-mode))
+     (unwind-protect
+         (let ((remoto--forges (copy-alist remoto--forges))
+               (remoto--handler-regexp remoto--handler-regexp)
+               (file-name-handler-alist (copy-alist file-name-handler-alist))
+               (tramp-ignored-file-name-regexp tramp-ignored-file-name-regexp)
+               (remoto--tramp-ignored-saved remoto--tramp-ignored-saved))
+           ,@body)
+       (global-remoto-mode (if on 1 -1)))))
+
+(describe "tramp-ignored-file-name-regexp"
+  (before-all (require 'tramp))
+
+  (it "leaves /gh:o/r to remoto's handler"
+    (remoto-test-with-tramp-ignored
+      (global-remoto-mode 1)
+      (expect (string-match-p tramp-ignored-file-name-regexp "/gh:o/r") :to-be 0)
+      (expect (tramp-tramp-file-p "/gh:o/r") :to-be nil)
+      (expect (find-file-name-handler "/gh:o/r" 'file-exists-p)
+              :to-be #'remoto-file-name-handler)
+      (expect (file-remote-p "/gh:o/r") :not :to-be nil)))
+
+  (it "ignores a one-name prefix registered while the mode is on"
+    (remoto-test-with-tramp-ignored
+      (global-remoto-mode 1)
+      (remoto-register-forge
+       (remoto-forge-create :name 'fake :prefixes '("fakeone") :locator 1))
+      (expect (string-match-p tramp-ignored-file-name-regexp "/fakeone:abc:/x")
+              :to-be 0)
+      (expect (tramp-tramp-file-p "/fakeone:abc:/x") :to-be nil)))
+
+  (it "leaves /ssh:host:/x to TRAMP"
+    (remoto-test-with-tramp-ignored
+      (global-remoto-mode 1)
+      (expect (string-match-p tramp-ignored-file-name-regexp "/ssh:host:/x")
+              :to-be nil)
+      (expect (tramp-tramp-file-p "/ssh:host:/x") :to-be t)))
+
+  (it "keeps the value of the user and puts it back when the mode turns off"
+    (remoto-test-with-tramp-ignored
+      (global-remoto-mode -1)
+      (setq tramp-ignored-file-name-regexp "\\`/mine:")
+      (global-remoto-mode 1)
+      (expect (string-match-p tramp-ignored-file-name-regexp "/mine:x") :to-be 0)
+      (expect (string-match-p tramp-ignored-file-name-regexp "/gh:o/r") :to-be 0)
+      (global-remoto-mode 1)
+      (global-remoto-mode -1)
+      (expect tramp-ignored-file-name-regexp :to-equal "\\`/mine:")))
+
+  (it "drops the prefixes of a forge it unregisters"
+    (remoto-test-with-tramp-ignored
+      (global-remoto-mode 1)
+      (let ((fake (remoto-forge-create :name 'fake :prefixes '("fakeone" "f1")
+                                       :locator 1)))
+        (remoto-register-forge fake)
+        (expect (string-match-p tramp-ignored-file-name-regexp "/f1:abc") :to-be 0)
+        (remoto-unregister-forge fake)
+        (expect (string-match-p tramp-ignored-file-name-regexp "/f1:abc") :to-be nil)
+        (expect (string-match-p tramp-ignored-file-name-regexp "/fakeone:abc")
+                :to-be nil)
+        (expect (string-match-p tramp-ignored-file-name-regexp "/gh:o/r")
+                :to-be 0)))))
+
 ;;; Locators: how many segments name a repository
 
 (defmacro remoto-test-with-registry (&rest body)

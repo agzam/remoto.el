@@ -80,13 +80,43 @@ spelling, for `remoto-autoload-file-name-handler'.")
   "Return the canonical path prefix of FORGE, such as /github:."
   (concat "/" (car (remoto-forge-prefixes forge)) ":"))
 
+(defvar tramp-ignored-file-name-regexp)
+
+(defvar remoto--tramp-ignored-saved nil
+  "List of the value `tramp-ignored-file-name-regexp' had before remoto's.
+Nil while the prefixes are not composed into it.")
+
+(defun remoto--tramp-ignored-regexp (original)
+  "Return the regexp ORIGINAL, or nil, extended by every registered prefix."
+  (cond ((null remoto--forges) original)
+        (original (concat "\\(?:" original "\\)\\|" remoto--handler-regexp))
+        (t remoto--handler-regexp)))
+
+(defun remoto--refresh-tramp-ignored ()
+  "Compose the registered prefixes into `tramp-ignored-file-name-regexp'."
+  ;; A one-name path such as /npm:react@18:/x has TRAMP's /METHOD:HOST: shape.
+  ;; The variable is autoloaded, and tramp's `defcustom' keeps a value set
+  ;; before it loads.
+  (unless remoto--tramp-ignored-saved
+    (setq remoto--tramp-ignored-saved
+          (list (bound-and-true-p tramp-ignored-file-name-regexp))))
+  (setq tramp-ignored-file-name-regexp
+        (remoto--tramp-ignored-regexp (car remoto--tramp-ignored-saved))))
+
+(defun remoto--restore-tramp-ignored ()
+  "Put back the value `tramp-ignored-file-name-regexp' had before remoto's."
+  (when remoto--tramp-ignored-saved
+    (setq tramp-ignored-file-name-regexp (car remoto--tramp-ignored-saved)
+          remoto--tramp-ignored-saved nil)))
+
 (defun remoto--refresh-handler ()
   "Point the entry of `file-name-handler-alist' at the current prefixes."
   (when (bound-and-true-p global-remoto-mode)
     (setq file-name-handler-alist
           (rassq-delete-all #'remoto-file-name-handler file-name-handler-alist))
     (push (cons remoto--handler-regexp #'remoto-file-name-handler)
-          file-name-handler-alist)))
+          file-name-handler-alist)
+    (remoto--refresh-tramp-ignored)))
 
 (defun remoto-register-forge (forge)
   "Register FORGE under each of its prefixes and refresh the handler regexp.
@@ -4512,6 +4542,7 @@ Each step is idempotent, so a second call while on is a no-op."
                  #'remoto-file-name-handler)
     (push (cons remoto--handler-regexp #'remoto-file-name-handler)
           file-name-handler-alist))
+  (remoto--refresh-tramp-ignored)
   (advice-add 'dired-noselect :around #'remoto--dired-around-a)
   (advice-add 'find-file-noselect :around #'remoto--find-file-around-a)
   (advice-add 'read-file-name-internal :around
@@ -4532,6 +4563,7 @@ Each step is idempotent, so a second call while on is a no-op."
   "Remove the handler, the advice, the hooks and the auth warm-up timer."
   (setq file-name-handler-alist
         (assoc-delete-all remoto--handler-regexp file-name-handler-alist))
+  (remoto--restore-tramp-ignored)
   (advice-remove 'dired-noselect #'remoto--dired-around-a)
   (advice-remove 'find-file-noselect #'remoto--find-file-around-a)
   (advice-remove 'read-file-name-internal #'remoto--read-file-name-internal-a)
