@@ -3570,6 +3570,166 @@ using unauthenticated access until M-x remoto-reset-auth")
             (with-current-buffer buffer (setq buffer-file-name nil))
             (kill-buffer buffer)))))))
 
+;;; Locators: how many segments name a repository
+
+(defmacro remoto-test-with-registry (&rest body)
+  "Run BODY with copies of the forge registry and the default-ref cache."
+  (declare (indent 0))
+  `(let ((remoto--forges (copy-alist remoto--forges))
+         (remoto--handler-regexp remoto--handler-regexp)
+         (file-name-handler-alist (copy-alist file-name-handler-alist))
+         (remoto--default-branch-cache (make-hash-table :test 'equal)))
+     ,@body))
+
+(defun remoto-test--shape (name)
+  "Return the parts `remoto--parse' gives NAME, as a plist."
+  (let ((p (remoto--parse name)))
+    (list :level (remoto-path-level p) :owner (remoto-path-owner p)
+          :repo (remoto-path-repo p) :ref (remoto-path-ref p)
+          :path (remoto-path-path p) :query (remoto-path-query p)
+          :short (remoto-path-short p))))
+
+(defun remoto-test--check-rows (rows)
+  "Expect each of ROWS, (NAME . SHAPE), to parse to SHAPE and unparse to NAME."
+  (dolist (row rows)
+    (expect (cons (car row) (remoto-test--shape (car row))) :to-equal row)
+    (expect (remoto--unparse (remoto--parse (car row))) :to-equal (car row))))
+
+(cl-defstruct (remoto-test-latest (:include remoto-forge)
+                                  (:constructor remoto-test-latest-create)
+                                  (:copier nil))
+  "A source whose default ref is latest, as a package registry's.")
+
+(cl-defmethod remoto-forge-default-ref ((_forge remoto-test-latest) _owner _repo)
+  "The dist-tag latest."
+  "latest")
+
+(cl-defstruct (remoto-test-open (:include remoto-forge (locator 'open))
+                                (:constructor remoto-test-open-create)
+                                (:copier nil))
+  "A source whose groups nest to any depth, as GitLab's.")
+
+(defconst remoto-test--open-projects '(("g" "p") ("g" "sub" "q"))
+  "The projects of `remoto-test-open', each as its segments.")
+
+(cl-defmethod remoto-forge-split ((_forge remoto-test-open) names &optional wait)
+  "The project of `remoto-test--open-projects' NAMES start with, with WAIT only."
+  (when-let* ((wait)
+              (project (seq-find (lambda (segments)
+                                   (equal segments (seq-take names (length segments))))
+                                 remoto-test--open-projects)))
+    (cons (string-join (butlast project) "/") (car (last project)))))
+
+(cl-defmethod remoto-forge-default-ref ((_forge remoto-test-open) _owner _repo)
+  "The branch main."
+  "main")
+
+(describe "a forge locator"
+  (it "names a repository with one segment and no owner"
+    (remoto-test-with-registry
+      (remoto-register-forge
+       (remoto-test-latest-create :name 'one :prefixes '("one") :locator 1
+                                  :delimiters '(?@ ?#)))
+      (remoto-test--check-rows
+       '(("/one:" :level root :owner nil :repo nil :ref nil :path "/" :query "" :short nil)
+         ("/one:react" :level root :owner nil :repo nil :ref nil :path "/"
+          :query "react" :short nil)
+         ("/one:/x" :level root :owner nil :repo nil :ref nil :path "/" :query "/x"
+          :short nil)
+         ("/one:react/" :level tree :owner nil :repo "react" :ref nil :path "/"
+          :query "" :short t)
+         ("/one:react/lib/x.js" :level tree :owner nil :repo "react" :ref nil
+          :path "/lib/x.js" :query "x.js" :short t)
+         ("/one:react:/x.js" :level tree :owner nil :repo "react" :ref nil
+          :path "/x.js" :query "x.js" :short nil)
+         ("/one:react@" :level refs :owner nil :repo "react" :ref nil :path "/"
+          :query "" :short nil)
+         ("/one:react@18" :level refs :owner nil :repo "react" :ref nil :path "/"
+          :query "18" :short nil)
+         ("/one:react@18:/index.js" :level tree :owner nil :repo "react" :ref "18"
+          :path "/index.js" :query "index.js" :short nil)
+         ("/one:react#1" :level topics :owner nil :repo "react" :ref nil :path "/"
+          :query "1" :short nil)))
+      (expect (remoto--maybe-rewrite "/one:react/lib/x.js")
+              :to-equal "/one:react@latest:/lib/x.js")
+      (expect (remoto--maybe-rewrite "/one:react@18") :to-equal "/one:react@18:/")
+      (expect (remoto--repo-id (remoto--canonical-forge "/one:") nil "react")
+              :to-equal "/one:react")))
+
+  (it "takes the segments a function counts, a scope and a name or one name"
+    (remoto-test-with-registry
+      (let ((scoped (remoto-test-latest-create
+                     :name 'scoped :prefixes '("scoped") :delimiters '(?@)
+                     :locator (lambda (names)
+                                (if (string-prefix-p "@" (car names)) 2 1)))))
+        (remoto-register-forge scoped)
+        (remoto-test--check-rows
+         '(("/scoped:@ty" :level root :owner nil :repo nil :ref nil :path "/"
+            :query "@ty" :short nil)
+           ("/scoped:@types/" :level owner :owner "@types" :repo nil :ref nil
+            :path "/" :query "" :short nil)
+           ("/scoped:@types/no" :level owner :owner "@types" :repo nil :ref nil
+            :path "/" :query "no" :short nil)
+           ("/scoped:@types/node@18:/index.d.ts" :level tree :owner "@types"
+            :repo "node" :ref "18" :path "/index.d.ts" :query "index.d.ts" :short nil)
+           ("/scoped:@types/node/lib/" :level tree :owner "@types" :repo "node"
+            :ref nil :path "/lib/" :query "" :short t)
+           ("/scoped:pkg@1.0:/x.js" :level tree :owner nil :repo "pkg" :ref "1.0"
+            :path "/x.js" :query "x.js" :short nil)
+           ("/scoped:pkg/" :level tree :owner nil :repo "pkg" :ref nil :path "/"
+            :query "" :short t)))
+        (expect (remoto-forge-split scoped '("@types" "node" "x")) :to-equal '("@types" . "node"))
+        (expect (remoto-forge-split scoped '("pkg" "x")) :to-equal '(nil . "pkg"))
+        (expect (remoto-forge-split scoped '("@types")) :to-be nil)
+        (expect (remoto--maybe-rewrite "/scoped:@types/node/x")
+                :to-equal "/scoped:@types/node@latest:/x"))))
+
+  (it "leaves an open name unresolved in parsing and asks the forge in the rewrite"
+    (remoto-test-with-registry
+      (let ((open (remoto-test-open-create :name 'open :prefixes '("open" "op")
+                                           :delimiters '(?@ ?#))))
+        (remoto-register-forge open)
+        (spy-on 'remoto-forge-split :and-call-through)
+        (remoto-test--check-rows
+         '(("/open:g" :level root :owner nil :repo nil :ref nil :path "/" :query "g"
+            :short nil)
+           ("/open:g/sub/" :level owner :owner "g/sub" :repo nil :ref nil :path "/"
+            :query "" :short nil)
+           ("/open:g/sub/q/a.el" :level owner :owner "g/sub/q" :repo nil :ref nil
+            :path "/" :query "a.el" :short nil)
+           ("/open:g/sub/q@" :level refs :owner "g/sub" :repo "q" :ref nil :path "/"
+            :query "" :short nil)
+           ("/open:g/sub/q@main:/a/b.el" :level tree :owner "g/sub" :repo "q"
+            :ref "main" :path "/a/b.el" :query "b.el" :short nil)
+           ("/open:g/sub/q:/" :level tree :owner "g/sub" :repo "q" :ref nil :path "/"
+            :query "" :short nil)
+           ("/open:g/sub/q#1" :level topics :owner "g/sub" :repo "q" :ref nil
+            :path "/" :query "1" :short nil)))
+        (expect 'remoto-forge-split :not :to-have-been-called)
+        (expect (remoto--maybe-rewrite "/op:g/sub/q/a/b.el")
+                :to-equal "/open:g/sub/q@main:/a/b.el")
+        (expect (spy-calls-all-args 'remoto-forge-split)
+                :to-equal `((,open ("g" "sub" "q" "a" "b.el"))
+                            (,open ("g" "sub" "q" "a" "b.el") t)))
+        (expect (remoto--maybe-rewrite "/open:g/p") :to-equal "/open:g/p@main:/")
+        (expect (remoto--maybe-rewrite "/open:g/p/") :to-equal "/open:g/p@main:/")
+        (expect (remoto--maybe-rewrite "/open:g/sub/") :to-equal "/open:g/sub/")
+        (expect (remoto--maybe-rewrite "/open:g/sub/q@main") :to-equal "/open:g/sub/q@main:/"))))
+
+  (it "reads @ and # as plain characters in a source without delimiters"
+    (remoto-test-with-registry
+      (remoto-register-forge
+       (remoto-test-latest-create :name 'plain :prefixes '("plain") :delimiters nil))
+      (remoto-test--check-rows
+       '(("/plain:o/a#b" :level owner :owner "o" :repo nil :ref nil :path "/"
+          :query "a#b" :short nil)
+         ("/plain:o/id@x#y/f" :level tree :owner "o" :repo "id@x#y" :ref nil
+          :path "/f" :query "f" :short t)
+         ("/plain:o/id@x:/f" :level tree :owner "o" :repo "id@x" :ref nil
+          :path "/f" :query "f" :short nil)
+         ("/plain:@o/r" :level owner :owner "@o" :repo nil :ref nil :path "/"
+          :query "r" :short nil))))))
+
 (cl-defstruct (remoto-test-refless (:include remoto-forge)
                                    (:constructor remoto-test-refless-create)
                                    (:copier nil))

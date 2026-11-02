@@ -55,11 +55,12 @@
 
 (cl-defstruct (remoto-forge (:constructor remoto-forge-create)
                             (:copier nil))
-  "A source of repositories that remoto paths name.
-PREFIXES are the path prefixes without slash or colon, the first one
-canonical; DELIMITERS the characters after OWNER/REPO it supports;
-TITLE the name messages show; TOPIC-KEY the regexp a topic key matches."
-  name prefixes host delimiters repo-end title (topic-key "\\`[0-9]+\\'"))
+  "A source of repositories that remoto paths name; TITLE names it in messages.
+PREFIXES are path prefixes, the first canonical; DELIMITERS the characters
+after a repository; TOPIC-KEY a regexp of topic keys; LOCATOR the segments
+a repository name takes: a number, a function of the segments, or `open'."
+  name prefixes host delimiters repo-end title (topic-key "\\`[0-9]+\\'")
+  (locator 2))
 
 (cl-defstruct (remoto-github (:include remoto-forge (title "GitHub"))
                              (:constructor remoto-github-create)
@@ -89,10 +90,13 @@ spelling, for `remoto-autoload-file-name-handler'.")
 
 (defun remoto-register-forge (forge)
   "Register FORGE under each of its prefixes and refresh the handler regexp.
-Register the delimiters of FORGE with `remoto-register-delimiter' first."
+Register the delimiters of FORGE with `remoto-register-delimiter' first.
+An `open' locator ends a repository name at a delimiter or colon only:
+its slashes separate groups, which nest to any depth."
   (setf (remoto-forge-repo-end forge)
-        (rx-to-string `(in "/:" ,@(mapcar #'char-to-string
-                                          (remoto-forge-delimiters forge)))
+        (rx-to-string `(in ,(if (eq (remoto-forge-locator forge) 'open) ":" "/:")
+                           ,@(mapcar #'char-to-string
+                                     (remoto-forge-delimiters forge)))
                       t))
   (dolist (prefix (remoto-forge-prefixes forge))
     (if-let* ((entry (assoc prefix remoto--forges)))
@@ -289,6 +293,23 @@ INPUT is a web URL, a git remote or a shorthand, at any level: the URL
 of a topic gives the topics level with the topic key as its query."
   nil)
 
+(cl-defgeneric remoto-forge-split (forge names &optional _wait)
+  "Return (OWNER . REPO) for NAMES, the segments of a short form on FORGE.
+OWNER is nil for a one-name repository.  Nil while FORGE cannot tell yet;
+WAIT asks it to look the name up.  The default splits by the locator; an
+`open' one needs a method, called from the rewrite and listing steps."
+  (when-let* ((count (remoto--locator-count forge names))
+              ((<= count (length names))))
+    (cons (and (< 1 count) (string-join (seq-take names (1- count)) "/"))
+          (nth (1- count) names))))
+
+(defun remoto--locator-count (forge names)
+  "Return how many of NAMES the locator of FORGE takes, nil for an open one."
+  (let ((locator (remoto-forge-locator forge)))
+    (cond ((integerp locator) locator)
+          ((eq locator 'open) nil)
+          (t (funcall locator names)))))
+
 (defvar remoto--url-ref-lookup t
   "Non-nil when a forge may ask for its refs to split the ref of a URL.")
 
@@ -392,41 +413,75 @@ Return nil unless STRING starts with the canonical prefix of a forge.
 Every string with one parses: LEVEL is the deepest directory it names
 and QUERY the text after that, so `remoto-path-directory' + QUERY is STRING."
   (when-let* ((forge (remoto--canonical-forge string)))
-    (let* ((rest (substring string (length (remoto--prefix forge))))
-           (slash (string-search "/" rest))
-           (owner (and slash (substring rest 0 slash)))
-           (after-owner (and slash (substring rest (1+ slash))))
-           (end (and after-owner
-                     (string-match-p (remoto-forge-repo-end forge) after-owner)))
-           (repo (and end (substring after-owner 0 end))))
-      (cond
-       ;; /PREFIX:QUERY, or /PREFIX:/... with no account name
-       ((or (null slash) (string-empty-p owner))
+    (let ((rest (substring string (length (remoto--prefix forge))))
+          (locator (remoto-forge-locator forge)))
+      (if (eq locator 'open)
+          (remoto--parse-open forge string rest)
+        (let* ((count (if (integerp locator)
+                          locator
+                        (funcall locator (split-string rest "/"))))
+               (slash (and (< 1 count) (remoto--nth-slash rest (1- count))))
+               (owner (and slash (substring rest 0 slash)))
+               (after-owner (if slash (substring rest (1+ slash)) (and (= count 1) rest)))
+               (end (and after-owner
+                         (string-match-p (remoto-forge-repo-end forge) after-owner)))
+               (repo (and end (substring after-owner 0 end))))
+          (cond
+           ;; /PREFIX:QUERY, or /PREFIX:/... with no account name
+           ((or (null after-owner) (and owner (string-empty-p owner))
+                (and (null owner) (or (null end) (string-empty-p repo))))
+            (remoto-path-create :forge forge :level 'root :query rest
+                                :path "/" :string string))
+           ;; /PREFIX:OWNER/QUERY: no delimiter yet, or one after no name
+           ((or (null end) (string-empty-p repo))
+            (remoto-path-create :forge forge :level 'owner :owner owner
+                                :query after-owner :path "/" :string string))
+           (t (remoto--parse-after-repo forge string owner repo
+                                        (aref after-owner end)
+                                        (substring after-owner (1+ end))))))))))
+
+(defun remoto--nth-slash (string n &optional start)
+  "Return the position of the Nth slash in STRING from START, or nil."
+  (when-let* ((slash (string-search "/" string start)))
+    (if (< 1 n) (remoto--nth-slash string (1- n) (1+ slash)) slash)))
+
+(defun remoto--parse-open (forge string rest)
+  "Parse REST, the text of STRING after the prefix of FORGE, an `open' locator.
+A delimiter or colon ends the repository and the slash before it the
+owner.  Without either the name stays unresolved at the owner level, its
+last segment the query, until `remoto--split-open' asks FORGE."
+  (let* ((end (string-match-p (remoto-forge-repo-end forge) rest))
+         (slash (cl-position ?/ rest :end end :from-end t)))
+    (if (or (null slash) (= slash 0))
         (remoto-path-create :forge forge :level 'root :query rest
-                            :path "/" :string string))
-       ;; /PREFIX:OWNER/QUERY: no delimiter yet, or one after no name
-       ((or (null end) (string-empty-p repo))
-        (remoto-path-create :forge forge :level 'owner :owner owner
-                            :query after-owner :path "/" :string string))
-       (t
-        (let ((char (aref after-owner end))
-              (tail (substring after-owner (1+ end))))
-          (pcase char
-            (?: (remoto--parse-tree forge string owner repo nil tail nil))
-            (?/ (remoto--parse-tree forge string owner repo nil
-                                    (concat "/" tail) t))
-            (_
-             (let* ((delimiter (alist-get char remoto--delimiters))
-                    (colon (and (eq (remoto-delimiter-kind delimiter) 'ref)
-                                (string-search ":" tail))))
-               (if colon
-                   (remoto--parse-tree forge string owner repo
-                                       (substring tail 0 colon)
-                                       (substring tail (1+ colon)) nil)
-                 (remoto-path-create :forge forge
-                                     :level (remoto-delimiter-level delimiter)
-                                     :owner owner :repo repo :query tail
-                                     :path "/" :string string)))))))))))
+                            :path "/" :string string)
+      (let ((owner (substring rest 0 slash)))
+        (if (or (null end) (= end (1+ slash)))
+            (remoto-path-create :forge forge :level 'owner :owner owner
+                                :query (substring rest (1+ slash))
+                                :path "/" :string string)
+          (remoto--parse-after-repo forge string owner
+                                    (substring rest (1+ slash) end)
+                                    (aref rest end) (substring rest (1+ end))))))))
+
+(defun remoto--parse-after-repo (forge string owner repo char tail)
+  "Parse STRING of FORGE, which names OWNER/REPO, CHAR and then TAIL.
+CHAR is a colon, a slash that starts the short form, or a delimiter."
+  (pcase char
+    (?: (remoto--parse-tree forge string owner repo nil tail nil))
+    (?/ (remoto--parse-tree forge string owner repo nil (concat "/" tail) t))
+    (_
+     (let* ((delimiter (alist-get char remoto--delimiters))
+            (colon (and (eq (remoto-delimiter-kind delimiter) 'ref)
+                        (string-search ":" tail))))
+       (if colon
+           (remoto--parse-tree forge string owner repo
+                               (substring tail 0 colon)
+                               (substring tail (1+ colon)) nil)
+         (remoto-path-create :forge forge
+                             :level (remoto-delimiter-level delimiter)
+                             :owner owner :repo repo :query tail
+                             :path "/" :string string))))))
 
 (defun remoto-path-directory (parsed)
   "Return the directory part of PARSED: its string without its query."
@@ -456,13 +511,10 @@ Returns nil if FILENAME does not match the canonical format."
 
 (defun remoto--tree-prefix (parsed)
   "Return the /PREFIX:OWNER/REPO[@REF]: prefix of the canonical PARSED."
-  (format "%s%s/%s%s:"
-          (remoto--path-prefix parsed)
-          (remoto-path-owner parsed)
-          (remoto-path-repo parsed)
-          (if (remoto-path-ref parsed)
-              (concat "@" (remoto-path-ref parsed))
-            "")))
+  (let ((owner (remoto-path-owner parsed))
+        (ref (remoto-path-ref parsed)))
+    (concat (remoto--path-prefix parsed) owner (and owner "/")
+            (remoto-path-repo parsed) (and ref "@") ref ":")))
 
 (defun remoto--canonical-path (parsed)
   "Build a canonical remoto path string from PARSED `remoto-path'."
@@ -470,7 +522,8 @@ Returns nil if FILENAME does not match the canonical format."
 
 (defun remoto--unparse (parsed)
   "Build the remoto path string of PARSED, the inverse of `remoto--parse'.
-A canonical tree path comes back with the slash after its colon."
+A canonical tree path comes back with the slash after its colon.  A
+one-name repository has no OWNER, so no slash comes before its name."
   (let ((prefix (remoto--path-prefix parsed))
         (owner (remoto-path-owner parsed))
         (repo (remoto-path-repo parsed))
@@ -479,9 +532,9 @@ A canonical tree path comes back with the slash after its colon."
       ('root (concat prefix query))
       ('owner (concat prefix owner "/" query))
       ('tree (if (remoto-path-short parsed)
-                 (concat prefix owner "/" repo (remoto-path-path parsed))
+                 (concat prefix owner (and owner "/") repo (remoto-path-path parsed))
                (remoto--canonical-path parsed)))
-      (level (concat prefix owner "/" repo
+      (level (concat prefix owner (and owner "/") repo
                      (char-to-string
                       (remoto-delimiter-char (remoto--delimiter-of level)))
                      query)))))
@@ -489,7 +542,7 @@ A canonical tree path comes back with the slash after its colon."
 (defun remoto--repo-id (forge owner repo)
   "Return the cache key of OWNER/REPO on FORGE: its canonical name.
 Two forges may host an OWNER/REPO each, so the prefix is part of the key."
-  (concat (remoto--prefix forge) owner "/" repo))
+  (concat (remoto--prefix forge) owner (and owner "/") repo))
 
 (defun remoto--repo-key (parsed)
   "Return the cache key of the tree PARSED names: /PREFIX:OWNER/REPO@REF."
@@ -3439,6 +3492,7 @@ A bare name holds no slash, colon or delimiter: it is one line of a
 listing, not a path into it."
   (let ((query (remoto-path-query parsed)))
     (and (not (string-empty-p query))
+         (not (string-search "/" query))
          (not (string-match-p (remoto-forge-repo-end (remoto-path-forge parsed))
                               query))
          query)))
@@ -3752,8 +3806,12 @@ that match QUERY, for a Dired of DIR."
 (defun remoto--name-or-matches (filename)
   "Return what visiting FILENAME opens: the (DIR . NAMES) of matches or a name.
 The matches are those of a name that names nothing.  Any other FILENAME
-comes back as `remoto--maybe-rewrite' makes it."
-  (or (remoto--query-matches filename)
+comes back as `remoto--maybe-rewrite' makes it.  A name that an `open'
+forge splits into a repository is no query."
+  (or (and (not (when-let* ((parsed (remoto--parse
+                                     (remoto--normalize-shorthand filename))))
+                  (remoto--split-open parsed)))
+           (remoto--query-matches filename))
       (let ((name (remoto--maybe-rewrite filename)))
         (or (remoto--file-matches name) name))))
 
@@ -3772,13 +3830,36 @@ failed or the API call errors."
 
 ;;;; Rewriting what find-file and dired receive
 
+(defun remoto--split-open (parsed)
+  "Return the short tree PARSED names when its `open' forge splits it, else nil.
+PARSED stays at the owner level until this asks `remoto-forge-split', from
+its cache first and then with a wait; the forge keeps the answer, so
+remoto keeps no cache of its own."
+  (when-let* ((forge (remoto-path-forge parsed))
+              ((eq (remoto-forge-locator forge) 'open))
+              ((eq (remoto-path-level parsed) 'owner))
+              (string (remoto-path-string parsed))
+              (rest (substring string (length (remoto--prefix forge))))
+              (names (split-string rest "/" t))
+              (split (or (remoto-forge-split forge names)
+                         (remoto-forge-split forge names t)))
+              (name (concat (car split) (and (car split) "/") (cdr split)))
+              ((string-prefix-p name rest))
+              (tail (substring rest (length name)))
+              ((or (string-empty-p tail) (string-prefix-p "/" tail))))
+    (remoto--parse-tree forge string (car split) (cdr split) nil
+                        (if (string-empty-p tail) "/" tail) t)))
+
 (defun remoto--repo-root (parsed)
   "Return the `remoto-path' of the repository root that PARSED names, or nil.
 That is a bare /github:OWNER/REPO, or /github:OWNER/REPO@REF with or
-without a slash after the ref; its ref is nil for the default branch."
+without a slash after the ref; its ref is nil for the default branch.
+A bare name of an `open' forge is a repository only as `remoto--split-open'
+finds it."
   (pcase (remoto-path-level parsed)
     ('owner
-     (when-let* ((repo (remoto--bare-name parsed)))
+     (when-let* (((not (eq (remoto-forge-locator (remoto-path-forge parsed)) 'open)))
+                 (repo (remoto--bare-name parsed)))
        (remoto-path-create :forge (remoto-path-forge parsed)
                            :owner (remoto-path-owner parsed) :repo repo
                            :ref nil :path "/")))
@@ -3800,6 +3881,7 @@ components resolve first: a short form reads /github:OWNER/.. as a repo."
              (remoto--dot-component-p input))
     (setq input (remoto--normalize-name input)))
   (let* ((parsed (remoto--parse input))
+         (parsed (and parsed (or (remoto--split-open parsed) parsed)))
          (root (and parsed (remoto--repo-root parsed))))
     (cond
      ;; Already a full canonical path
@@ -3816,8 +3898,8 @@ components resolve first: a short form reads /github:OWNER/.. as a repo."
                            (when b (puthash repo-id b remoto--default-branch-cache))
                            b))))
         ;; A source without refs answers nil: its tree takes no selector.
-        (format "%s%s/%s%s:/%s" (remoto--path-prefix parsed) owner repo
-                (if branch (concat "@" branch) "") subpath)))
+        (concat (remoto--path-prefix parsed) owner (and owner "/") repo
+                (and branch "@") branch ":/" subpath)))
      ;; Partial canonical path: /github:owner/repo or /github:owner/repo@ref
      (root
       (remoto--canonical-path (remoto--resolve-ref root)))
