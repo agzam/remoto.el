@@ -3,7 +3,7 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
-* [Unreleased]
+* [2.7.0] - 2026-11-01
 
 ** Changed
 - Dired in a repository follows ~dired-listing-switches~ as ~ls~ reads them: ~--group-directories-first~, ~-S~, ~-t~, ~-v~, ~-X~, ~-r~, ~-U~, ~-h~ and ~--si~, the last sort option winning
