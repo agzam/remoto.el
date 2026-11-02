@@ -39,8 +39,8 @@
 ;; autoloads register for the prefixes of the forges that come with
 ;; remoto, the way TRAMP autoloads on a remote path.
 ;; `(global-remoto-mode 1)' in the init file turns it on ahead of time.
-;; `remoto-browse' supports pasting any GitHub URL, git remote URL, or
-;; owner/repo shorthand.
+;; `remoto-browse' supports pasting any forge URL, git remote URL,
+;; /PREFIX:OWNER/REPO name, or OWNER/REPO of `remoto-default-forge'.
 
 ;;; Code:
 
@@ -4660,6 +4660,315 @@ Adds the package directory to `load-path' if needed."
                           buffer-file-name))))
       (add-to-list 'load-path dir))
     (require 'remoto-topic)))
+
+;;;; remoto-browse
+
+(defcustom remoto-default-forge 'github
+  "Name of the registered forge that a bare OWNER/REPO in `remoto-browse' names.
+An input with a prefix, such as /cb:OWNER/REPO, or a URL names its own forge."
+  :type 'symbol
+  :group 'remoto)
+
+(defvar remoto--browse-history nil
+  "Minibuffer history for `remoto-browse'.")
+
+(defun remoto--default-forge ()
+  "Return the forge that `remoto-default-forge' names."
+  (or (remoto--forge-named remoto-default-forge)
+      (user-error "Remoto: remoto-default-forge names no registered forge: %s"
+                  remoto-default-forge)))
+
+(defun remoto--browse-split (input)
+  "Return (FORGE HEAD . REST) for INPUT, the text read by `remoto-browse'.
+HEAD is the prefix INPUT starts with, such as /cb:, or \"\"; REST is the
+text after HEAD.  A URL or remote names its own forge, with a nil REST."
+  (if-let* ((entry (remoto--prefix-of input)))
+      (let ((head (concat "/" (car entry) ":")))
+        (cons (cdr entry) (cons head (substring input (length head)))))
+    (if-let* ((forge (remoto--url-forge input)))
+        (list forge "")
+      (cons (remoto--default-forge) (cons "" input)))))
+
+(defun remoto--browse-parse-input (string)
+  "Parse STRING, a name after its prefix, into (MODE OWNER REPO QUERY).
+MODE is one of `search', `branches', `issues' or `files'.  OWNER and REPO
+are non-nil for the @, # and / modes.  QUERY is the text after the delimiter."
+  (if (string-match (rx bos (group (+ (not (in "/@#"))))
+                        "/" (group (+ (not (in "/@#"))))
+                        (group (in "#@/")) (group (* anything)) eos)
+                    string)
+      (list (alist-get (aref (match-string 3 string) 0)
+                       '((?# . issues) (?@ . branches) (?/ . files)))
+            (match-string 1 string) (match-string 2 string) (match-string 4 string))
+    (list 'search nil nil string)))
+
+(defun remoto--qualify-repos (owner names)
+  "Return each bare repository name of NAMES as OWNER/NAME, with its properties.
+The `remoto-repo-desc' property of a name annotates its candidate."
+  (mapcar (lambda (name)
+            (apply #'propertize (concat owner "/" name)
+                   (text-properties-at 0 name)))
+          names))
+
+(cl-defgeneric remoto--browse-repos (forge query)
+  "Return the OWNER/REPO candidates of FORGE for QUERY, never blocking.
+An OWNER/TEXT QUERY lists the repositories of OWNER and a plain one the
+accounts, as `remoto-forge-complete' answers them; an account ends in /."
+  (let ((slash (string-search "/" query)))
+    (cond
+     ((null slash)
+      (unless (string-empty-p query)
+        (mapcar (lambda (login) (concat login "/"))
+                (remoto-forge-complete forge (remoto--path-at forge 'root) query nil))))
+     ((< 0 slash)
+      (let ((owner (substring query 0 slash)))
+        (remoto--qualify-repos
+         owner (remoto-forge-complete forge (remoto--path-at forge 'owner owner)
+                                      (substring query (1+ slash)) nil)))))))
+
+(defun remoto--browse-topics (forge owner repo query)
+  "Return the topics of OWNER/REPO on FORGE to complete QUERY with.
+A topic key QUERY gives that topic and the open ones, any other text a
+search.  The symbol t means input arrived and interrupted the fetch."
+  (cond
+   ((string-empty-p query)
+    (while-no-input (remoto-forge-topics forge owner repo nil)))
+   ((remoto--topic-key-p forge query)
+    (let* ((cached (while-no-input (remoto-forge-topics forge owner repo nil)))
+           (direct (while-no-input (remoto-forge-topic forge owner repo query)))
+           (results (and (listp cached) cached)))
+      (if (consp direct)
+          (cl-remove-duplicates (cons direct results)
+                                :key (lambda (topic) (alist-get 'key topic))
+                                :test #'equal)
+        results)))
+   (t (while-no-input (remoto-forge-topics forge owner repo query)))))
+
+(defun remoto--browse-topic-candidates (forge head owner repo query)
+  "Return the # candidates of OWNER/REPO on FORGE for QUERY, after HEAD.
+Pull requests come first, then the keys from the newest."
+  (let* ((prefix (format "%s%s/%s#" head owner repo))
+         (topics (remoto--browse-topics forge owner repo query))
+         (key-of (lambda (candidate) (substring candidate (length prefix)))))
+    (when (listp topics)
+      (sort (mapcar (lambda (topic)
+                      (let ((key (alist-get 'key topic)))
+                        (propertize (concat prefix key)
+                                    'remoto-topic-pr (equal "pr" (alist-get 'kind topic))
+                                    'remoto-topic-title (or (alist-get 'title topic) "")
+                                    'remoto-topic-state (or (alist-get 'state topic) "")
+                                    'remoto-target (format "%s%s/%s#%s" (remoto--prefix forge)
+                                                           owner repo key))))
+                    topics)
+            (lambda (a b)
+              (let ((a-pr (get-text-property 0 'remoto-topic-pr a))
+                    (b-pr (get-text-property 0 'remoto-topic-pr b)))
+                (if (eq (not a-pr) (not b-pr))
+                    (remoto--topic-key< (funcall key-of b) (funcall key-of a))
+                  a-pr)))))))
+
+(defun remoto--browse-ref-candidates (forge head owner repo query)
+  "Return the @ candidates of OWNER/REPO on FORGE that start with QUERY.
+Each candidate follows HEAD and carries the label of its ref."
+  (let ((prefix (format "%s%s/%s@" head owner repo))
+        (groups (while-no-input (remoto-forge-refs forge owner repo))))
+    (when (listp groups)
+      (seq-mapcat (lambda (group)
+                    (mapcar (lambda (ref)
+                              (propertize (concat prefix ref)
+                                          'remoto-ref-type (car group)
+                                          'remoto-target
+                                          (format "%s%s/%s@%s:/" (remoto--prefix forge)
+                                                  owner repo ref)))
+                            (seq-filter (lambda (ref) (string-prefix-p query ref))
+                                        (cdr group))))
+                  groups))))
+
+(defun remoto--browse-file-candidates (forge head owner repo query)
+  "Return the / candidates of OWNER/REPO on FORGE for QUERY, after HEAD.
+QUERY is a path from the root of the default ref; its last segment
+filters the entries of its directory."
+  (let ((ref (while-no-input (remoto-forge-default-ref forge owner repo))))
+    (when (stringp ref)
+      (let* ((subpath (or (file-name-directory query) ""))
+             (file-part (file-name-nondirectory query))
+             (children (while-no-input
+                         (remoto-forge-children forge owner repo ref subpath)))
+             (names (when (listp children)
+                      (mapcar (lambda (child)
+                                (let ((name (if (equal "tree" (alist-get 'type (cdr child)))
+                                                (concat (car child) "/")
+                                              (car child))))
+                                  (propertize (format "%s%s/%s/%s%s" head owner repo
+                                                      subpath name)
+                                              'remoto-target
+                                              (format "%s%s/%s@%s:/%s%s"
+                                                      (remoto--prefix forge) owner repo
+                                                      ref subpath name))))
+                              children))))
+        (if (string-empty-p file-part)
+            names
+          (seq-filter (lambda (name) (string-search file-part name)) names))))))
+
+(defun remoto--browse-completions (string)
+  "Return completion candidates for STRING in `remoto-browse'.
+The forge that STRING names answers them through the forge contract;
+a URL completes to nothing, and so does a forge without the data."
+  (pcase-let ((`(,forge ,head . ,rest) (remoto--browse-split string)))
+    (when rest
+      (pcase-let ((`(,mode ,owner ,repo ,query) (remoto--browse-parse-input rest)))
+        (condition-case nil
+            (pcase mode
+              ('issues (remoto--browse-topic-candidates forge head owner repo query))
+              ('branches (remoto--browse-ref-candidates forge head owner repo query))
+              ('files (remoto--browse-file-candidates forge head owner repo query))
+              ('search
+               (mapcar (lambda (cand)
+                         (let* ((name (substring-no-properties cand))
+                                (c (apply #'propertize (concat head name)
+                                          (text-properties-at 0 cand))))
+                           (put-text-property 0 (length c) 'remoto-target
+                                              (concat (remoto--prefix forge) name
+                                                      (unless (string-suffix-p "/" name)
+                                                        ":/"))
+                                              c)
+                           c))
+                       (remoto--browse-repos forge query))))
+          (remoto-unsupported nil))))))
+
+(defun remoto--browse-metadata (string)
+  "Return completion metadata alist for STRING in `remoto-browse'."
+  (pcase (when-let* ((rest (cddr (remoto--browse-split string))))
+           (car (remoto--browse-parse-input rest)))
+    ('issues
+     (let ((group-fn (lambda (candidate transform)
+                       (if transform candidate
+                         (if (get-text-property 0 'remoto-topic-pr candidate)
+                             "Pull Request"
+                           "Issue"))))
+           (affix-fn (lambda (candidates)
+                       (remoto--affixate
+                        (mapcar (lambda (c)
+                                  (let ((title (or (get-text-property 0 'remoto-topic-title c) ""))
+                                        (state (or (get-text-property 0 'remoto-topic-state c) ""))
+                                        (is-pr (get-text-property 0 'remoto-topic-pr c)))
+                                    (list c
+                                          (if is-pr "PR " "   ")
+                                          (format "%s [%s]" title state))))
+                                candidates)))))
+       `(metadata (category . remoto-browse)
+                  (group-function . ,group-fn)
+                  (affixation-function . ,affix-fn))))
+    ('branches
+     (let ((group-fn (lambda (candidate transform)
+                       (if transform candidate
+                         (capitalize (or (get-text-property 0 'remoto-ref-type candidate)
+                                         "branch"))))))
+       `(metadata (category . remoto-browse)
+                  (group-function . ,group-fn))))
+    ('search
+     (let ((affix-fn (lambda (candidates)
+                       (remoto--affixate
+                        (mapcar (lambda (c)
+                                  (let ((desc (or (get-text-property 0 'remoto-repo-desc c) "")))
+                                    (list c "" desc)))
+                                candidates)))))
+       `(metadata (category . remoto-browse)
+                  (affixation-function . ,affix-fn))))
+    (_ '(metadata (category . remoto-browse)))))
+
+(defun remoto--repo-completion-table (string pred action)
+  "Programmed completion table for the repositories, refs and topics of forges.
+STRING is the minibuffer input, PRED a filter predicate and ACTION the
+action of `completing-read'.  Styles that filter by `completion-regexp-list'
+pass an empty STRING, so the minibuffer supplies the input then."
+  (cond
+   ((eq action 'metadata) (remoto--browse-metadata string))
+   ((eq (car-safe action) 'boundaries) nil)
+   (t (let ((input (if (string-empty-p string)
+                       (or (remoto--minibuffer-input) string)
+                     string)))
+        (complete-with-action action (remoto--browse-completions input)
+                              string pred)))))
+
+(defun remoto--read-repo ()
+  "Read a repository from the minibuffer with search completion.
+Type 3+ characters to search, @ to complete refs, # to browse topics.
+A prefix such as /cb: picks the forge; URLs can be typed directly."
+  (completing-read (format "%s repo: " (remoto-forge-title (remoto--default-forge)))
+                   #'remoto--repo-completion-table
+                   nil nil nil
+                   'remoto--browse-history))
+
+;;;###autoload
+(defun remoto-browse (input)
+  "Browse a repository of a forge without cloning.
+INPUT is a URL, a git remote, /PREFIX:OWNER/REPO or OWNER/REPO of
+`remoto-default-forge', with #KEY for a topic or @REF for a ref.
+Turn on `global-remoto-mode' when it is off: the buffers need it."
+  (interactive (progn (remoto--ensure-global-mode)
+                      (list (remoto--read-repo))))
+  (remoto--ensure-global-mode)
+  (let ((remoto--may-ask t))
+    (remoto--browse-input input)))
+
+(defun remoto--browse-tree (parsed)
+  "Open the tree PARSED names, in Dired or as a file.
+A PARSED without a ref opens on the default ref."
+  (let* ((resolved (remoto--or-private
+                    (remoto-path-forge parsed) (remoto-path-owner parsed)
+                    (remoto-path-repo parsed)
+                    (lambda () (remoto--resolve-ref parsed))))
+         (canonical (remoto--canonical-path resolved)))
+    (if (equal "tree" (alist-get 'type (remoto--tree-entry resolved)))
+        (dired canonical)
+      (find-file canonical))))
+
+(defun remoto--browse-topic (forge owner repo key)
+  "Open the topic KEY of OWNER/REPO on FORGE."
+  (remoto--require-topic)
+  (remoto-topic-display key (format "%s%s/%s" (remoto--prefix forge) owner repo)))
+
+(defun remoto--browse-url-path (parsed)
+  "Open PARSED, the `remoto-path' of a URL: a topic, a tree or a listing."
+  (pcase (remoto-path-level parsed)
+    ('topics (remoto--browse-topic (remoto-path-forge parsed) (remoto-path-owner parsed)
+                                   (remoto-path-repo parsed) (remoto-path-query parsed)))
+    ('tree (remoto--browse-tree parsed))
+    (_ (dired (remoto--unparse parsed)))))
+
+(defun remoto--browse-name (forge input rest)
+  "Open REST, the name of INPUT on FORGE after its prefix, if it has one.
+A canonical path opens as it is; OWNER/REPO opens on its default ref."
+  (pcase-let ((canonical (remoto--parse-path (remoto--normalize-shorthand input)))
+              (`(,mode ,owner ,repo ,query) (remoto--browse-parse-input rest))
+              (name (string-trim rest)))
+    (cond
+     (canonical (remoto--browse-tree canonical))
+     ((and (eq mode 'issues) (remoto--topic-key-p forge query))
+      (remoto--browse-topic forge owner repo query))
+     ((eq mode 'files)
+      (let* ((short (format "%s%s/%s/%s" (remoto--prefix forge) owner repo query))
+             (path (remoto--or-private
+                    forge owner repo (lambda () (remoto--maybe-rewrite short))))
+             (parsed (remoto--parse-path path)))
+        (if (and parsed (equal "tree" (alist-get 'type (remoto--tree-entry parsed))))
+            (dired path)
+          (find-file path))))
+     ((string-match remoto--shorthand-regexp name)
+      (remoto--browse-tree
+       (remoto-path-create :forge forge :owner (match-string 1 name)
+                           :repo (match-string 2 name) :ref (match-string 3 name)
+                           :level 'tree :path "/")))
+     (t (user-error "Remoto: cannot parse input: %s" (string-trim input))))))
+
+(defun remoto--browse-input (input)
+  "Open INPUT, a name `remoto-browse' read, as a topic, file or tree."
+  (pcase-let ((`(,forge ,_head . ,rest) (remoto--browse-split input)))
+    (remoto--with-fetch-indicator
+      (if rest
+          (remoto--browse-name forge input rest)
+        (remoto--browse-url-path (remoto--parse-url input))))))
 
 ;;;; Unload
 

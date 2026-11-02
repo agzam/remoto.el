@@ -2275,29 +2275,118 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
               :to-throw 'user-error '("Remoto: not found: repos/acme/tool/branches/nope")))))
 
 (describe "remoto-browse with the name of another forge"
-  ;; It asked GitHub for an owner named codeberg.org, or said "cannot parse input".
-  (it "says it reads GitHub names and points at find-file, asking nothing"
+  (before-each
     (spy-on 'ghub-get)
-    (dolist (input '("https://codeberg.org/forgejo/docs" "codeberg.org/forgejo/docs"
-                     "/cb:forgejo/docs" "/codeberg:forgejo/docs@next:/README.md"
-                     "git@codeberg.org:forgejo/docs.git"
-                     "https://codeberg.org/forgejo/forgejo/pulls/14989"))
-      (expect (condition-case err (progn (remoto-browse input) nil)
-                (user-error (error-message-string err)))
-              :to-equal (format "Remoto: remoto-browse reads GitHub names; \
-open %s with find-file" input)))
-    (expect 'ghub-get :not :to-have-been-called))
+    (spy-on 'remoto--api-async)
+    (spy-on 'remoto--ensure-global-mode)
+    (spy-on 'remoto-forge-default-ref :and-return-value "main")
+    (spy-on 'remoto--tree-entry :and-return-value '((type . "tree")))
+    (spy-on 'dired))
 
-  (it "offers no candidates for it while it is typed"
+  (it "opens /cb:o/r as /codeberg:o/r"
+    (remoto-test-with-cache
+      (remoto-browse "/cb:o/r")
+      (expect 'remoto-forge-default-ref :to-have-been-called-with remoto--codeberg "o" "r")
+      (expect 'dired :to-have-been-called-with "/codeberg:o/r@main:/")
+      (expect 'ghub-get :not :to-have-been-called)))
+
+  (it "opens a bare o/r on Codeberg when remoto-default-forge is codeberg"
+    (remoto-test-with-cache
+      (let ((remoto-default-forge 'codeberg))
+        (remoto-browse "o/r"))
+      (expect 'remoto-forge-default-ref :to-have-been-called-with remoto--codeberg "o" "r")
+      (expect 'dired :to-have-been-called-with "/codeberg:o/r@main:/")))
+
+  (it "opens a URL of Codeberg on Codeberg with the default left at github"
+    (remoto-test-with-cache
+      (expect remoto-default-forge :to-be 'github)
+      (remoto-browse "https://codeberg.org/o/r")
+      (expect 'dired :to-have-been-called-with "/codeberg:o/r@main:/")
+      (expect 'ghub-get :not :to-have-been-called)))
+
+  (it "opens a topic of /cb: input and of a Codeberg pull URL on Codeberg"
+    (spy-on 'remoto-topic-display)
+    (spy-on 'remoto--require-topic)
+    (remoto-browse "/cb:o/r#7")
+    (expect 'remoto-topic-display :to-have-been-called-with "7" "/codeberg:o/r")
+    (remoto-browse "https://codeberg.org/o/r/pulls/9")
+    (expect 'remoto-topic-display :to-have-been-called-with "9" "/codeberg:o/r"))
+
+  (it "opens /gh:o/r on GitHub"
+    (remoto-test-with-cache
+      (remoto-browse "/gh:o/r")
+      (expect 'remoto-forge-default-ref :to-have-been-called-with remoto--github "o" "r")
+      (expect 'dired :to-have-been-called-with "/github:o/r@main:/")))
+
+  (it "says when remoto-default-forge names no registered forge"
+    (let ((remoto-default-forge 'nowhere))
+      (expect (remoto-browse "o/r") :to-throw 'user-error
+              '("Remoto: remoto-default-forge names no registered forge: nowhere")))))
+
+(describe "remoto--browse-completions of another forge"
+  (it "asks Codeberg's remoto-forge-complete for /cb: input"
+    (spy-on 'remoto-forge-complete :and-return-value '("docs"))
+    (let* ((cands (remoto--browse-completions "/cb:forgejo/do"))
+           (args (spy-calls-args-for 'remoto-forge-complete 0)))
+      (expect cands :to-equal '("/cb:forgejo/docs"))
+      (expect (get-text-property 0 'remoto-target (car cands))
+              :to-equal "/codeberg:forgejo/docs:/")
+      (expect (car args) :to-be remoto--codeberg)
+      (expect (remoto-path-owner (nth 1 args)) :to-equal "forgejo")
+      (expect (nthcdr 2 args) :to-equal '("do" nil))))
+
+  (it "offers Codeberg's accounts for a plain /cb: query"
+    (spy-on 'remoto-forge-complete :and-return-value '("forgejo"))
+    (let ((cands (remoto--browse-completions "/cb:forg")))
+      (expect cands :to-equal '("/cb:forgejo/"))
+      (expect (get-text-property 0 'remoto-target (car cands)) :to-equal "/codeberg:forgejo/")
+      (expect (remoto-path-level (nth 1 (spy-calls-args-for 'remoto-forge-complete 0)))
+              :to-be 'root)))
+
+  (it "offers Codeberg's topics and refs for /cb: input"
+    (spy-on 'remoto-forge-topics :and-return-value
+            '(((key . "3") (kind . "issue") (title . "Bug") (state . "open"))
+              ((key . "5") (kind . "pr") (title . "Fix") (state . "open"))))
+    (spy-on 'remoto-forge-refs :and-return-value '(("branch" "main") ("tag" "v1")))
+    (let ((topics (remoto--browse-completions "/cb:o/r#")))
+      (expect topics :to-equal '("/cb:o/r#5" "/cb:o/r#3"))
+      (expect (get-text-property 0 'remoto-target (car topics)) :to-equal "/codeberg:o/r#5")
+      (expect 'remoto-forge-topics :to-have-been-called-with remoto--codeberg "o" "r" nil))
+    (let ((refs (remoto--browse-completions "/cb:o/r@")))
+      (expect refs :to-equal '("/cb:o/r@main" "/cb:o/r@v1"))
+      (expect (get-text-property 0 'remoto-ref-type (nth 1 refs)) :to-equal "tag")
+      (expect (get-text-property 0 'remoto-target (car refs)) :to-equal "/codeberg:o/r@main:/")))
+
+  (it "asks the forge of remoto-default-forge for a bare query"
+    (spy-on 'remoto-forge-complete :and-return-value '("docs"))
+    (let ((remoto-default-forge 'codeberg))
+      (expect (remoto--browse-completions "forgejo/do") :to-equal '("forgejo/docs")))
+    (expect (car (spy-calls-args-for 'remoto-forge-complete 0)) :to-be remoto--codeberg))
+
+  (it "offers no candidates for a URL while it is typed, asking nothing"
     (spy-on 'ghub-get)
     (spy-on 'remoto--api-async)
     (dolist (input '("codeberg.org/forgejo/" "codeberg.org/forgejo/docs@"
-                     "/cb:forgejo/docs#" "https://codeberg.org/forgejo/do"))
+                     "https://codeberg.org/forgejo/do"))
       (expect (remoto--browse-completions input) :to-be nil))
     (expect 'ghub-get :not :to-have-been-called)
-    (expect 'remoto--api-async :not :to-have-been-called)))
+    (expect 'remoto--api-async :not :to-have-been-called))
+
+  (it "groups the refs of /cb: input in its metadata"
+    (let ((meta (remoto--browse-metadata "/cb:o/r@")))
+      (expect (funcall (alist-get 'group-function (cdr meta))
+                       (propertize "/cb:o/r@v1" 'remoto-ref-type "tag") nil)
+              :to-equal "Tag"))))
 
 (describe "remoto--read-repo"
+  (it "names the forge of remoto-default-forge in its prompt"
+    (spy-on 'completing-read :and-return-value "o/r")
+    (remoto--read-repo)
+    (expect (car (spy-calls-args-for 'completing-read 0)) :to-equal "GitHub repo: ")
+    (let ((remoto-default-forge 'codeberg))
+      (remoto--read-repo))
+    (expect (car (spy-calls-args-for 'completing-read 1)) :to-equal "Codeberg repo: "))
+
   (it "returns completing-read result directly"
     (spy-on 'completing-read :and-return-value "torvalds/linux")
     (expect (remoto--read-repo) :to-equal "torvalds/linux"))
@@ -8817,9 +8906,6 @@ three functions the indicator asks are answered by a temp buffer."
     (let ((noninteractive nil)
           (remoto-show-fetch-indicator t))
       (spy-on 'message)
-      (spy-on 'remoto--parse-input
-              :and-return-value (remoto-path-create :forge remoto--github
-                                                    :owner "owner" :repo "repo"))
       (spy-on 'remoto--resolve-ref :and-return-value 'resolved)
       (spy-on 'remoto--canonical-path :and-return-value "/github:o/r:main:/")
       (spy-on 'remoto--tree-entry :and-return-value '((type . "tree")))
