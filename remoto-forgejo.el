@@ -317,8 +317,7 @@ Forgejo spells the kind of a ref in its paths: src/branch/main, src/tag/v1."
   "The kind of REF of OWNER/REPO on FORGE, from the cached refs.
 A hex name that is no branch is a commit."
   (cond ((null ref) "branch")
-        ((member ref (remoto-forge-branches forge owner repo)) "branch")
-        ((member ref (remoto-forge-tags forge owner repo)) "tag")
+        ((remoto--ref-label (remoto-forge-refs forge owner repo) ref))
         ((string-match-p (rx bos (+ hex) eos) ref) "commit")
         (t "branch")))
 

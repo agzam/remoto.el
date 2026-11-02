@@ -3515,6 +3515,43 @@ using unauthenticated access until M-x remoto-reset-auth")
             (with-current-buffer buffer (setq buffer-file-name nil))
             (kill-buffer buffer)))))))
 
+(cl-defstruct (remoto-test-refless (:include remoto-forge)
+                                   (:constructor remoto-test-refless-create)
+                                   (:copier nil))
+  "A source without refs, as a package registry has one tree a version.")
+
+(cl-defmethod remoto-forge-default-ref ((_forge remoto-test-refless) _owner _repo)
+  "No refs, so no default one."
+  nil)
+
+(cl-defmethod remoto-forge-children ((_forge remoto-test-refless) _owner _repo ref _dir)
+  "Two children, asked for at no REF."
+  (if ref
+      (error "Asked for the ref %s" ref)
+    '(("a.txt" (type . "blob")) ("lib" (type . "tree")))))
+
+(describe "a source without refs"
+  :var ((rl (remoto-test-refless-create :name 'rl :prefixes '("rl") :host "rl.example")))
+
+  (it "opens a short name at its tree, with no selector"
+    (let ((remoto--forges (copy-alist remoto--forges))
+          (remoto--handler-regexp remoto--handler-regexp)
+          (file-name-handler-alist (copy-alist file-name-handler-alist))
+          (remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (remoto-register-forge rl)
+      (expect (remoto--maybe-rewrite "/rl:o/r/") :to-equal "/rl:o/r:/")
+      (expect (remoto--maybe-rewrite "/rl:o/r/lib/x.el") :to-equal "/rl:o/r:/lib/x.el")))
+
+  (it "completes a short name from its tree, at no ref"
+    (let ((remoto--forges (copy-alist remoto--forges))
+          (remoto--handler-regexp remoto--handler-regexp)
+          (file-name-handler-alist (copy-alist file-name-handler-alist))
+          (remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (remoto-register-forge rl)
+      (let ((names (remoto--handle-file-name-all-completions "" "/rl:o/r/")))
+        (expect (mapcar #'substring-no-properties names) :to-equal '("a.txt" "lib/"))
+        (expect (get-text-property 0 'remoto-target (car names)) :to-equal "/rl:o/r:/a.txt")))))
+
 (describe "the forge contract"
   :var ((fake (remoto-forge-create :name 'fake :prefixes '("fake") :delimiters '(?@))))
 
@@ -3522,7 +3559,7 @@ using unauthenticated access until M-x remoto-reset-auth")
     (dolist (call (list (lambda () (remoto-forge-default-ref fake "o" "r"))
                         (lambda () (remoto-forge-tree fake "o" "r" "main"))
                         (lambda () (remoto-forge-content fake "o" "r" "main" "a"))
-                        (lambda () (remoto-forge-branches fake "o" "r"))
+                        (lambda () (remoto-forge-refs fake "o" "r"))
                         (lambda () (remoto-forge-topics fake "o" "r"))
                         (lambda () (remoto-forge-search-accounts fake "q" t))
                         (lambda () (remoto-forge-owner-listing fake "/fake:o/"))))
@@ -3571,9 +3608,11 @@ using unauthenticated access until M-x remoto-reset-auth")
 
   (it "dispatches the GitHub methods to the GitHub functions"
     (spy-on 'remoto--fetch-branches :and-return-value '("main"))
+    (spy-on 'remoto--fetch-tags :and-return-value '("v1"))
     (spy-on 'remoto--fetch-issue :and-return-value '((number . 1)))
     (spy-on 'remoto--resolve-commit-sha :and-return-value "abc")
-    (expect (remoto-forge-branches remoto--github "o" "r") :to-equal '("main"))
+    (expect (remoto-forge-refs remoto--github "o" "r")
+            :to-equal '(("branch" "main") ("tag" "v1")))
     (expect (remoto-forge-topic remoto--github "o" "r" "1") :to-equal '((number . 1)))
     (expect (remoto-forge-resolve-ref remoto--github "o" "r" "main") :to-equal "abc")
     (expect 'remoto--fetch-branches :to-have-been-called-with remoto--github "o" "r"))
@@ -3862,7 +3901,7 @@ using unauthenticated access until M-x remoto-reset-auth")
                    (cl-loop for i from 1 to 50 collect `((name . ,(format "b%d" i)))))
                   ("repos/o/r/branches?limit=50&page=2" '(((name . "last"))))
                   (_ (error "Unexpected %s" endpoint)))))
-      (let ((branches (remoto-forge-branches remoto--codeberg "o" "r")))
+      (let ((branches (remoto--fetch-branches remoto--codeberg "o" "r")))
         (expect (length branches) :to-equal 51)
         (expect (car (last branches)) :to-equal "last"))))
 
@@ -3883,7 +3922,7 @@ using unauthenticated access until M-x remoto-reset-auth")
                              ("repos/o/r/tags?limit=50&page=2" (funcall names 51 100))
                              ("repos/o/r/tags?limit=50&page=3" (funcall names 101 120))
                              (_ (error "Unexpected %s" endpoint))))))
-        (let ((tags (remoto-forge-tags remoto--codeberg "o" "r")))
+        (let ((tags (remoto--fetch-tags remoto--codeberg "o" "r")))
           (expect (length tags) :to-equal 120)
           (expect (seq-take tags 2) :to-equal '("t1" "t2"))
           (expect (car (last tags)) :to-equal "t120"))
@@ -4117,8 +4156,8 @@ using unauthenticated access until M-x remoto-reset-auth")
 
 (describe "the web URLs of a Forgejo forge"
   (it "spells the kind of the ref in the path, from the cached refs"
-    (spy-on 'remoto-forge-branches :and-return-value '("main" "v12.0/forgejo"))
-    (spy-on 'remoto-forge-tags :and-return-value '("v1.0"))
+    (spy-on 'remoto-forge-refs :and-return-value '(("branch" "main" "v12.0/forgejo")
+                                                    ("tag" "v1.0")))
     (expect (remoto--forge-url 'codeberg 'blob "o" "r" "main" "go.mod" 5 10)
             :to-equal "https://codeberg.org/o/r/src/branch/main/go.mod#L5-L10")
     (expect (remoto--forge-url 'codeberg 'raw "o" "r" "v1.0" "go.mod")

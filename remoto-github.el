@@ -1303,13 +1303,11 @@ See `remoto-forge-content'."
 See `remoto-forge-resolve-ref'."
   (remoto--resolve-commit-sha forge owner repo ref))
 
-(cl-defmethod remoto-forge-branches ((forge remoto-github) owner repo)
-  "GitHub's `branches' for OWNER and REPO on FORGE, see `remoto-forge-branches'."
-  (remoto--fetch-branches forge owner repo))
-
-(cl-defmethod remoto-forge-tags ((forge remoto-github) owner repo)
-  "GitHub's `tags' for OWNER and REPO on FORGE, see `remoto-forge-tags'."
-  (remoto--fetch-tags forge owner repo))
+(cl-defmethod remoto-forge-refs ((forge remoto-github) owner repo)
+  "GitHub's `refs' for OWNER and REPO on FORGE: its branches, then its tags.
+See `remoto-forge-refs'."
+  `(("branch" . ,(remoto--fetch-branches forge owner repo))
+    ("tag" . ,(remoto--fetch-tags forge owner repo))))
 
 (cl-defmethod remoto-forge-forget ((forge remoto-github) &optional owner repo)
   "GitHub's `forget' on FORGE: the branches and tags of OWNER/REPO, or every cache.

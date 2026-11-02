@@ -202,13 +202,17 @@ A commit SHA on a forge: the link keeps naming the same tree when REF
 moves on."
   (remoto--unsupported forge 'resolve-ref))
 
-(cl-defgeneric remoto-forge-branches (forge _owner _repo)
-  "Return the branch names of OWNER/REPO on FORGE."
-  (remoto--unsupported forge 'branches))
+(cl-defgeneric remoto-forge-refs (forge _owner _repo)
+  "Return the refs of OWNER/REPO on FORGE as ((LABEL . NAMES) ...).
+The groups and names come in listing order.  LABEL is the kind of each
+of its NAMES, such as \"branch\" or \"tag\": the refs Dired and completion
+show it beside each name."
+  (remoto--unsupported forge 'refs))
 
-(cl-defgeneric remoto-forge-tags (forge _owner _repo)
-  "Return the tag names of OWNER/REPO on FORGE."
-  (remoto--unsupported forge 'tags))
+(defun remoto--ref-label (groups ref)
+  "Return the label of REF in GROUPS, as `remoto-forge-refs' gives them.
+The first group with REF among its names gives its label."
+  (car (seq-find (lambda (group) (member ref (cdr group))) groups)))
 
 (cl-defgeneric remoto-forge-forget (_forge &optional _owner _repo)
   "Drop what FORGE caches of OWNER/REPO, or everything it caches without them.
@@ -1825,35 +1829,25 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
                        cand))
                    repos)))
         ('refs
-         ;; Branch + tag completion at /github:OWNER/REPO@
+         ;; Ref completion at /github:OWNER/REPO@, each ref typed by its label
          (if (string-suffix-p ":" file)
              ;; Ref already selected (e.g. "main:") - exact match
              (list file)
-           (let* ((branches (while-no-input
-                              (remoto-forge-branches forge owner repo)))
-                  (tags (while-no-input
-                          (remoto-forge-tags forge owner repo))))
-             (when (or (listp branches) (listp tags))
-               (let ((branch-set (when (listp branches)
-                                   (mapcar (lambda (b)
-                                             (propertize (concat b ":")
-                                                         'remoto-ref-type "branch"
-                                                         'remoto-target
-                                                         (format "%s%s/%s@%s:/"
-                                                                 prefix owner repo b)))
-                                           branches)))
-                     (tag-set (when (listp tags)
-                                (mapcar (lambda (tg)
-                                          (propertize (concat tg ":")
-                                                      'remoto-ref-type "tag"
-                                                      'remoto-target
-                                                      (format "%s%s/%s@%s:/"
-                                                              prefix owner repo tg)))
-                                        tags))))
-                 (thread-last (append branch-set tag-set)
-                              (seq-filter (lambda (r)
-                                            (or (string-empty-p file)
-                                                (string-prefix-p file r))))))))))
+           (let ((groups (while-no-input (remoto-forge-refs forge owner repo))))
+             (when (listp groups)
+               (thread-last
+                 groups
+                 (seq-mapcat (lambda (group)
+                               (mapcar (lambda (ref)
+                                         (propertize (concat ref ":")
+                                                     'remoto-ref-type (car group)
+                                                     'remoto-target
+                                                     (format "%s%s/%s@%s:/"
+                                                             prefix owner repo ref)))
+                                       (cdr group))))
+                 (seq-filter (lambda (r)
+                               (or (string-empty-p file)
+                                   (string-prefix-p file r)))))))))
         ((and 'tree (guard (remoto-path-short parsed)))
          ;; File completion on default branch: /github:OWNER/REPO/[subdir/]
          ;; Uses lightweight Contents API (single call) instead of
@@ -1861,9 +1855,12 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
          (let* ((branch (condition-case nil
                             (while-no-input
                               (remoto-forge-default-ref forge owner repo))
-                          (user-error nil))))
-           (when (and (stringp branch) (not (equal branch t)))
+                          (user-error 'failed))))
+           ;; A string names the default ref; nil, a source without refs.
+           (when (or (null branch) (stringp branch))
              (let* ((subpath (substring (remoto-path-path parsed) 1))
+                    (root (format "%s%s/%s%s:/" prefix owner repo
+                                  (if branch (concat "@" branch) "")))
                     (children (while-no-input
                                 (remoto-forge-children
                                  forge owner repo branch subpath)))
@@ -1881,9 +1878,7 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
                                               names)))))
                (when filtered
                  (mapcar (lambda (name)
-                           (propertize name 'remoto-target
-                                       (format "%s%s/%s@%s:/%s%s"
-                                               prefix owner repo branch subpath name)))
+                           (propertize name 'remoto-target (concat root subpath name)))
                          filtered))))))
         ('topics
          ;; Issue/PR completion at /github:OWNER/REPO#
@@ -3630,14 +3625,13 @@ them for an empty QUERY; DIR is /github:OWNER/REPO@.  Signal a
               (forge (remoto-path-forge parsed))
               ((not (remoto--ref-p forge owner repo query))))
     (let* ((dir (format "%s%s/%s@" (remoto--path-prefix parsed) owner repo))
-           (branches (remoto-forge-branches forge owner repo))
+           (groups (remoto-forge-refs forge owner repo))
            (refs (seq-filter (lambda (ref) (remoto--words-match-p query ref))
-                             (seq-uniq (append branches
-                                               (remoto-forge-tags forge owner repo))))))
+                             (seq-uniq (seq-mapcat #'cdr groups)))))
       (dolist (ref refs)
         (remoto--remember (concat dir ref)
                           `((type . "tree")
-                            (note . ,(if (member ref branches) "branch" "tag")))))
+                            (note . ,(remoto--ref-label groups ref)))))
       (cons dir
             (or (remoto--sorted-names dir refs query)
                 (user-error "Remoto: no branch or tag of %s/%s%s" owner repo
@@ -3749,10 +3743,9 @@ components resolve first: a short form reads /github:OWNER/.. as a repo."
                                    (remoto-path-forge parsed) owner repo)))
                            (when b (puthash repo-id b remoto--default-branch-cache))
                            b))))
-        (if branch
-            (format "%s%s/%s@%s:/%s" (remoto--path-prefix parsed)
-                    owner repo branch subpath)
-          input)))
+        ;; A source without refs answers nil: its tree takes no selector.
+        (format "%s%s/%s%s:/%s" (remoto--path-prefix parsed) owner repo
+                (if branch (concat "@" branch) "") subpath)))
      ;; Partial canonical path: /github:owner/repo or /github:owner/repo@ref
      (root
       (remoto--canonical-path (remoto--resolve-ref root)))
