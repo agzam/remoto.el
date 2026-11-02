@@ -461,7 +461,24 @@ with that property intact and no live minibuffer."
   (it "opens an issue target via find-file"
     (spy-on 'find-file)
     (remoto-embark-open-issue "/github:o/r#42")
-    (expect 'find-file :to-have-been-called-with "/github:o/r#42")))
+    (expect 'find-file :to-have-been-called-with "/github:o/r#42"))
+
+  (it "reads a topic key by the topic-key of the forge"
+    (let ((remoto--forges (copy-alist remoto--forges))
+          (remoto--handler-regexp remoto--handler-regexp)
+          (file-name-handler-alist (copy-alist file-name-handler-alist)))
+      (remoto-register-forge
+       (remoto-forge-create :name 'fake :prefixes '("fake") :delimiters '(?@ ?#)
+                            :topic-key "\\`!?[0-9]+\\'"))
+      (expect (remoto--embark-issue-parts "/fake:o/r#!42")
+              :to-equal '(fake "o" "r" "!42"))
+      (expect (remoto--embark-classify "/fake:o/r#!42" 'remoto) :to-be 'remoto-issue)
+      (expect (remoto--embark-issue-parts "/github:o/r#!42") :to-be nil)
+      (expect (remoto--embark-issue-parts "/gh:o/r#42")
+              :to-equal '(github "o" "r" "42"))
+      (remoto-embark-copy-issue-ref "/fake:o/r#!42")
+      (expect (car kill-ring) :to-equal "o/r#!42")
+      (expect (remoto-embark-copy-issue-ref "/github:o/r#x") :to-throw 'user-error))))
 
 (describe "remoto-embark open-in-remoto (embark-url-map R)"
   (it "opens a forge URL as a remoto path"

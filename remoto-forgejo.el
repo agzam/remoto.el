@@ -200,8 +200,8 @@ repos/search without an id searches every account."
               (remoto--page-params forge count))
     (format "users/%s/repos?%s" owner (remoto--page-params forge count))))
 
-(cl-defmethod remoto-forge-search-topics ((forge remoto-forgejo) owner repo query)
-  "Forgejo's `search-topics' for OWNER, REPO and QUERY on FORGE.
+(cl-defmethod remoto--search-topics ((forge remoto-forgejo) owner repo query)
+  "Forgejo's topics of OWNER/REPO on FORGE that match QUERY.
 The issues endpoint of the repository searches in place."
   (condition-case nil
       (remoto--api forge (format "repos/%s/%s/issues?q=%s&state=all&type=all&%s"
@@ -259,8 +259,8 @@ They are listed at git/refs."
       (user-error "Remoto: could not resolve commit SHA for %s/%s@%s"
                   owner repo ref)))
 
-(cl-defmethod remoto-forge-reviews ((forge remoto-forgejo) owner repo number)
-  "Forgejo's `reviews' for OWNER, REPO and NUMBER on FORGE.
+(cl-defmethod remoto--reviews ((forge remoto-forgejo) owner repo number)
+  "Forgejo's reviews of pull request NUMBER of OWNER/REPO on FORGE.
 The states come in GitHub's spelling, review requests left out."
   (seq-keep (lambda (review)
               (pcase (alist-get 'state review)

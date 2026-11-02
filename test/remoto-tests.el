@@ -3560,7 +3560,8 @@ using unauthenticated access until M-x remoto-reset-auth")
                         (lambda () (remoto-forge-tree fake "o" "r" "main"))
                         (lambda () (remoto-forge-content fake "o" "r" "main" "a"))
                         (lambda () (remoto-forge-refs fake "o" "r"))
-                        (lambda () (remoto-forge-topics fake "o" "r"))
+                        (lambda () (remoto-forge-topics fake "o" "r" nil))
+                        (lambda () (remoto-forge-topic fake "o" "r" "1"))
                         (lambda () (remoto-forge-search-accounts fake "q" t))
                         (lambda () (remoto-forge-owner-listing fake "/fake:o/"))))
       (expect (condition-case err (funcall call) (remoto-unsupported (cadr err)))
@@ -3573,7 +3574,8 @@ using unauthenticated access until M-x remoto-reset-auth")
     (expect (remoto-forge-parse-url fake "https://x/o/r") :to-be nil)
     (expect (remoto-forge-parse-topic-url fake "https://x/o/r/pull/1") :to-be nil)
     (expect (remoto-forge-forget fake "o" "r") :to-be nil)
-    (expect (remoto-forge-forget fake) :to-be nil))
+    (expect (remoto-forge-forget fake) :to-be nil)
+    (expect (remoto-forge-topic-extra fake "o" "r" "1") :to-be nil))
 
   (it "forgets one repository's refs, or every cache of the forge"
     (let ((remoto--branches-cache (make-hash-table :test 'equal))
@@ -3613,7 +3615,8 @@ using unauthenticated access until M-x remoto-reset-auth")
     (spy-on 'remoto--resolve-commit-sha :and-return-value "abc")
     (expect (remoto-forge-refs remoto--github "o" "r")
             :to-equal '(("branch" "main") ("tag" "v1")))
-    (expect (remoto-forge-topic remoto--github "o" "r" "1") :to-equal '((number . 1)))
+    (expect (remoto-forge-topic remoto--github "o" "r" "1")
+            :to-equal '((key . "1") (kind . "issue") (number . 1)))
     (expect (remoto-forge-resolve-ref remoto--github "o" "r" "main") :to-equal "abc")
     (expect 'remoto--fetch-branches :to-have-been-called-with remoto--github "o" "r"))
 
@@ -3629,6 +3632,76 @@ using unauthenticated access until M-x remoto-reset-auth")
   (it "finds a registered forge by name"
     (expect (remoto--forge-named 'github) :to-be remoto--github)
     (expect (remoto--forge-named 'nope) :to-be nil)))
+
+(describe "the topics of the forge contract"
+  (it "lists the open topics for a nil or empty query"
+    (spy-on 'remoto--fetch-issues :and-return-value '(((number . 1))))
+    (spy-on 'remoto--search-issues)
+    (expect (remoto-forge-topics remoto--github "o" "r" nil)
+            :to-equal '(((key . "1") (kind . "issue") (number . 1))))
+    (expect (remoto-forge-topics remoto--github "o" "r" "")
+            :to-equal '(((key . "1") (kind . "issue") (number . 1))))
+    (expect (spy-calls-count 'remoto--fetch-issues) :to-equal 2)
+    (expect 'remoto--search-issues :not :to-have-been-called))
+
+  (it "searches for a text query"
+    (spy-on 'remoto--fetch-issues)
+    (spy-on 'remoto--search-issues :and-return-value
+            '(((number . 7) (pull_request (url . "x")))))
+    (expect (remoto-forge-topics remoto--github "o" "r" "fix")
+            :to-equal '(((key . "7") (kind . "pr") (number . 7)
+                         (pull_request (url . "x")))))
+    (expect 'remoto--search-issues :to-have-been-called-with
+            remoto--github "o" "r" "fix")
+    (expect 'remoto--fetch-issues :not :to-have-been-called))
+
+  (it "gives each item its key and kind"
+    (spy-on 'remoto--fetch-issues :and-return-value
+            '(((number . 42) (pull_request (url . "x"))) ((number . 3))))
+    (let ((items (remoto-forge-topics remoto--github "o" "r" nil)))
+      (expect (mapcar (lambda (i) (alist-get 'key i)) items) :to-equal '("42" "3"))
+      (expect (mapcar (lambda (i) (alist-get 'kind i)) items) :to-equal '("pr" "issue"))))
+
+  (it "answers nil for a key that is not a topic key, with no request"
+    (spy-on 'remoto--api)
+    (expect (remoto-forge-topic remoto--github "o" "r" "abc") :to-be nil)
+    (expect 'remoto--api :not :to-have-been-called))
+
+  (it "answers the pull request and its reviews as the extra of a pull request"
+    (spy-on 'remoto--api :and-call-fake
+            (lambda (_forge endpoint)
+              (pcase endpoint
+                ("repos/o/r/pulls/7" '((number . 7) (additions . 1)))
+                ("repos/o/r/pulls/7/reviews" '(((state . "APPROVED"))))
+                (_ (error "Unexpected %s" endpoint)))))
+    (expect (remoto-forge-topic-extra remoto--github "o" "r" "7")
+            :to-equal '((pull-request . ((number . 7) (additions . 1)))
+                        (reviews . (((state . "APPROVED")))))))
+
+  (it "answers nil as the extra of an issue"
+    (spy-on 'remoto--api :and-call-fake
+            (lambda (_forge endpoint)
+              (user-error "%s%s" remoto--not-found endpoint)))
+    (expect (remoto-forge-topic-extra remoto--github "o" "r" "3") :to-be nil))
+
+  (it "recognizes a topic by the topic-key of its forge"
+    (let ((remoto--forges (copy-alist remoto--forges))
+          (remoto--handler-regexp remoto--handler-regexp)
+          (file-name-handler-alist (copy-alist file-name-handler-alist)))
+      (spy-on 'remoto--api)
+      (remoto-register-forge
+       (remoto-forge-create :name 'fake :prefixes '("fake") :delimiters '(?@ ?#)
+                            :topic-key "\\`!?[0-9]+\\'"))
+      (expect (remoto--topic-path "/fake:o/r#!42") :to-equal '("/fake:o/r" . "!42"))
+      (expect (remoto--topic-path "/fake:o/r#x42") :to-be nil)
+      (expect (remoto--topic-path "/github:o/r#!42") :to-be nil)
+      (expect (file-exists-p "/fake:o/r#!42") :to-be t)
+      (expect 'remoto--api :not :to-have-been-called)))
+
+  (it "sorts topic keys as numbers where both are numbers"
+    (expect (remoto--topic-key< "9" "10") :to-be t)
+    (expect (remoto--topic-key< "10" "9") :to-be nil)
+    (expect (remoto--topic-key< "!1" "!2") :to-be t)))
 
 (describe "remoto--directory-level"
   (it "names the level of a directory"
@@ -4057,8 +4130,8 @@ using unauthenticated access until M-x remoto-reset-auth")
 
   (it "searches topics in the repository's own issues endpoint"
     (spy-on 'remoto--api :and-return-value '(((number . 7) (title . "rate limit"))))
-    (expect (remoto-forge-search-topics remoto--codeberg "o" "r" "rate limit")
-            :to-equal '(((number . 7) (title . "rate limit"))))
+    (expect (remoto-forge-topics remoto--codeberg "o" "r" "rate limit")
+            :to-equal '(((key . "7") (kind . "issue") (number . 7) (title . "rate limit"))))
     (expect 'remoto--api :to-have-been-called-with
             remoto--codeberg "repos/o/r/issues?q=rate%20limit&state=all&type=all&limit=30"))
 
@@ -4138,14 +4211,20 @@ using unauthenticated access until M-x remoto-reset-auth")
               remoto--github "repos/o/r/git/trees/release/2026.5.0?recursive=1")))
 
   (it "spells review states GitHub's way and drops review requests"
-    (spy-on 'remoto--api :and-return-value
-            '(((state . "APPROVED") (user . ((login . "a"))))
-              ((state . "REQUEST_CHANGES") (user . ((login . "b"))))
-              ((state . "COMMENT") (user . ((login . "c"))))
-              ((state . "REQUEST_REVIEW") (user . nil))))
-    (expect (mapcar (lambda (r) (alist-get 'state r))
-                    (remoto-forge-reviews remoto--codeberg "o" "r" "1"))
-            :to-equal '("APPROVED" "CHANGES_REQUESTED" "COMMENTED")))
+    (spy-on 'remoto--api :and-call-fake
+            (lambda (_forge endpoint)
+              (pcase endpoint
+                ("repos/o/r/pulls/1" '((number . 1) (merged . nil)))
+                ("repos/o/r/pulls/1/reviews"
+                 '(((state . "APPROVED") (user . ((login . "a"))))
+                   ((state . "REQUEST_CHANGES") (user . ((login . "b"))))
+                   ((state . "COMMENT") (user . ((login . "c"))))
+                   ((state . "REQUEST_REVIEW") (user . nil))))
+                (_ (error "Unexpected %s" endpoint)))))
+    (let ((extra (remoto-forge-topic-extra remoto--codeberg "o" "r" "1")))
+      (expect (alist-get 'pull-request extra) :to-equal '((number . 1) (merged . nil)))
+      (expect (mapcar (lambda (r) (alist-get 'state r)) (alist-get 'reviews extra))
+              :to-equal '("APPROVED" "CHANGES_REQUESTED" "COMMENTED"))))
 
   (it "reads the organizations of the token by their username"
     (spy-on 'remoto--api :and-return-value

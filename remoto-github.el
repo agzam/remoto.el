@@ -1320,33 +1320,46 @@ See `remoto-forge-forget'."
                          remoto--dir-contents-cache))
       (clrhash cache))))
 
-(cl-defmethod remoto-forge-topics ((forge remoto-github) owner repo)
-  "GitHub's `topics' for OWNER and REPO on FORGE, see `remoto-forge-topics'."
-  (remoto--fetch-issues forge owner repo))
+(defun remoto--topic-item (issue)
+  "Return ISSUE, an issue or pull request alist, with its `key' and `kind'."
+  (when issue
+    `((key . ,(format "%s" (alist-get 'number issue)))
+      (kind . ,(if (alist-get 'pull_request issue) "pr" "issue"))
+      ,@issue)))
 
-(cl-defmethod remoto-forge-search-topics ((forge remoto-github) owner repo query)
-  "GitHub's `search-topics' for OWNER, REPO and QUERY on FORGE.
-See `remoto-forge-search-topics'."
+(cl-defgeneric remoto--search-topics (forge owner repo query)
+  "Return the issues and pull requests of OWNER/REPO on FORGE matching QUERY."
   (remoto--search-issues forge owner repo query))
 
-(cl-defmethod remoto-forge-topic ((forge remoto-github) owner repo number)
-  "GitHub's `topic' for OWNER, REPO and NUMBER on FORGE, see `remoto-forge-topic'."
-  (remoto--fetch-issue forge owner repo number))
+(cl-defmethod remoto-forge-topics ((forge remoto-github) owner repo query)
+  "GitHub's `topics' for OWNER, REPO and QUERY on FORGE.
+See `remoto-forge-topics'."
+  (mapcar #'remoto--topic-item
+          (if (or (null query) (string-empty-p query))
+              (remoto--fetch-issues forge owner repo)
+            (remoto--search-topics forge owner repo query))))
 
-(cl-defmethod remoto-forge-topic-comments ((forge remoto-github) owner repo number)
-  "GitHub's `topic-comments' for OWNER, REPO and NUMBER on FORGE.
+(cl-defmethod remoto-forge-topic ((forge remoto-github) owner repo key)
+  "GitHub's `topic' for OWNER, REPO and KEY on FORGE, see `remoto-forge-topic'."
+  (when (remoto--topic-key-p forge key)
+    (remoto--topic-item (remoto--fetch-issue forge owner repo key))))
+
+(cl-defmethod remoto-forge-topic-comments ((forge remoto-github) owner repo key)
+  "GitHub's `topic-comments' for OWNER, REPO and KEY on FORGE.
 See `remoto-forge-topic-comments'."
-  (remoto--fetch-issue-comments forge owner repo number))
+  (remoto--fetch-issue-comments forge owner repo key))
 
-(cl-defmethod remoto-forge-pull-request ((forge remoto-github) owner repo number)
-  "GitHub's `pull-request' for OWNER, REPO and NUMBER on FORGE.
-See `remoto-forge-pull-request'."
-  (remoto--fetch-pull-request forge owner repo number))
+(cl-defgeneric remoto--reviews (forge owner repo key)
+  "Return the reviews of pull request KEY of OWNER/REPO on FORGE."
+  (remoto--fetch-reviews forge owner repo key))
 
-(cl-defmethod remoto-forge-reviews ((forge remoto-github) owner repo number)
-  "GitHub's `reviews' for OWNER, REPO and NUMBER on FORGE.
-See `remoto-forge-reviews'."
-  (remoto--fetch-reviews forge owner repo number))
+(cl-defmethod remoto-forge-topic-extra ((forge remoto-github) owner repo key)
+  "GitHub's `topic-extra' for OWNER, REPO and KEY on FORGE: a pull request's.
+The pull request and its reviews; nil for an issue.  See
+`remoto-forge-topic-extra'."
+  (when-let* ((pr (remoto--fetch-pull-request forge owner repo key)))
+    `((pull-request . ,pr)
+      (reviews . ,(remoto--reviews forge owner repo key)))))
 
 (cl-defmethod remoto-forge-entry-notes ((forge remoto-github) owner repo ref dir names)
   "GitHub's `entry-notes' for OWNER, REPO, REF, DIR and NAMES on FORGE.

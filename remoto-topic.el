@@ -264,11 +264,11 @@ Detects whether NUMBER is a PR and renders accordingly."
                  (issue (remoto-forge-topic forge owner repo number)))
       (unless issue
         (user-error "Remoto: not found: %s/%s#%s" owner repo number))
-      (let* ((is-pr (and (alist-get 'pull_request issue) t))
-             (pr-data (when is-pr
-                        (remoto-forge-pull-request forge owner repo number)))
-             (reviews (when is-pr
-                        (remoto-forge-reviews forge owner repo number)))
+      (let* ((is-pr (equal (alist-get 'kind issue) "pr"))
+             (extra (when is-pr
+                      (remoto-forge-topic-extra forge owner repo number)))
+             (pr-data (alist-get 'pull-request extra))
+             (reviews (alist-get 'reviews extra))
              (comments (remoto-forge-topic-comments forge owner repo number))
              (display-data (or pr-data issue))
              (buf-name (format "*remoto: %s%s/%s#%s*"

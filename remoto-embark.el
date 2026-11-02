@@ -163,7 +163,7 @@ non-strings and unrecognized strings are returned as-is."
 
 (defun remoto--embark-classify (path fallback &optional ref)
   "Return the Embark target type for the remoto PATH string, else FALLBACK.
-Classifies by shape: an issue/PR (a trailing `#N'), an account/owner
+Classifies by shape: an issue/PR (a trailing `#KEY'), an account/owner
 \(`/FORGE:OWNER'), otherwise the repo, directory, or file type from the
 context layer.  A bare `@REF' root is the branch or tag only when REF is
 non-nil, which a branch or tag completion candidate and a line of a Dired
@@ -173,7 +173,7 @@ normalized with `remoto--embark-canonicalize' first, so the shorthand and
 file-name forms classify like the canonical one."
   (let ((path (remoto--embark-canonicalize path)))
     (cond
-     ((string-match-p (rx "#" (+ digit) eos) path) 'remoto-issue)
+     ((remoto--embark-issue-parts path) 'remoto-issue)
      ((and ref (string-match-p (rx "@" (+ nonl) ":/" eos) path)) 'remoto-branch)
      ((remoto--embark-owner-parts path) 'remoto-owner)
      (t (let ((ctx (remoto--embark-context-or-nil path)))
@@ -307,28 +307,20 @@ This routes to the remoto-topic display via `find-file', which needs
 (defun remoto-embark-copy-issue-ref (target)
   "Copy the OWNER/REPO#N reference for the remoto issue/PR TARGET."
   (interactive "sRemoto issue: ")
-  (if (string-match (rx "/" (+ (not (in ":"))) ":"
-                        (group (+ (not (in "/")))) "/"
-                        (group (+ (not (in "#")))) "#" (group (+ digit)))
-                    target)
-      (remoto--kill-url (format "%s/%s#%s"
-                                (match-string 1 target)
-                                (match-string 2 target)
-                                (match-string 3 target)))
+  (if-let* ((parts (remoto--embark-issue-parts target)))
+      (remoto--kill-url (apply #'format "%s/%s#%s" (cdr parts)))
     (user-error "Remoto: not an issue target: %s" target)))
 
 (defun remoto--embark-issue-parts (target)
-  "Return (FORGE OWNER REPO NUMBER) for an issue TARGET like /github:O/R#N."
-  (when (string-match (rx "/" (+ (not (in ":"))) ":"
-                          (group (+ (not (in "/")))) "/"
-                          (group (+ (not (in "#")))) "#" (group (+ digit)))
-                      target)
-    ;; Bind the match strings before `remoto--forge-type', which runs its
-    ;; own `string-match' and would otherwise clobber the match data.
-    (let ((owner (match-string 1 target))
-          (repo (match-string 2 target))
-          (number (match-string 3 target)))
-      (list (remoto--forge-type target) owner repo number))))
+  "Return (FORGE OWNER REPO KEY) for an issue TARGET like /github:O/R#KEY.
+KEY matches the `topic-key' of the forge; FORGE is the forge's name."
+  (when-let* ((parsed (remoto--parse (remoto--normalize-shorthand target)))
+              ((eq (remoto-path-level parsed) 'topics))
+              (key (remoto-path-query parsed))
+              (forge (remoto-path-forge parsed))
+              ((remoto--topic-key-p forge key)))
+    (list (remoto-forge-name forge) (remoto-path-owner parsed)
+          (remoto-path-repo parsed) key)))
 
 (defun remoto-embark-browse-issue (target)
   "Open the web page for the remoto issue/PR TARGET in a browser."

@@ -58,8 +58,8 @@
   "A source of repositories that remoto paths name.
 PREFIXES are the path prefixes without slash or colon, the first one
 canonical; DELIMITERS the characters after OWNER/REPO it supports;
-TITLE the name that messages show, such as \"GitHub\"."
-  name prefixes host delimiters repo-end title)
+TITLE the name messages show; TOPIC-KEY the regexp a topic key matches."
+  name prefixes host delimiters repo-end title (topic-key "\\`[0-9]+\\'"))
 
 (cl-defstruct (remoto-github (:include remoto-forge (title "GitHub"))
                              (:constructor remoto-github-create)
@@ -219,31 +219,37 @@ The first group with REF among its names gives its label."
 `remoto-refresh' asks for one repository, `remoto-unload-function' for all."
   nil)
 
-(cl-defgeneric remoto-forge-topics (forge _owner _repo)
-  "Return the open topics of OWNER/REPO on FORGE, newest first.
-Each is an alist with `number', `title', `state' and, for a pull
-request, `pull_request'."
+(cl-defgeneric remoto-forge-topics (forge _owner _repo _query)
+  "Return the topics of OWNER/REPO on FORGE that match QUERY.
+A nil or empty QUERY lists the open topics, newest first.  Each item is
+the source's alist plus `key', the text after #, and `kind', \"issue\"
+or \"pr\"."
   (remoto--unsupported forge 'topics))
 
-(cl-defgeneric remoto-forge-search-topics (forge _owner _repo _query)
-  "Return the topics of OWNER/REPO on FORGE that match QUERY."
-  (remoto--unsupported forge 'search-topics))
-
-(cl-defgeneric remoto-forge-topic (forge _owner _repo _number)
-  "Return the topic NUMBER of OWNER/REPO on FORGE, or nil."
+(cl-defgeneric remoto-forge-topic (forge _owner _repo _key)
+  "Return the topic KEY of OWNER/REPO on FORGE, or nil when KEY names none.
+The item has `key' and `kind', as `remoto-forge-topics' gives them."
   (remoto--unsupported forge 'topic))
 
-(cl-defgeneric remoto-forge-topic-comments (forge _owner _repo _number)
-  "Return the comments of the topic NUMBER of OWNER/REPO on FORGE."
+(cl-defgeneric remoto-forge-topic-comments (forge _owner _repo _key)
+  "Return the comments of the topic KEY of OWNER/REPO on FORGE."
   (remoto--unsupported forge 'topic-comments))
 
-(cl-defgeneric remoto-forge-pull-request (_forge _owner _repo _number)
-  "Return what FORGE knows of pull request NUMBER of OWNER/REPO beyond the topic."
+(cl-defgeneric remoto-forge-topic-extra (_forge _owner _repo _key)
+  "Return the extra data of topic KEY of OWNER/REPO on FORGE for its buffer.
+Extra is what the buffer shows past title, body, state and comments.
+A pull request on GitHub: ((pull-request . DATA) (reviews . REVIEWS))."
   nil)
 
-(cl-defgeneric remoto-forge-reviews (_forge _owner _repo _number)
-  "Return the reviews of pull request NUMBER of OWNER/REPO on FORGE."
-  nil)
+(defun remoto--topic-key-p (forge key)
+  "Return non-nil when KEY has the shape of a topic key of FORGE."
+  (string-match-p (remoto-forge-topic-key forge) key))
+
+(defun remoto--topic-key< (a b)
+  "Return non-nil when topic key A comes before B, as numbers where both are."
+  (if (and (string-match-p "\\`[0-9]+\\'" a) (string-match-p "\\`[0-9]+\\'" b))
+      (< (string-to-number a) (string-to-number b))
+    (string< a b)))
 
 (cl-defgeneric remoto-forge-entry-notes (_forge _owner _repo _ref _dir _names)
   "Return (NAME . NOTE) for the NAMES under DIR of OWNER/REPO at REF on FORGE.
@@ -1537,7 +1543,7 @@ A bare account or repository name exists once a cached listing holds it."
       ('refs (and (not (string-empty-p query))
                   (remoto--entry-for filename) t))
       ;; /github:OWNER/REPO#NUM opens on its shape alone.
-      ('topics (and (string-match-p (rx bos (+ digit) eos) query) t))
+      ('topics (and (remoto--topic-key-p (remoto-path-forge parsed) query) t))
       ;; A short form is openable as Dired on the default branch.  So is the
       ;; repository root at a ref: answering it from the tree would cost one
       ;; recursive tree per ref, because completion asks this of every
@@ -1888,44 +1894,44 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
                   ;; Empty query: show top open issues
                   ((string-empty-p query)
                    (while-no-input
-                     (remoto-forge-topics forge owner repo)))
-                  ;; Numeric query: direct fetch + filter cached
-                  ((string-match-p (rx bos (+ digit) eos) query)
+                     (remoto-forge-topics forge owner repo nil)))
+                  ;; A topic key: direct fetch + filter cached
+                  ((remoto--topic-key-p forge query)
                    (let* ((cached (while-no-input
-                                    (remoto-forge-topics forge owner repo)))
+                                    (remoto-forge-topics forge owner repo nil)))
                           (direct (while-no-input
                                     (remoto-forge-topic forge owner repo query)))
                           (results (if (listp cached) cached nil)))
                      (if (consp direct)
                          (cl-remove-duplicates
                           (cons direct results)
-                          :key (lambda (i) (alist-get 'number i)))
+                          :key (lambda (i) (alist-get 'key i)) :test #'equal)
                        results)))
                   ;; Text query: search
                   (t
                    (while-no-input
-                     (remoto-forge-search-topics forge owner repo query))))))
+                     (remoto-forge-topics forge owner repo query))))))
            (when (listp issues)
              (let* ((candidates
                      (mapcar (lambda (i)
-                               (let* ((num (number-to-string (alist-get 'number i)))
-                                      (is-pr (and (alist-get 'pull_request i) t))
+                               (let* ((key (alist-get 'key i))
+                                      (is-pr (equal (alist-get 'kind i) "pr"))
                                       (title (or (alist-get 'title i) ""))
                                       (state (or (alist-get 'state i) "")))
-                                 (propertize num
+                                 (propertize key
                                              'remoto-topic-pr is-pr
                                              'remoto-topic-title title
                                              'remoto-topic-state state
                                              'remoto-target
                                              (format "%s%s/%s#%s"
-                                                     prefix owner repo num))))
+                                                     prefix owner repo key))))
                              issues))
                     (filtered
                      (if (or (string-empty-p file)
-                             (string-match-p (rx bos (+ digit) eos) file))
+                             (remoto--topic-key-p forge file))
                          (seq-filter (lambda (n) (string-prefix-p file n)) candidates)
                        candidates)))
-               ;; Sort: PRs first, then issues; within each group by number descending
+               ;; Sort: PRs first, then issues; within each group newest key first
                (sort filtered
                      (lambda (a b)
                        (let ((a-pr (get-text-property 0 'remoto-topic-pr a))
@@ -1933,7 +1939,7 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
                          (cond
                           ((and a-pr (not b-pr)) t)
                           ((and (not a-pr) b-pr) nil)
-                          (t (< (string-to-number b) (string-to-number a)))))))))))
+                          (t (remoto--topic-key< b a))))))))))
         ('tree
          ;; Canonical path: entries of the tree at the ref
          (let* ((ref (remoto-path-ref parsed))
@@ -2099,14 +2105,14 @@ wildcard and completion matches its own name."
   (if (string-prefix-p "/" path) (substring path 1) path))
 
 (defun remoto--topic-path (filename)
-  "Return (REPO-PATH . NUMBER) when FILENAME names an issue or pull request.
-The /github:OWNER/REPO#NUM shape belongs to `remoto-topic-display', not
+  "Return (REPO-PATH . KEY) when FILENAME names an issue or pull request.
+The /github:OWNER/REPO#KEY shape belongs to `remoto-topic-display', not
 to any file operation, so both the `find-file' advice and the handler
 recognize it here."
   (when-let* ((parsed (remoto--parse filename))
               ((eq (remoto-path-level parsed) 'topics))
               (query (remoto-path-query parsed))
-              ((string-match-p (rx bos (+ digit) eos) query)))
+              ((remoto--topic-key-p (remoto-path-forge parsed) query)))
     (cons (format "%s%s/%s" (remoto--path-prefix parsed)
                   (remoto-path-owner parsed) (remoto-path-repo parsed))
           query)))
