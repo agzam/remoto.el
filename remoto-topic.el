@@ -262,7 +262,7 @@ Detects whether NUMBER is a PR and renders accordingly."
     (pcase-let* ((`(,forge ,owner ,repo) parsed)
                  (issue (remoto-forge-topic forge owner repo number)))
       (unless issue
-        (user-error "Remoto: not found: %s/%s#%s" owner repo number))
+        (user-error "Remoto: not found: %s#%s" (remoto--repo-name owner repo) number))
       (let* ((is-pr (equal (alist-get 'kind issue) "pr"))
              (extra (when is-pr
                       (remoto-forge-topic-extra forge owner repo number)))
@@ -270,8 +270,8 @@ Detects whether NUMBER is a PR and renders accordingly."
              (reviews (alist-get 'reviews extra))
              (comments (remoto-forge-topic-comments forge owner repo number))
              (display-data (or pr-data issue))
-             (buf-name (format "*remoto: %s%s/%s#%s*"
-                               (remoto--prefix forge) owner repo number))
+             (buf-name (format "*remoto: %s#%s*"
+                               (remoto--repo-id forge owner repo) number))
              (buf (get-buffer-create buf-name)))
         (with-current-buffer buf
           (let ((inhibit-read-only t))

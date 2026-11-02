@@ -155,8 +155,9 @@ non-strings and unrecognized strings are returned as-is."
        ((null parsed) path)
        ((and (eq (remoto-path-level parsed) 'tree)
              (remoto-path-short parsed))
-        (format "%s%s/%s:%s" (remoto--path-prefix parsed) (remoto-path-owner parsed)
-                (remoto-path-repo parsed) (remoto-path-path parsed)))
+        (concat (remoto--repo-id (remoto-path-forge parsed) (remoto-path-owner parsed)
+                                 (remoto-path-repo parsed))
+                ":" (remoto-path-path parsed)))
        ((remoto--repo-root parsed)
         (remoto--canonical-path (remoto--repo-root parsed)))
        (t path)))))
@@ -307,7 +308,8 @@ This routes to the remoto-topic display via `find-file', which needs
   "Copy the OWNER/REPO#N reference for the remoto issue/PR TARGET."
   (interactive "sRemoto issue: ")
   (if-let* ((parts (remoto--embark-issue-parts target)))
-      (remoto--kill-url (apply #'format "%s/%s#%s" (cdr parts)))
+      (pcase-let ((`(,_forge ,owner ,repo ,key) parts))
+        (remoto--kill-url (concat (remoto--repo-name owner repo) "#" key)))
     (user-error "Remoto: not an issue target: %s" target)))
 
 (defun remoto--embark-issue-parts (target)

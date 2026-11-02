@@ -93,6 +93,26 @@ START and END are the lines, see `remoto-forge-url'."
      (remoto-test--install-mock-tree)
      ,@body))
 
+(defun remoto-test--answer-topics (&optional open found issue)
+  "Answer the issue endpoints of `remoto--api' with OPEN, FOUND and ISSUE.
+OPEN is the open topics, FOUND the search hits and ISSUE the topic by
+number, or a function of the endpoint that answers it.  Any other endpoint
+fails; the issue cache is emptied, so no answer outlives its spec."
+  (clrhash remoto--issues-cache)
+  (spy-on 'remoto--api :and-call-fake
+          (lambda (_forge endpoint)
+            (cond
+             ((string-match-p "/issues\\?state=open" endpoint) open)
+             ((string-prefix-p "search/issues?" endpoint) `((items . ,found)))
+             ((string-match-p "/issues/[0-9]+\\'" endpoint)
+              (if (functionp issue) (funcall issue endpoint) issue))
+             (t (user-error "Remoto: no fake answer for %s" endpoint))))))
+
+(defun remoto-test--api-calls (regexp)
+  "Return the endpoints matching REGEXP that `remoto--api' was asked for."
+  (seq-filter (lambda (endpoint) (string-match-p regexp endpoint))
+              (mapcar #'cadr (spy-calls-all-args 'remoto--api))))
+
 ;;; JSON reader
 
 (describe "remoto--json-reader"
@@ -160,22 +180,22 @@ START and END are the lines, see `remoto-forge-url'."
 
 ;;; User input parsing
 
-(describe "remoto--parse-input"
+(describe "remoto--url-path of a GitHub URL, remote or shorthand"
   (it "parses https://github.com/owner/repo"
-    (let ((p (remoto--parse-input "https://github.com/torvalds/linux")))
+    (let ((p (remoto--url-path "https://github.com/torvalds/linux")))
       (expect (remoto-path-owner p) :to-equal "torvalds")
       (expect (remoto-path-repo p) :to-equal "linux")
       (expect (remoto-path-path p) :to-equal "/")))
 
   (it "parses tree URL with ref and path"
     (spy-on 'remoto--matching-refs :and-return-value '("master"))
-    (let ((p (remoto--parse-input "https://github.com/torvalds/linux/tree/master/kernel")))
+    (let ((p (remoto--url-path "https://github.com/torvalds/linux/tree/master/kernel")))
       (expect (remoto-path-ref p) :to-equal "master")
       (expect (remoto-path-path p) :to-equal "/kernel")))
 
   (it "parses blob URL and strips fragment"
     (spy-on 'remoto--matching-refs :and-return-value '("master"))
-    (let ((p (remoto--parse-input "https://github.com/torvalds/linux/blob/master/README#L10-L20")))
+    (let ((p (remoto--url-path "https://github.com/torvalds/linux/blob/master/README#L10-L20")))
       (expect (remoto-path-ref p) :to-equal "master")
       (expect (remoto-path-path p) :to-equal "/README")))
 
@@ -183,7 +203,7 @@ START and END are the lines, see `remoto-forge-url'."
   ;; parser asks for the refs that start with the first segment.
   (it "asks the branches once when the first segment is a branch"
     (spy-on 'remoto--matching-refs :and-return-value '("main"))
-    (let ((p (remoto--parse-input "https://github.com/o/r/blob/main/src/x.el")))
+    (let ((p (remoto--url-path "https://github.com/o/r/blob/main/src/x.el")))
       (expect (remoto-path-ref p) :to-equal "main")
       (expect (remoto-path-path p) :to-equal "/src/x.el")
       (expect 'remoto--matching-refs :to-have-been-called-times 1)
@@ -191,7 +211,7 @@ START and END are the lines, see `remoto-forge-url'."
 
   (it "asks nothing for a tree URL that ends at the ref"
     (spy-on 'remoto--matching-refs)
-    (let ((p (remoto--parse-input "https://github.com/o/r/tree/main")))
+    (let ((p (remoto--url-path "https://github.com/o/r/tree/main")))
       (expect (remoto-path-ref p) :to-equal "main")
       (expect (remoto-path-path p) :to-equal "/")
       (expect 'remoto--matching-refs :not :to-have-been-called)))
@@ -199,10 +219,10 @@ START and END are the lines, see `remoto-forge-url'."
   (it "takes the longest branch that starts the URL as the ref"
     (spy-on 'remoto--matching-refs :and-return-value
             '("release/2024.11.1" "release/2026.5.0" "release_obsolete/2024.11.1"))
-    (let ((p (remoto--parse-input "https://github.com/o/r/blob/release/2026.5.0/src/x.el")))
+    (let ((p (remoto--url-path "https://github.com/o/r/blob/release/2026.5.0/src/x.el")))
       (expect (remoto-path-ref p) :to-equal "release/2026.5.0")
       (expect (remoto-path-path p) :to-equal "/src/x.el"))
-    (let ((p (remoto--parse-input "https://github.com/o/r/tree/release/2026.5.0")))
+    (let ((p (remoto--url-path "https://github.com/o/r/tree/release/2026.5.0")))
       (expect (remoto-path-ref p) :to-equal "release/2026.5.0")
       (expect (remoto-path-path p) :to-equal "/")))
 
@@ -210,13 +230,13 @@ START and END are the lines, see `remoto-forge-url'."
     (spy-on 'remoto--matching-refs :and-call-fake
             (lambda (_forge _owner _repo kind _prefix)
               (and (equal kind "tags") '("v1/beta"))))
-    (let ((p (remoto--parse-input "https://github.com/o/r/blob/v1/beta/x.el")))
+    (let ((p (remoto--url-path "https://github.com/o/r/blob/v1/beta/x.el")))
       (expect (remoto-path-ref p) :to-equal "v1/beta")
       (expect (remoto-path-path p) :to-equal "/x.el")))
 
   (it "asks nothing for a full commit SHA, the form a permalink has"
     (spy-on 'remoto--matching-refs)
-    (let ((p (remoto--parse-input
+    (let ((p (remoto--url-path
               "https://github.com/o/r/blob/ced1c937d35201e2750b95910defa8e83c0891e2/README.org#L1")))
       (expect (remoto-path-ref p) :to-equal "ced1c937d35201e2750b95910defa8e83c0891e2")
       (expect (remoto-path-path p) :to-equal "/README.org")
@@ -224,20 +244,20 @@ START and END are the lines, see `remoto-forge-url'."
 
   (it "drops the query string and the fragment the browser adds"
     (spy-on 'remoto--matching-refs :and-return-value '("main"))
-    (let ((p (remoto--parse-input "https://github.com/agzam/remoto.el?tab=readme-ov-file")))
+    (let ((p (remoto--url-path "https://github.com/agzam/remoto.el?tab=readme-ov-file")))
       (expect (list (remoto-path-repo p) (remoto-path-ref p) (remoto-path-path p))
               :to-equal '("remoto.el" nil "/")))
-    (let ((p (remoto--parse-input "https://github.com/o/r/blob/main/README.org?plain=1#L5")))
+    (let ((p (remoto--url-path "https://github.com/o/r/blob/main/README.org?plain=1#L5")))
       (expect (list (remoto-path-ref p) (remoto-path-path p))
               :to-equal '("main" "/README.org")))
-    (let ((p (remoto--parse-input "https://github.com/o/r/tree/main?x=1")))
+    (let ((p (remoto--url-path "https://github.com/o/r/tree/main?x=1")))
       (expect (list (remoto-path-ref p) (remoto-path-path p)) :to-equal '("main" "/")))
-    (let ((p (remoto--parse-input "https://github.com/o/r/tree/main/test?x=1")))
+    (let ((p (remoto--url-path "https://github.com/o/r/tree/main/test?x=1")))
       (expect (list (remoto-path-ref p) (remoto-path-path p)) :to-equal '("main" "/test"))))
 
   (it "decodes the percent escapes of the ref and the path"
     (spy-on 'remoto--matching-refs :and-return-value '("feat+x"))
-    (let ((p (remoto--parse-input "https://github.com/o/r/blob/feat%2Bx/docs/caf%C3%A9%20au%20lait.md")))
+    (let ((p (remoto--url-path "https://github.com/o/r/blob/feat%2Bx/docs/caf%C3%A9%20au%20lait.md")))
       (expect (list (remoto-path-ref p) (remoto-path-path p))
               :to-equal '("feat+x" "/docs/café au lait.md"))
       (expect 'remoto--matching-refs :to-have-been-called-with remoto--github "o" "r" "heads" "feat+x")))
@@ -251,49 +271,49 @@ START and END are the lines, see `remoto-forge-url'."
                                      ("main" "test")))
         (setq refs (list ref))
         (dolist (kind '(blob tree))
-          (let ((p (remoto--parse-input
+          (let ((p (remoto--url-path
                     (remoto-test--url 'github kind "o" "r" ref path nil nil))))
             (expect (list (remoto-path-ref p) (remoto-path-path p))
                     :to-equal (list ref (concat "/" path))))))))
 
   (it "keeps the first segment, a commit or an unknown name, when no ref starts the URL"
     (spy-on 'remoto--matching-refs :and-return-value nil)
-    (let ((p (remoto--parse-input "https://github.com/o/r/blob/ceaf310/test/x.el")))
+    (let ((p (remoto--url-path "https://github.com/o/r/blob/ceaf310/test/x.el")))
       (expect (remoto-path-ref p) :to-equal "ceaf310")
       (expect (remoto-path-path p) :to-equal "/test/x.el")
       (expect 'remoto--matching-refs :to-have-been-called-with remoto--github "o" "r" "tags" "ceaf310")))
 
   (it "parses git@github.com:owner/repo.git"
-    (let ((p (remoto--parse-input "git@github.com:torvalds/linux.git")))
+    (let ((p (remoto--url-path "git@github.com:torvalds/linux.git")))
       (expect (remoto-path-owner p) :to-equal "torvalds")
       (expect (remoto-path-repo p) :to-equal "linux")))
 
   (it "parses git remote with dotted repo name"
-    (let ((p (remoto--parse-input "git@github.com:agzam/remoto.el.git")))
+    (let ((p (remoto--url-path "git@github.com:agzam/remoto.el.git")))
       (expect (remoto-path-owner p) :to-equal "agzam")
       (expect (remoto-path-repo p) :to-equal "remoto.el"))
-    (let ((p (remoto--parse-input "git@github.com:agzam/remoto.el")))
+    (let ((p (remoto--url-path "git@github.com:agzam/remoto.el")))
       (expect (remoto-path-owner p) :to-equal "agzam")
       (expect (remoto-path-repo p) :to-equal "remoto.el")))
 
   (it "strips .git from an https clone URL"
     ;; The Code button on github.com hands out this form.
-    (let ((p (remoto--parse-input "https://github.com/agzam/remoto.el.git")))
+    (let ((p (remoto--url-path "https://github.com/agzam/remoto.el.git")))
       (expect (remoto-path-owner p) :to-equal "agzam")
       (expect (remoto-path-repo p) :to-equal "remoto.el")
       (expect (remoto-path-path p) :to-equal "/")))
 
   (it "parses owner/repo shorthand"
-    (let ((p (remoto--parse-input "torvalds/linux")))
+    (let ((p (remoto--url-path "torvalds/linux")))
       (expect (remoto-path-owner p) :to-equal "torvalds")
       (expect (remoto-path-repo p) :to-equal "linux")))
 
   (it "parses owner/repo@ref shorthand"
-    (let ((p (remoto--parse-input "torvalds/linux@v6.5")))
+    (let ((p (remoto--url-path "torvalds/linux@v6.5")))
       (expect (remoto-path-ref p) :to-equal "v6.5")))
 
   (it "signals on unparseable input"
-    (expect (remoto--parse-input "not a repo") :to-throw 'user-error)))
+    (expect (remoto--url-path "not a repo") :to-throw 'user-error)))
 
 ;;; GitHub input detection
 
@@ -670,7 +690,7 @@ START and END are the lines, see `remoto-forge-url'."
 
   (it "insert-file-contents does not move point"
     (remoto-test-with-cache
-      (spy-on 'remoto--fetch-file-content
+      (spy-on 'remoto-forge-content
               :and-return-value "line one\nline two\nline three\n")
       (with-temp-buffer
         (let ((pt (point)))
@@ -685,7 +705,7 @@ START and END are the lines, see `remoto-forge-url'."
     (remoto-test-with-cache
       (puthash "logo.png" '((type . "blob") (size . 31) (sha . "ggg") (mode . "100644"))
                (gethash "/github:testowner/testrepo@main" remoto--tree-cache))
-      (spy-on 'remoto--fetch-file-content :and-return-value remoto-test--png-bytes)
+      (spy-on 'remoto-forge-content :and-return-value remoto-test--png-bytes)
       (with-temp-buffer
         (let* ((result (insert-file-contents "/github:testowner/testrepo@main:/logo.png" t))
                (data (encode-coding-string (buffer-string) buffer-file-coding-system)))
@@ -696,7 +716,7 @@ START and END are the lines, see `remoto-forge-url'."
 
   (it "insert-file-contents decodes a UTF-8 text file"
     (remoto-test-with-cache
-      (spy-on 'remoto--fetch-file-content
+      (spy-on 'remoto-forge-content
               :and-return-value (encode-coding-string "# Título\n— ünïcödé\n" 'utf-8))
       (with-temp-buffer
         (let ((result (insert-file-contents "/github:testowner/testrepo@main:/README.md" t)))
@@ -706,7 +726,7 @@ START and END are the lines, see `remoto-forge-url'."
 
   (it "file-local-copy writes a binary file byte for byte"
     (remoto-test-with-cache
-      (spy-on 'remoto--fetch-file-content :and-return-value remoto-test--png-bytes)
+      (spy-on 'remoto-forge-content :and-return-value remoto-test--png-bytes)
       (let ((copy (file-local-copy "/github:testowner/testrepo@main:/logo.png")))
         (unwind-protect
             (expect (with-temp-buffer
@@ -752,8 +772,8 @@ START and END are the lines, see `remoto-forge-url'."
         (puthash "README.md" '((type . "blob") (size . 500) (sha . "abc") (mode . "100644"))
                  tag-tree)
         (puthash "/github:testowner/testrepo@v1.0" tag-tree remoto--tree-cache))
-      (spy-on 'remoto--fetch-file-content
-              :and-call-fake (lambda (_forge _owner _repo _path ref)
+      (spy-on 'remoto-forge-content
+              :and-call-fake (lambda (_forge _owner _repo ref _path)
                                (format "README at %s\n" ref)))
       (let* ((main (find-file-noselect "/github:testowner/testrepo@main:/README.md"))
              (tag (find-file-noselect "/github:testowner/testrepo@v1.0:/README.md")))
@@ -1350,7 +1370,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
 (describe "copy-file"
   (it "copies remoto file to local destination"
     (remoto-test-with-cache
-      (spy-on 'remoto--fetch-file-content :and-return-value "mock file content")
+      (spy-on 'remoto-forge-content :and-return-value "mock file content")
       (let ((dest (make-temp-file "remoto-copy-test-")))
         (unwind-protect
             (progn
@@ -1363,7 +1383,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
 
   (it "copies from a short name, on the default branch"
     (remoto-test-with-cache
-      (spy-on 'remoto--fetch-file-content :and-return-value "mock file content")
+      (spy-on 'remoto-forge-content :and-return-value "mock file content")
       (let ((dest (make-temp-file "remoto-copy-test-")))
         (unwind-protect
             (progn
@@ -1372,8 +1392,8 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
                         (insert-file-contents dest)
                         (buffer-string))
                       :to-equal "mock file content")
-              (expect (cdr (spy-calls-args-for 'remoto--fetch-file-content 0))
-                      :to-equal '("testowner" "testrepo" "src/main.el" "main")))
+              (expect (cdr (spy-calls-args-for 'remoto-forge-content 0))
+                      :to-equal '("testowner" "testrepo" "main" "src/main.el")))
           (delete-file dest)))))
 
   (it "gives a new copy the git mode of its file, masked by the default modes"
@@ -1381,7 +1401,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
     (remoto-test-with-cache
       (puthash "link" '((type . "blob") (size . 6) (sha . "lll") (mode . "120000"))
                (gethash "/github:testowner/testrepo@main" remoto--tree-cache))
-      (spy-on 'remoto--fetch-file-content :and-return-value "data\n")
+      (spy-on 'remoto-forge-content :and-return-value "data\n")
       (let ((dir (make-temp-file "remoto-copy-modes-" t)))
         (unwind-protect
             (pcase-dolist (`(,umask-modes ,path ,modes)
@@ -1399,7 +1419,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
 
   (it "copies the git mode unmasked under PRESERVE-PERMISSIONS"
     (remoto-test-with-cache
-      (spy-on 'remoto--fetch-file-content :and-return-value "data\n")
+      (spy-on 'remoto-forge-content :and-return-value "data\n")
       (let ((dir (make-temp-file "remoto-copy-modes-" t)))
         (unwind-protect
             (let ((dest (expand-file-name "run" dir)))
@@ -1410,7 +1430,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
 
   (it "keeps the modes of a file it overwrites"
     (remoto-test-with-cache
-      (spy-on 'remoto--fetch-file-content :and-return-value "data\n")
+      (spy-on 'remoto-forge-content :and-return-value "data\n")
       (let ((dest (make-temp-file "remoto-copy-over-")))
         (unwind-protect
             (progn
@@ -2034,8 +2054,8 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
       (expect (alist-get 'group-function (cdr meta)) :to-be-truthy)))
 
   (it "returns issue completions for # delimiter"
-    (spy-on 'remoto--fetch-issues :and-return-value
-            '(((number . 42) (title . "Fix bug") (state . "open"))))
+    (remoto-test--answer-topics
+     '(((number . 42) (title . "Fix bug") (state . "open"))))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
       (let ((result (remoto--repo-completion-table "foo/bar#" nil t)))
         (expect (length result) :to-equal 1)
@@ -2057,9 +2077,9 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
       (expect (car result) :to-match "@develop")))
 
   (it "issue completions carry text properties"
-    (spy-on 'remoto--fetch-issues :and-return-value
-            '(((number . 99) (title . "Important PR") (state . "open")
-               (pull_request (url . "http://...")))))
+    (remoto-test--answer-topics
+     '(((number . 99) (title . "Important PR") (state . "open")
+        (pull_request (url . "http://...")))))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
       (let* ((result (remoto--repo-completion-table "foo/bar#" nil t))
              (c (car result)))
@@ -2067,8 +2087,8 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
         (expect (get-text-property 0 'remoto-topic-title c) :to-equal "Important PR"))))
 
   (it "returns file completions for / delimiter"
-    (spy-on 'remoto--default-branch :and-return-value "main")
-    (spy-on 'remoto--fetch-dir-children-light :and-return-value
+    (spy-on 'remoto-forge-default-ref :and-return-value "main")
+    (spy-on 'remoto-forge-children :and-return-value
             '(("README.md" . ((type . "blob") (size . 500)))
               ("src" . ((type . "tree") (size . 0)))))
     (let ((result (remoto--repo-completion-table "foo/bar/" nil t)))
@@ -2225,7 +2245,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
     (let ((remoto--default-branch-cache (make-hash-table :test 'equal))
           (remoto--tree-cache (make-hash-table :test 'equal)))
       (puthash "/github:torvalds/linux" "master" remoto--default-branch-cache)
-      (spy-on 'remoto--fetch-tree :and-return-value (make-hash-table :test 'equal))
+      (spy-on 'remoto-forge-tree :and-return-value (make-hash-table :test 'equal))
       (spy-on 'dired)
       (spy-on 'remoto--tree-entry :and-return-value '((type . "tree")))
       (remoto-browse "torvalds/linux")
@@ -3812,6 +3832,28 @@ Turn `global-remoto-mode' back to its state before BODY."
       (expect (remoto--repo-id (remoto--canonical-forge "/one:") nil "react")
               :to-equal "/one:react")))
 
+  (it "writes a one-name repository without a slash in messages and buffer names"
+    (require 'remoto-topic)
+    (remoto-test-with-registry
+      (let ((one (remoto-test-latest-create :name 'one :prefixes '("one") :locator 1
+                                            :delimiters '(?@ ?#))))
+        (remoto-register-forge one)
+        (expect (remoto--repo-name nil "react") :to-equal "react")
+        (expect (remoto--repo-name "o" "r") :to-equal "o/r")
+        (spy-on 'remoto-forge-tree :and-call-fake
+                (lambda (&rest _) (user-error "Git Repository is empty")))
+        (spy-on 'message)
+        (remoto--forge-tree one nil "react" "latest")
+        (expect 'message :to-have-been-called-with "Remoto: %s is empty" "react")
+        (spy-on 'remoto-forge-topic :and-return-value
+                '((key . "1") (kind . "issue") (number . 1) (title . "T") (body . "b")))
+        (spy-on 'remoto-forge-topic-comments :and-return-value nil)
+        (spy-on 'pop-to-buffer)
+        (let ((buffer (remoto-topic-display "1" "/one:react")))
+          (unwind-protect
+              (expect (buffer-name buffer) :to-equal "*remoto: /one:react#1*")
+            (kill-buffer buffer))))))
+
   (it "takes the segments a function counts, a scope and a name or one name"
     (remoto-test-with-registry
       (let ((scoped (remoto-test-latest-create
@@ -4113,8 +4155,12 @@ At the level of OWNER, or at the root without OWNER."
   (it "dispatches the GitHub methods to the GitHub functions"
     (spy-on 'remoto--fetch-branches :and-return-value '("main"))
     (spy-on 'remoto--fetch-tags :and-return-value '("v1"))
-    (spy-on 'remoto--fetch-issue :and-return-value '((number . 1)))
-    (spy-on 'remoto--resolve-commit-sha :and-return-value "abc")
+    (spy-on 'remoto--api :and-call-fake
+            (lambda (_forge endpoint)
+              (pcase endpoint
+                ("repos/o/r/issues/1" '((number . 1)))
+                ("repos/o/r/commits/main" '((sha . "abc")))
+                (_ (error "Unexpected %s" endpoint)))))
     (expect (remoto-forge-refs remoto--github "o" "r")
             :to-equal '(("branch" "main") ("tag" "v1")))
     (expect (remoto-forge-topic remoto--github "o" "r" "1")
@@ -4188,29 +4234,27 @@ At the level of OWNER, or at the root without OWNER."
 
 (describe "the topics of the forge contract"
   (it "lists the open topics for a nil or empty query"
-    (spy-on 'remoto--fetch-issues :and-return-value '(((number . 1))))
-    (spy-on 'remoto--search-issues)
+    (remoto-test--answer-topics '(((number . 1))))
     (expect (remoto-forge-topics remoto--github "o" "r" nil)
             :to-equal '(((key . "1") (kind . "issue") (number . 1))))
+    (clrhash remoto--issues-cache)
     (expect (remoto-forge-topics remoto--github "o" "r" "")
             :to-equal '(((key . "1") (kind . "issue") (number . 1))))
-    (expect (spy-calls-count 'remoto--fetch-issues) :to-equal 2)
-    (expect 'remoto--search-issues :not :to-have-been-called))
+    (expect (length (remoto-test--api-calls "/issues\\?state=open")) :to-equal 2)
+    (expect (remoto-test--api-calls "\\`search/") :to-be nil))
 
   (it "searches for a text query"
-    (spy-on 'remoto--fetch-issues)
-    (spy-on 'remoto--search-issues :and-return-value
-            '(((number . 7) (pull_request (url . "x")))))
+    (remoto-test--answer-topics nil '(((number . 7) (pull_request (url . "x")))))
     (expect (remoto-forge-topics remoto--github "o" "r" "fix")
             :to-equal '(((key . "7") (kind . "pr") (number . 7)
                          (pull_request (url . "x")))))
-    (expect 'remoto--search-issues :to-have-been-called-with
-            remoto--github "o" "r" "fix")
-    (expect 'remoto--fetch-issues :not :to-have-been-called))
+    (expect 'remoto--api :to-have-been-called-with
+            remoto--github "search/issues?q=fix+repo:o/r&per_page=30")
+    (expect (remoto-test--api-calls "/issues\\?state=open") :to-be nil))
 
   (it "gives each item its key and kind"
-    (spy-on 'remoto--fetch-issues :and-return-value
-            '(((number . 42) (pull_request (url . "x"))) ((number . 3))))
+    (remoto-test--answer-topics
+     '(((number . 42) (pull_request (url . "x"))) ((number . 3))))
     (let ((items (remoto-forge-topics remoto--github "o" "r" nil)))
       (expect (mapcar (lambda (i) (alist-get 'key i)) items) :to-equal '("42" "3"))
       (expect (mapcar (lambda (i) (alist-get 'kind i)) items) :to-equal '("pr" "issue"))))
@@ -5869,7 +5913,7 @@ Return the buffer that RET leaves current."
 
   (it "visits a one-letter directory and a symlink"
     (remoto-test-with-listing "-alF"
-      (spy-on 'remoto--fetch-file-content :and-return-value "README.md")
+      (spy-on 'remoto-forge-content :and-return-value "README.md")
       (with-current-buffer (remoto-test--visit-entry
                             "/github:testowner/testrepo@main:/" "a")
         (expect dired-directory :to-equal "/github:testowner/testrepo@main:/a/"))
@@ -7055,14 +7099,14 @@ Returns the full path after completion, or INPUT if no completion."
 
 ;;; ---- Lightweight directory fetch ----
 
-(describe "remoto--fetch-dir-children-light"
+(describe "remoto-forge-children of GitHub"
   (it "fetches top-level directory contents"
     (spy-on 'remoto--api :and-return-value
             '(((name . "README.md") (type . "file") (size . 500) (sha . "aaa"))
               ((name . "src") (type . "dir") (size . 0) (sha . "bbb"))
               ((name . "Makefile") (type . "file") (size . 200) (sha . "ccc"))))
     (let ((remoto--dir-contents-cache (make-hash-table :test 'equal)))
-      (let ((children (remoto--fetch-dir-children-light remoto--github "owner" "repo" "main" "")))
+      (let ((children (remoto-forge-children remoto--github "owner" "repo" "main" "")))
         (expect (length children) :to-equal 3)
         (expect (assoc "README.md" children) :to-be-truthy)
         (expect (assoc "src" children) :to-be-truthy)
@@ -7075,7 +7119,7 @@ Returns the full path after completion, or INPUT if no completion."
                                            (type . "file") (size . 100) (sha . "x")))))
       (spy-on 'remoto--api :and-return-value many-entries)
       (let ((remoto--dir-contents-cache (make-hash-table :test 'equal)))
-        (let ((children (remoto--fetch-dir-children-light remoto--github "owner" "repo" "main" "")))
+        (let ((children (remoto-forge-children remoto--github "owner" "repo" "main" "")))
           (expect (length children) :to-equal 20)))))
 
   (it "caches results"
@@ -7085,15 +7129,15 @@ Returns the full path after completion, or INPUT if no completion."
               (lambda (_forge _endpoint)
                 (setq call-count (1+ call-count))
                 '(((name . "a.el") (type . "file") (size . 10) (sha . "x")))))
-      (remoto--fetch-dir-children-light remoto--github "owner" "repo" "main" "")
-      (remoto--fetch-dir-children-light remoto--github "owner" "repo" "main" "")
+      (remoto-forge-children remoto--github "owner" "repo" "main" "")
+      (remoto-forge-children remoto--github "owner" "repo" "main" "")
       (expect call-count :to-equal 1)))
 
   (it "returns nil on API error"
     (spy-on 'remoto--api :and-call-fake
             (lambda (_forge _) (user-error "not found")))
     (let ((remoto--dir-contents-cache (make-hash-table :test 'equal)))
-      (expect (remoto--fetch-dir-children-light remoto--github "owner" "repo" "main" "")
+      (expect (remoto-forge-children remoto--github "owner" "repo" "main" "")
               :to-be nil)))
 
   (it "fetches subdirectory contents"
@@ -7101,7 +7145,7 @@ Returns the full path after completion, or INPUT if no completion."
             '(((name . "main.el") (type . "file") (size . 1000) (sha . "aa"))
               ((name . "utils.el") (type . "file") (size . 500) (sha . "bb"))))
     (let ((remoto--dir-contents-cache (make-hash-table :test 'equal)))
-      (let ((children (remoto--fetch-dir-children-light remoto--github "owner" "repo" "main" "src")))
+      (let ((children (remoto-forge-children remoto--github "owner" "repo" "main" "src")))
         (expect (length children) :to-equal 2)
         (expect (assoc "main.el" children) :to-be-truthy)))))
 
@@ -7110,8 +7154,8 @@ Returns the full path after completion, or INPUT if no completion."
 (describe "completion at files-default level"
   (it "lists root files for /github:owner/repo/"
     (remoto-test-with-cache
-      (spy-on 'remoto--default-branch :and-return-value "main")
-      (spy-on 'remoto--fetch-dir-children-light :and-return-value
+      (spy-on 'remoto-forge-default-ref :and-return-value "main")
+      (spy-on 'remoto-forge-children :and-return-value
               '(("README.md" (type . "blob") (size . 500))
                 ("src" (type . "tree") (size . 0))
                 ("bin" (type . "tree") (size . 0))))
@@ -7123,8 +7167,8 @@ Returns the full path after completion, or INPUT if no completion."
 
   (it "filters root files by substring match"
     (remoto-test-with-cache
-      (spy-on 'remoto--default-branch :and-return-value "main")
-      (spy-on 'remoto--fetch-dir-children-light :and-return-value
+      (spy-on 'remoto-forge-default-ref :and-return-value "main")
+      (spy-on 'remoto-forge-children :and-return-value
               '(("README.md" (type . "blob") (size . 500))
                 ("src" (type . "tree") (size . 0))
                 ("bin" (type . "tree") (size . 0))))
@@ -7135,8 +7179,8 @@ Returns the full path after completion, or INPUT if no completion."
 
   (it "uses substring matching, not prefix"
     (remoto-test-with-cache
-      (spy-on 'remoto--default-branch :and-return-value "main")
-      (spy-on 'remoto--fetch-dir-children-light :and-return-value
+      (spy-on 'remoto-forge-default-ref :and-return-value "main")
+      (spy-on 'remoto-forge-children :and-return-value
               '(("README.md" (type . "blob") (size . 500))
                 ("CONTRIBUTING.md" (type . "blob") (size . 200))))
       (let ((completions (remoto--handle-file-name-all-completions
@@ -7146,8 +7190,8 @@ Returns the full path after completion, or INPUT if no completion."
 
   (it "lists subdirectory files"
     (remoto-test-with-cache
-      (spy-on 'remoto--default-branch :and-return-value "main")
-      (spy-on 'remoto--fetch-dir-children-light :and-return-value
+      (spy-on 'remoto-forge-default-ref :and-return-value "main")
+      (spy-on 'remoto-forge-children :and-return-value
               '(("main.el" (type . "blob") (size . 1000))
                 ("utils.el" (type . "blob") (size . 500))))
       (let ((completions (remoto--handle-file-name-all-completions
@@ -7157,23 +7201,23 @@ Returns the full path after completion, or INPUT if no completion."
 
   (it "returns empty for nonexistent subdirectory"
     (remoto-test-with-cache
-      (spy-on 'remoto--default-branch :and-return-value "main")
-      (spy-on 'remoto--fetch-dir-children-light :and-return-value nil)
+      (spy-on 'remoto-forge-default-ref :and-return-value "main")
+      (spy-on 'remoto-forge-children :and-return-value nil)
       (let ((completions (remoto--handle-file-name-all-completions
                           "" "/github:testowner/testrepo/nope/")))
         (expect completions :to-be nil))))
 
   (it "returns empty when default branch resolution fails"
     (remoto-test-with-cache
-      (spy-on 'remoto--default-branch :and-return-value nil)
+      (spy-on 'remoto-forge-default-ref :and-return-value nil)
       (let ((completions (remoto--handle-file-name-all-completions
                           "" "/github:testowner/testrepo/")))
         (expect completions :to-be nil))))
 
   (it "does not call remoto--ensure-tree (no recursive fetch)"
     (remoto-test-with-cache
-      (spy-on 'remoto--default-branch :and-return-value "main")
-      (spy-on 'remoto--fetch-dir-children-light :and-return-value
+      (spy-on 'remoto-forge-default-ref :and-return-value "main")
+      (spy-on 'remoto-forge-children :and-return-value
               '(("a.el" (type . "blob") (size . 10))))
       (spy-on 'remoto--ensure-tree)
       (remoto--handle-file-name-all-completions "" "/github:testowner/testrepo/")
@@ -7183,9 +7227,9 @@ Returns the full path after completion, or INPUT if no completion."
 
 (describe "completion at issues level"
   (it "lists issues/PRs for /github:owner/repo#"
-    (spy-on 'remoto--fetch-issues :and-return-value
-            '(((number . 42) (title . "Fix parser bug") (pull_request))
-              ((number . 10) (title . "Add docs"))))
+    (remoto-test--answer-topics
+     '(((number . 42) (title . "Fix parser bug") (pull_request))
+       ((number . 10) (title . "Add docs"))))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
       (let ((completions (remoto--handle-file-name-all-completions
                           "" "/github:foobar/zapato#")))
@@ -7193,9 +7237,8 @@ Returns the full path after completion, or INPUT if no completion."
         (expect (member "10" completions) :to-be-truthy))))
 
   (it "filters issues by text search"
-    (spy-on 'remoto--search-issues :and-return-value
-            '(((number . 42) (title . "Fix parser bug") (pull_request))
-              ((number . 99) (title . "Fix typo"))))
+    (remoto-test--answer-topics nil '(((number . 42) (title . "Fix parser bug") (pull_request))
+                                      ((number . 99) (title . "Fix typo"))))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
       (let ((completions (remoto--handle-file-name-all-completions
                           "fix" "/github:foobar/zapato#")))
@@ -7203,10 +7246,8 @@ Returns the full path after completion, or INPUT if no completion."
         (expect (member "99" completions) :to-be-truthy))))
 
   (it "returns direct issue for numeric query"
-    (spy-on 'remoto--fetch-issue :and-return-value
-            '((number . 42) (title . "Fix parser bug")))
-    (spy-on 'remoto--fetch-issues :and-return-value
-            '(((number . 1) (title . "First issue"))))
+    (remoto-test--answer-topics '(((number . 1) (title . "First issue")))
+                                nil '((number . 42) (title . "Fix parser bug")))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
       (let ((completions (remoto--handle-file-name-all-completions
                           "42" "/github:foobar/zapato#")))
@@ -7217,10 +7258,9 @@ Returns the full path after completion, or INPUT if no completion."
   (it "keeps the cached issues when a key interrupts the direct fetch"
     ;; Buttercup records no call that exits by `throw', hence the flag.
     (let ((interrupted nil))
-      (spy-on 'remoto--fetch-issue :and-call-fake
-              (lambda (&rest _) (setq interrupted t) (throw throw-on-input t)))
-      (spy-on 'remoto--fetch-issues :and-return-value
-              '(((number . 1) (title . "First issue"))))
+      (remoto-test--answer-topics
+       '(((number . 1) (title . "First issue"))) nil
+       (lambda (_endpoint) (setq interrupted t) (throw throw-on-input t)))
       (let ((remoto--search-cache (make-hash-table :test 'equal)))
         (let ((completions (remoto--handle-file-name-all-completions
                             "1" "/github:foobar/zapato#")))
@@ -7228,7 +7268,7 @@ Returns the full path after completion, or INPUT if no completion."
           (expect (member "1" completions) :to-be-truthy)))))
 
   (it "returns empty when repo returns 404"
-    (spy-on 'remoto--fetch-issues :and-return-value nil)
+    (remoto-test--answer-topics nil)
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
       (let ((completions (remoto--handle-file-name-all-completions
                           "" "/github:foobar/nonexistent#")))
@@ -7283,8 +7323,8 @@ Returns the full path after completion, or INPUT if no completion."
               :to-equal '("testrepo/"))
 
       ;; Step 3: list files on default branch (uses lightweight Contents API)
-      (spy-on 'remoto--default-branch :and-return-value "main")
-      (spy-on 'remoto--fetch-dir-children-light :and-return-value
+      (spy-on 'remoto-forge-default-ref :and-return-value "main")
+      (spy-on 'remoto-forge-children :and-return-value
               '(("README.md" . ((type . "blob") (size . 500)))
                 ("src" . ((type . "tree") (size . 0)))))
       (let ((completions (remoto-test--complete "/github:testowner/testrepo/")))
@@ -7292,9 +7332,9 @@ Returns the full path after completion, or INPUT if no completion."
         (expect (member "src/" completions) :to-be-truthy))))
 
   (it "owner -> repo -> # -> issues"
-    (spy-on 'remoto--fetch-issues :and-return-value
-            '(((number . 5) (title . "Bug report") (pull_request))
-              ((number . 3) (title . "Feature request"))))
+    (remoto-test--answer-topics
+     '(((number . 5) (title . "Bug report") (pull_request))
+       ((number . 3) (title . "Feature request"))))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
       (let ((completions (remoto-test--complete "/github:foobar/zapato#")))
         (expect (member "5" completions) :to-be-truthy)
@@ -7329,7 +7369,7 @@ Returns the full path after completion, or INPUT if no completion."
 
   ;; Nonexistent resources
   (it "returns nil for nonexistent repo issues"
-    (spy-on 'remoto--fetch-issues :and-return-value nil)
+    (remoto-test--answer-topics nil)
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
       (expect (remoto-test--complete "/github:foo/nonexistent#") :to-be nil)))
 
@@ -7343,7 +7383,7 @@ Returns the full path after completion, or INPUT if no completion."
   ;; Mixed delimiters - first after repo wins
   (it "/github:foo/bar/@ treats @ as literal file char"
     (remoto-test-with-cache
-      (spy-on 'remoto--default-branch :and-return-value "main")
+      (spy-on 'remoto-forge-default-ref :and-return-value "main")
       ;; In files-default mode, @ is a literal filename character
       (let ((dir (remoto--handle-file-name-directory "/github:testowner/testrepo/@")))
         (expect dir :to-equal "/github:testowner/testrepo/"))))
@@ -7364,16 +7404,16 @@ Returns the full path after completion, or INPUT if no completion."
 
   ;; Case insensitivity
   (it "handles uppercase owner/repo"
-    (spy-on 'remoto--fetch-issues :and-return-value
-            '(((number . 1) (title . "Test"))))
+    (remoto-test--answer-topics
+     '(((number . 1) (title . "Test"))))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
       (let ((completions (remoto-test--complete "/github:FOO/BAR#")))
         (expect (member "1" completions) :to-be-truthy))))
 
   ;; Repo with dots
   (it "handles repo with dots in issues mode"
-    (spy-on 'remoto--fetch-issues :and-return-value
-            '(((number . 7) (title . "Setup"))))
+    (remoto-test--answer-topics
+     '(((number . 7) (title . "Setup"))))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
       (let ((completions (remoto-test--complete "/github:agzam/remoto.el#")))
         (expect (member "7" completions) :to-be-truthy))))
@@ -7408,9 +7448,7 @@ Returns the full path after completion, or INPUT if no completion."
             :to-equal "/github:foo/bar@main:"))
 
   (it "completes unique issue number"
-    (spy-on 'remoto--fetch-issues :and-return-value
-            '(((number . 42) (title . "Bug"))))
-    (spy-on 'remoto--fetch-issue :and-return-value nil)
+    (remoto-test--answer-topics '(((number . 42) (title . "Bug"))))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
       (expect (remoto-test--tab-complete "/github:foo/bar#4")
               :to-equal "/github:foo/bar#42")))
@@ -7460,7 +7498,7 @@ Returns the full path after completion, or INPUT if no completion."
 
 (describe "error handling during completion"
   (it "API error during issue listing returns nil"
-    (spy-on 'remoto--fetch-issues :and-return-value nil)
+    (remoto-test--answer-topics nil)
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
       (let ((completions (remoto--handle-file-name-all-completions
                           "" "/github:foo/bar#")))
@@ -7475,7 +7513,7 @@ Returns the full path after completion, or INPUT if no completion."
 
   (it "API error during files-default listing returns nil"
     (remoto-test-with-cache
-      (spy-on 'remoto--default-branch :and-return-value nil)
+      (spy-on 'remoto-forge-default-ref :and-return-value nil)
       (let ((completions (remoto--handle-file-name-all-completions
                           "" "/github:foo/bar/")))
         (expect completions :to-be nil)))))
@@ -7588,15 +7626,15 @@ Returns the full path after completion, or INPUT if no completion."
               (lambda (_forge _endpoint)
                 (setq call-count (1+ call-count))
                 '(((number . 1) (title . "Bug")))))
-      (remoto--fetch-issues remoto--github "foo" "bar")
-      (remoto--fetch-issues remoto--github "foo" "bar")
+      (remoto-forge-topics remoto--github "foo" "bar" nil)
+      (remoto-forge-topics remoto--github "foo" "bar" nil)
       (expect call-count :to-equal 1)))
 
   (it "returns nil on API error"
     (spy-on 'remoto--api :and-call-fake
             (lambda (_forge _) (user-error "not found")))
     (let ((remoto--issues-cache (make-hash-table :test 'equal)))
-      (expect (remoto--fetch-issues remoto--github "foo" "nonexistent") :to-be nil))))
+      (expect (remoto-forge-topics remoto--github "foo" "nonexistent" nil) :to-be nil))))
 
 ;;; ---- find-file-noselect intercepts #NUM paths ----
 
@@ -7706,7 +7744,7 @@ Returns the full path after completion, or INPUT if no completion."
       (spy-on 'message)
       (let ((tree (remoto--forge-tree remoto--codeberg "o" "r" "main")))
         (expect (sort (hash-table-keys tree) #'string<) :to-equal '("" "/"))
-        (expect 'message :to-have-been-called-with "Remoto: %s/%s is empty" "o" "r"))))
+        (expect 'message :to-have-been-called-with "Remoto: %s is empty" "o/r"))))
   (it "gives an empty tree for GitHub's 409, without another request"
     (spy-on 'remoto-forge-tree :and-call-fake
             (lambda (&rest _)
@@ -7816,11 +7854,11 @@ Returns the full path after completion, or INPUT if no completion."
 
 (describe "PR ordering in issue completion"
   (it "sorts PRs before issues"
-    (spy-on 'remoto--fetch-issues
-            :and-return-value '(((number . 10) (title . "Bug") (state . "open"))
-                                ((number . 20) (title . "Feature PR") (state . "open")
-                                 (pull_request (url . "http://...")))
-                                ((number . 5) (title . "Another issue") (state . "open"))))
+    (remoto-test--answer-topics
+     '(((number . 10) (title . "Bug") (state . "open"))
+       ((number . 20) (title . "Feature PR") (state . "open")
+        (pull_request (url . "http://...")))
+       ((number . 5) (title . "Another issue") (state . "open"))))
     (let ((remoto--search-cache (make-hash-table :test 'equal)))
       (let ((result (remoto--handle-file-name-all-completions "" "/github:foo/bar#")))
         ;; First should be the PR (number 20)
@@ -7895,8 +7933,8 @@ Returns the full path after completion, or INPUT if no completion."
           (remoto--default-branch-cache (make-hash-table :test 'equal)))
       (puthash "/github:testowner/testrepo" "main" remoto--default-branch-cache)
       (remoto-test--install-mock-tree)
-      (let ((result (remoto--fetch-file-commits remoto--github "testowner" "testrepo" "main" ""
-                                                '("README.md" "src/"))))
+      (let ((result (remoto-forge-entry-notes remoto--github "testowner" "testrepo" "main" ""
+                                              '("README.md" "src/"))))
         (expect (alist-get "README.md" result nil nil #'equal)
                 :to-equal "Initial commit")
         (expect (alist-get "src/" result nil nil #'equal)
@@ -7937,15 +7975,15 @@ Returns the full path after completion, or INPUT if no completion."
               (lambda (_forge _endpoint)
                 (cl-incf call-count)
                 '(((commit (message . "cached msg"))))))
-      (remoto--fetch-file-commits remoto--github "o" "r" "main" "" '("f.el"))
-      (remoto--fetch-file-commits remoto--github "o" "r" "main" "" '("f.el"))
+      (remoto-forge-entry-notes remoto--github "o" "r" "main" "" '("f.el"))
+      (remoto-forge-entry-notes remoto--github "o" "r" "main" "" '("f.el"))
       (expect call-count :to-equal 1)))
 
   (it "catches generic errors from API (not just user-error)"
     (let ((remoto--file-commits-cache (make-hash-table :test 'equal)))
       (spy-on 'remoto--api :and-call-fake
               (lambda (_forge _endpoint) (error "Connection refused")))
-      (expect (remoto--fetch-file-commits remoto--github "o" "r" "main" "" '("f.el"))
+      (expect (remoto-forge-entry-notes remoto--github "o" "r" "main" "" '("f.el"))
               :to-be nil))))
 
 ;;; Async completion infrastructure
@@ -8162,17 +8200,17 @@ Returns the full path after completion, or INPUT if no completion."
         (expect (alist-get 'default_branch data) :to-equal "main"))))
 
   ;; Segment 2: default branch extraction
-  (it "remoto--default-branch returns a non-empty string"
+  (it "remoto-forge-default-ref returns a non-empty string"
     (remoto-test-with-pipeline
-      (let ((branch (remoto--default-branch remoto--github "acme" "widgets")))
+      (let ((branch (remoto-forge-default-ref remoto--github "acme" "widgets")))
         (expect branch :to-be-truthy)
         (expect (stringp branch) :to-be-truthy)
         (expect (string-empty-p branch) :not :to-be-truthy))))
 
   ;; Segment 3: tree fetch builds a populated hash table
-  (it "remoto--fetch-tree returns a hash table with entries"
+  (it "remoto-forge-tree returns a hash table with entries"
     (remoto-test-with-pipeline
-      (let ((tree (remoto--fetch-tree remoto--github "acme" "widgets" "main")))
+      (let ((tree (remoto-forge-tree remoto--github "acme" "widgets" "main")))
         (expect tree :to-be-truthy)
         (expect (hash-table-p tree) :to-be-truthy)
         ;; Must have more than just root entries
@@ -8364,7 +8402,7 @@ Returns the full path after completion, or INPUT if no completion."
               (lambda (_resource &optional _params &rest args)
                 (setq captured-auth (plist-get args :auth))
                 '((default_branch . "main"))))
-      (remoto--default-branch remoto--github "acme" "widgets")
+      (remoto-forge-default-ref remoto--github "acme" "widgets")
       (expect captured-auth :to-equal "ghp_private_token")))
 
   (it "uses auth=none when auth-failed is t"
@@ -8376,7 +8414,7 @@ Returns the full path after completion, or INPUT if no completion."
               (lambda (_resource &optional _params &rest args)
                 (setq captured-auth (plist-get args :auth))
                 '((default_branch . "main"))))
-      (remoto--default-branch remoto--github "acme" "widgets")
+      (remoto-forge-default-ref remoto--github "acme" "widgets")
       (expect captured-auth :to-equal 'none)))
 
   (it "signals user-error for private repo with auth=none (404)"
@@ -9217,8 +9255,8 @@ three functions the indicator asks are answered by a temp buffer."
       (expect cat :to-be 'remoto-file)))
 
   (it "attaches remoto-target on files-default candidates"
-    (spy-on 'remoto--default-branch :and-return-value "main")
-    (spy-on 'remoto--fetch-dir-children-light :and-return-value
+    (spy-on 'remoto-forge-default-ref :and-return-value "main")
+    (spy-on 'remoto-forge-children :and-return-value
             '(("README.md" . ((type . "blob"))) ("src" . ((type . "tree")))))
     (let* ((cands (remoto--handle-file-name-all-completions "" "/github:o/r/"))
            (readme (car cands))
@@ -9228,7 +9266,7 @@ three functions the indicator asks are answered by a temp buffer."
 
   (it "attaches remoto-target on canonical-path candidates"
     (remoto-test-with-cache
-      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (spy-on 'remoto-forge-entry-notes :and-return-value nil)
       (let* ((cands (remoto--handle-file-name-all-completions
                      "" "/github:testowner/testrepo@main:/"))
              (readme (seq-find (lambda (c) (equal c "README.md")) cands))
@@ -9299,8 +9337,8 @@ three functions the indicator asks are answered by a temp buffer."
       (expect cat :to-be 'remoto-issue)))
 
   (it "attaches remoto-target on issue candidates"
-    (spy-on 'remoto--fetch-issues :and-return-value
-            '(((number . 42) (title . "Bug") (state . "open"))))
+    (remoto-test--answer-topics
+     '(((number . 42) (title . "Bug") (state . "open"))))
     (let* ((cands (remoto--handle-file-name-all-completions "" "/github:o/r#"))
            (first (car cands))
            (rt (get-text-property 0 'remoto-target first)))
@@ -9365,8 +9403,8 @@ three functions the indicator asks are answered by a temp buffer."
       (expect desc :to-equal "kernel")))
 
   (it "attaches remoto-target on issue-mode candidates"
-    (spy-on 'remoto--fetch-issues :and-return-value
-            '(((number . 42) (title . "Bug") (state . "open"))))
+    (remoto-test--answer-topics
+     '(((number . 42) (title . "Bug") (state . "open"))))
     (let* ((cands (remoto--browse-completions "foo/bar#"))
            (cand (car cands))
            (rt (get-text-property 0 'remoto-target cand)))
@@ -9375,10 +9413,9 @@ three functions the indicator asks are answered by a temp buffer."
 
   (it "keeps the cached issues when a key interrupts the direct fetch"
     (let ((interrupted nil))
-      (spy-on 'remoto--fetch-issue :and-call-fake
-              (lambda (&rest _) (setq interrupted t) (throw throw-on-input t)))
-      (spy-on 'remoto--fetch-issues :and-return-value
-              '(((number . 42) (title . "Bug") (state . "open"))))
+      (remoto-test--answer-topics
+       '(((number . 42) (title . "Bug") (state . "open"))) nil
+       (lambda (_endpoint) (setq interrupted t) (throw throw-on-input t)))
       (let ((cands (remoto--browse-completions "foo/bar#4")))
         (expect interrupted :to-be t)
         (expect (car cands) :to-equal "foo/bar#42"))))
@@ -9393,8 +9430,8 @@ three functions the indicator asks are answered by a temp buffer."
       (expect rt :to-equal "/github:foo/bar@main:/")))
 
   (it "attaches remoto-target on file-mode candidates"
-    (spy-on 'remoto--default-branch :and-return-value "main")
-    (spy-on 'remoto--fetch-dir-children-light :and-return-value
+    (spy-on 'remoto-forge-default-ref :and-return-value "main")
+    (spy-on 'remoto-forge-children :and-return-value
             '(("README.md" . ((type . "blob"))) ("src" . ((type . "tree")))))
     (let* ((cands (remoto--browse-completions "foo/bar/"))
            (readme (seq-find (lambda (c) (equal c "foo/bar/README.md")) cands))
@@ -9511,7 +9548,7 @@ of `completion-all-completions'; Vertico inserts a candidate as
 
   (it "replaces the typed text with the selected candidate after a branch pick"
     (remoto-test-with-cache
-      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (spy-on 'remoto-forge-entry-notes :and-return-value nil)
       (pcase-let ((`(,cands . ,base)
                    (remoto-test--all-completions "/github:testowner/testrepo@main:s")))
         (expect cands :to-equal '("src/"))
@@ -9528,14 +9565,14 @@ of `completion-all-completions'; Vertico inserts a candidate as
               :to-be-truthy)
       (expect (remoto--handle-file-directory-p "/github:testowner/testrepo@main:src/")
               :to-be-truthy)
-      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (spy-on 'remoto-forge-entry-notes :and-return-value nil)
       (expect (remoto--handle-file-name-all-completions "" "/github:testowner/testrepo@main:src/")
               :to-equal '("main.el" "utils.el")))))
 
 (describe "completion-regexp-list in file-name-all-completions"
   (it "applies every regexp, like the built-in primitive"
     (remoto-test-with-cache
-      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (spy-on 'remoto-forge-entry-notes :and-return-value nil)
       (let ((completion-regexp-list '("s")))
         (expect (remoto--handle-file-name-all-completions "" "/github:testowner/testrepo@main:/")
                 :to-equal '("src/")))
@@ -9548,21 +9585,21 @@ of `completion-all-completions'; Vertico inserts a candidate as
 
   (it "returns everything when no regexps are set"
     (remoto-test-with-cache
-      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (spy-on 'remoto-forge-entry-notes :and-return-value nil)
       (let ((completion-regexp-list nil))
         (expect (remoto--handle-file-name-all-completions "" "/github:testowner/testrepo@main:/")
                 :to-equal '("README.md" "bin/" "src/")))))
 
   (it "matches the name without the trailing slash"
     (remoto-test-with-cache
-      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (spy-on 'remoto-forge-entry-notes :and-return-value nil)
       (let ((completion-regexp-list '("src$")))
         (expect (remoto--handle-file-name-all-completions "" "/github:testowner/testrepo@main:/")
                 :to-equal '("src/")))))
 
   (it "follows completion-ignore-case"
     (remoto-test-with-cache
-      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (spy-on 'remoto-forge-entry-notes :and-return-value nil)
       (let ((completion-regexp-list '("readme")))
         (let ((completion-ignore-case nil))
           (expect (remoto--handle-file-name-all-completions "" "/github:testowner/testrepo@main:/")
@@ -9572,8 +9609,8 @@ of `completion-all-completions'; Vertico inserts a candidate as
                   :to-equal '("README.md"))))))
 
   (it "filters the files-default listing"
-    (spy-on 'remoto--default-branch :and-return-value "main")
-    (spy-on 'remoto--fetch-dir-children-light :and-return-value
+    (spy-on 'remoto-forge-default-ref :and-return-value "main")
+    (spy-on 'remoto-forge-children :and-return-value
             '(("README.md" . ((type . "blob"))) ("src" . ((type . "tree")))))
     (let ((completion-regexp-list '("sr")))
       (expect (remoto--handle-file-name-all-completions "" "/github:o/r/")
@@ -9590,9 +9627,9 @@ of `completion-all-completions'; Vertico inserts a candidate as
               :to-equal '("main:"))))
 
   (it "matches issues by number or title"
-    (spy-on 'remoto--fetch-issues :and-return-value
-            '(((number . 42) (title . "forty-two") (state . "open"))
-              ((number . 10) (title . "ten") (state . "open"))))
+    (remoto-test--answer-topics
+     '(((number . 42) (title . "forty-two") (state . "open"))
+       ((number . 10) (title . "ten") (state . "open"))))
     (let ((completion-regexp-list '("forty")))
       (expect (remoto--handle-file-name-all-completions "" "/github:o/r#")
               :to-equal '("42")))
@@ -9698,20 +9735,18 @@ of `completion-all-completions'; Vertico inserts a candidate as
 
   (it "searches issues with the minibuffer text"
     (spy-on 'remoto--minibuffer-input :and-return-value "/github:o/r#bug")
-    (spy-on 'remoto--search-issues :and-return-value
-            '(((number . 7) (title . "a bug") (state . "open"))))
+    (remoto-test--answer-topics nil '(((number . 7) (title . "a bug") (state . "open"))))
     (expect (remoto--handle-file-name-all-completions "" "/github:o/r#")
             :to-equal '("7"))
-    (expect 'remoto--search-issues :to-have-been-called-with remoto--github "o" "r" "bug"))
+    (expect 'remoto--api :to-have-been-called-with
+            remoto--github "search/issues?q=bug+repo:o/r&per_page=30"))
 
   (it "fetches an issue by number from the minibuffer text"
     (spy-on 'remoto--minibuffer-input :and-return-value "/github:o/r#42")
-    (spy-on 'remoto--fetch-issues :and-return-value nil)
-    (spy-on 'remoto--fetch-issue :and-return-value
-            '((number . 42) (title . "x") (state . "open")))
+    (remoto-test--answer-topics nil nil '((number . 42) (title . "x") (state . "open")))
     (expect (remoto--handle-file-name-all-completions "" "/github:o/r#")
             :to-equal '("42"))
-    (expect 'remoto--fetch-issue :to-have-been-called-with remoto--github "o" "r" "42")))
+    (expect 'remoto--api :to-have-been-called-with remoto--github "repos/o/r/issues/42")))
 
 (describe "remoto--repo-completion-table under regexp-filtering styles"
   (it "takes the query from the minibuffer when STRING is empty"
@@ -9743,7 +9778,7 @@ of `completion-all-completions'; Vertico inserts a candidate as
 (describe "end-to-end under the orderless completion style"
   (it "filters the file listing to the typed text"
     (remoto-test-with-cache
-      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (spy-on 'remoto-forge-entry-notes :and-return-value nil)
       (let ((input "/github:testowner/testrepo@main:/s"))
         (spy-on 'remoto--minibuffer-input :and-return-value input)
         (expect (remoto-test--all-completions input '(orderless))
@@ -9751,7 +9786,7 @@ of `completion-all-completions'; Vertico inserts a candidate as
 
   (it "matches anywhere in the name, as orderless does elsewhere"
     (remoto-test-with-cache
-      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (spy-on 'remoto-forge-entry-notes :and-return-value nil)
       (let ((input "/github:testowner/testrepo@main:/md"))
         (spy-on 'remoto--minibuffer-input :and-return-value input)
         (expect (car (remoto-test--all-completions input '(orderless)))
@@ -9776,11 +9811,11 @@ of `completion-all-completions'; Vertico inserts a candidate as
   (it "finds issues by title"
     (let ((input "/github:o/r#forty"))
       (spy-on 'remoto--minibuffer-input :and-return-value input)
-      (spy-on 'remoto--search-issues :and-return-value
-              '(((number . 42) (title . "forty-two") (state . "open"))))
+      (remoto-test--answer-topics nil '(((number . 42) (title . "forty-two") (state . "open"))))
       (expect (remoto-test--all-completions input '(orderless))
               :to-equal '(("42") . 12))
-      (expect 'remoto--search-issues :to-have-been-called-with remoto--github "o" "r" "forty")))
+      (expect 'remoto--api :to-have-been-called-with
+              remoto--github "search/issues?q=forty+repo:o/r&per_page=30")))
 
   (it "filters branches and tags"
     (let ((input "/github:o/r@dev"))
@@ -9792,7 +9827,7 @@ of `completion-all-completions'; Vertico inserts a candidate as
 
   (it "inserts the candidate in place of the typed text after a branch pick"
     (remoto-test-with-cache
-      (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+      (spy-on 'remoto-forge-entry-notes :and-return-value nil)
       (let ((input "/github:testowner/testrepo@main:s"))
         (spy-on 'remoto--minibuffer-input :and-return-value input)
         (pcase-let ((`(,cands . ,base) (remoto-test--all-completions input '(orderless))))
@@ -11006,7 +11041,7 @@ with what the same call does once the mode is on."
                               (setq load-path (seq-remove (lambda (d) (file-equal-p d ,source))
                                                           load-path))
                               (load ,(expand-file-name "remoto.el" dir) nil t)
-                              (list :github (symbol-file 'remoto--fetch-tree)
+                              (list :github (symbol-file 'remoto--fetch-branches)
                                     :forgejo (symbol-file 'remoto-forgejo-register)
                                     :codeberg (and (assoc "codeberg" remoto--forges) t))))))
               (expect (file-name-directory (or (plist-get result :github) "")) :to-equal dir)
@@ -11227,18 +11262,18 @@ repository name, as `remoto--normalize-name' resolves it."
        (spy-on 'remoto--recent-owner-repos :and-return-value '("testrepo" "other"))
        (spy-on 'remoto--fetch-branches :and-return-value '("main" "rel/1"))
        (spy-on 'remoto--fetch-tags :and-return-value '("v1.0"))
-       (spy-on 'remoto--fetch-issues :and-return-value
-               '(((number . 42) (title . "An issue") (state . "open"))
-                 ((number . 7) (title . "A pull") (state . "open")
-                  (pull_request . ((url . "x"))))))
-       (spy-on 'remoto--default-branch :and-return-value "main")
-       (spy-on 'remoto--fetch-dir-children-light :and-call-fake
+       (remoto-test--answer-topics
+        '(((number . 42) (title . "An issue") (state . "open"))
+          ((number . 7) (title . "A pull") (state . "open")
+           (pull_request . ((url . "x"))))))
+       (spy-on 'remoto-forge-default-ref :and-return-value "main")
+       (spy-on 'remoto-forge-children :and-call-fake
                (lambda (forge _owner _repo _ref dir-path)
                  (remoto--tree-children
                   (remoto--parse-path
                    (format "%stestowner/testrepo@main:/%s" (remoto--prefix forge)
                            dir-path)))))
-       (spy-on 'remoto--fetch-file-commits :and-return-value nil)
+       (spy-on 'remoto-forge-entry-notes :and-return-value nil)
        (dolist (root remoto-test--grammar-roots)
          (puthash (concat root "testowner/testrepo") "main" remoto--default-branch-cache)
          (dolist (ref '("main" "rel/1"))

@@ -44,11 +44,6 @@ An empty QUERY asks for the COUNT most recently updated ones."
 
 ;;;; Repository data
 
-(defun remoto--default-branch (forge owner repo)
-  "Fetch the default branch for OWNER/REPO on FORGE."
-  (let ((data (remoto--api forge (format "repos/%s/%s" owner repo))))
-    (alist-get 'default_branch data)))
-
 (defvar remoto--branches-cache (make-hash-table :test 'equal)
   "Cache: `remoto--repo-id' -> (TIMESTAMP . BRANCH-NAMES).")
 
@@ -59,27 +54,6 @@ Entries expire after `remoto-search-cache-ttl' seconds.")
 (defvar remoto--content-cache (make-hash-table :test 'equal)
   "Cache: sha -> raw file bytes as a unibyte string.
 A sha names its content on every forge, so the table is shared.")
-
-(defun remoto--fetch-file-content (forge owner repo path ref)
-  "Fetch the raw bytes of the file at PATH in OWNER/REPO@REF on FORGE.
-Uses Contents API for files under 1MB, Blobs API otherwise.
-Return a unibyte string; the caller decides how to decode it."
-  (let* ((endpoint (format "repos/%s/%s/contents/%s?ref=%s"
-                           owner repo
-                           (url-hexify-string path) ref))
-         (data (remoto--api forge endpoint))
-         (sha (alist-get 'sha data))
-         (cached (gethash sha remoto--content-cache)))
-    (or cached
-        (let* ((encoding (alist-get 'encoding data))
-               (content
-                (if (equal encoding "base64")
-                    (let ((raw (alist-get 'content data)))
-                      (base64-decode-string (string-replace "\n" "" raw)))
-                  ;; Too large - use Blobs API
-                  (remoto--fetch-blob forge owner repo sha))))
-          (puthash sha content remoto--content-cache)
-          content))))
 
 (defun remoto--fetch-blob (forge owner repo sha)
   "Fetch a git blob by SHA from OWNER/REPO on FORGE.  Return its raw bytes."
@@ -183,24 +157,6 @@ Return nil for any other input."
                       input)
     (list (match-string 1 input) (match-string 2 input) (match-string 3 input))))
 
-(defun remoto--parse-git-remote (input)
-  "Parse git remote INPUT into a `remoto-path' struct."
-  (when (string-match
-         (rx bos "git@github.com:"
-             (group (+ (not "/")))
-             "/"
-             (group (+ (not (in "/ "))))
-             eos)
-         input)
-    (let ((repo (match-string 2 input)))
-      (remoto-path-create
-       :owner (match-string 1 input)
-       :repo (if (string-suffix-p ".git" repo)
-                 (substring repo 0 -4)
-               repo)
-       :ref nil :level 'tree
-       :path "/"))))
-
 (defun remoto--parse-repo-shorthand (input)
   "Parse owner/repo INPUT into a `remoto-path' struct."
   (when (string-match remoto--shorthand-regexp input)
@@ -209,15 +165,6 @@ Return nil for any other input."
      :repo (match-string 2 input)
      :ref (match-string 3 input) :level 'tree
      :path "/")))
-
-(defun remoto--parse-input (input)
-  "Normalize user INPUT into a `remoto-path' struct.
-Accept GitHub URLs, git remote URLs, or owner/repo shorthand."
-  (let ((input (string-trim input)))
-    (or (remoto--parse-github-url input)
-        (remoto--parse-git-remote input)
-        (remoto--parse-repo-shorthand input)
-        (user-error "Remoto: cannot parse input: %s" input))))
 
 (defun remoto--search-query (input)
   "Build a GitHub search query string from INPUT.
@@ -270,93 +217,13 @@ Cached per `remoto-search-cache-ttl'."
             tags)
         (user-error nil)))))
 
-(defun remoto--forget-refs (forge owner repo)
-  "Drop the cached branches and tags of OWNER/REPO on FORGE."
-  (let ((key (remoto--repo-id forge owner repo)))
-    (remhash key remoto--branches-cache)
-    (remhash key remoto--tags-cache)))
-
 (defvar remoto--issues-cache (make-hash-table :test 'equal)
   "Cache for issue listings.  `remoto--repo-id' -> (TIMESTAMP . ISSUES-ALIST).")
-
-(defun remoto--fetch-issues (forge owner repo)
-  "Fetch open issues+PRs for OWNER/REPO on FORGE, cached."
-  (let* ((key (remoto--repo-id forge owner repo))
-         (entry (gethash key remoto--issues-cache))
-         (now (float-time)))
-    (if (and entry
-             (or (zerop remoto-search-cache-ttl)
-                 (< (- now (car entry)) remoto-search-cache-ttl)))
-        (cdr entry)
-      (condition-case nil
-          (let* ((endpoint (format "repos/%s/%s/issues?state=open&sort=updated&%s"
-                                   owner repo (remoto--page-params forge 30)))
-                 (data (remoto--api forge endpoint)))
-            (puthash key (cons now data) remoto--issues-cache)
-            data)
-        (user-error nil)))))
-
-(defun remoto--search-issues (forge owner repo query)
-  "Search issues+PRs in OWNER/REPO on FORGE matching QUERY."
-  (condition-case nil
-      (let* ((endpoint (format "search/issues?q=%s+repo:%s/%s&per_page=30"
-                               (url-hexify-string query) owner repo))
-             (data (remoto--api forge endpoint)))
-        (alist-get 'items data))
-    (user-error nil)))
-
-(defun remoto--fetch-issue (forge owner repo number)
-  "Fetch single issue NUMBER from OWNER/REPO on FORGE."
-  (condition-case nil
-      (remoto--api forge (format "repos/%s/%s/issues/%s" owner repo number))
-    (user-error nil)))
-
-(defun remoto--fetch-issue-comments (forge owner repo number)
-  "Fetch comments for issue NUMBER from OWNER/REPO on FORGE.
-Returns list of comment alists, or nil on error."
-  (condition-case nil
-      (remoto--api forge
-                   (format "repos/%s/%s/issues/%s/comments" owner repo number))
-    (user-error nil)))
 
 (defvar remoto--file-commits-cache (make-hash-table :test 'equal)
   "Cache for per-file last commit messages.
 Key: `remoto--repo-key' and \":dir\", Value: (TIMESTAMP . ALIST).
 ALIST maps filename -> first line of commit message.")
-
-(defun remoto--fetch-file-commits (forge owner repo ref dir-path children)
-  "Fetch last commit message for each file in CHILDREN.
-DIR-PATH is the directory path within OWNER/REPO at REF on FORGE.
-CHILDREN is a list of filenames.  Returns alist of (name . msg).
-Cached per `remoto-search-cache-ttl'.  Capped at 20 API calls."
-  (let* ((key (format "%s@%s:%s" (remoto--repo-id forge owner repo) ref dir-path))
-         (entry (gethash key remoto--file-commits-cache))
-         (now (float-time)))
-    (if (and entry
-             (or (zerop remoto-search-cache-ttl)
-                 (< (- now (car entry)) remoto-search-cache-ttl)))
-        (cdr entry)
-      (condition-case nil
-          (let ((result nil))
-            (dolist (child (seq-take children 20))
-              (let* ((bare-name (string-trim-right child "/"))
-                     (file-path (if (string-empty-p dir-path)
-                                    bare-name
-                                  (concat dir-path "/" bare-name)))
-                     (endpoint (format "repos/%s/%s/commits?sha=%s&path=%s&%s"
-                                       owner repo
-                                       (url-hexify-string ref)
-                                       (url-hexify-string file-path)
-                                       (remoto--page-params forge 1)))
-                     (commits (remoto--api forge endpoint)))
-                (when-let* ((first (car commits))
-                            (c (alist-get 'commit first))
-                            (raw (alist-get 'message c))
-                            (msg (car (split-string raw "\n" t))))
-                  (push (cons child msg) result))))
-            (puthash key (cons now result) remoto--file-commits-cache)
-            result)
-        (error nil)))))
 
 (cl-defgeneric remoto--fetch-user-orgs (forge)
   "Return the organizations of the account of the token on FORGE.
@@ -817,14 +684,6 @@ The copies of GitHub's API list theirs through the forge contract."
 ;; is on, as a remote path loads TRAMP.
 ;;;###autoload (add-to-list 'file-name-handler-alist '("\\`/\\(?:github\\|gh\\):" . remoto-autoload-file-name-handler))
 
-(defun remoto--fetch-tree (forge owner repo ref)
-  "Fetch full tree for OWNER/REPO at REF from the API of FORGE.
-Returns a hash table of path -> alist with keys type, size, sha, mode."
-  (let* ((endpoint (format "repos/%s/%s/git/trees/%s?recursive=1" owner repo ref))
-         (data (remoto--api forge endpoint)))
-    (remoto--tree-table (alist-get 'tree data) (eq (alist-get 'truncated data) t)
-                        owner repo ref)))
-
 (defun remoto--tree-table (entries truncated owner repo ref)
   "Return the tree table of ENTRIES, the items of a recursive tree answer.
 TRUNCATED marks the table partial, so directories are fetched on demand;
@@ -862,105 +721,91 @@ OWNER, REPO and REF name the tree in the message about that."
           (cons 'sha (or (alist-get 'sha item) ""))
           (cons 'mode (if (equal type "tree") "040000" "100644")))))
 
-(defun remoto--fetch-directory-entries (forge owner repo ref dir)
-  "Fetch DIR of OWNER/REPO at REF on FORGE via the Contents API.
-Return a list of (PATH . ENTRY)."
-  (let* ((endpoint (if (string-empty-p dir)
-                       (format "repos/%s/%s/contents?ref=%s" owner repo ref)
-                     (format "repos/%s/%s/contents/%s?ref=%s"
-                             owner repo (url-hexify-string dir) ref)))
-         (data (remoto--api forge endpoint)))
-    ;; The Contents API answers a list of objects for a directory
-    (when (and (consp data) (consp (caar data)))
-      (mapcar (lambda (item)
-                (cons (alist-get 'path item) (remoto--contents-entry item)))
-              data))))
-
 (defvar remoto--dir-contents-cache (make-hash-table :test 'equal)
   "Cache: `remoto--repo-key' and \":dir\" -> (TIMESTAMP . CHILDREN-LIST).
 Stores lightweight directory listings from Contents API.")
 
-(defun remoto--fetch-dir-children-light (forge owner repo ref dir-path)
-  "Fetch direct children of DIR-PATH in OWNER/REPO@REF on FORGE via Contents API.
-Returns a list of (NAME . PLIST) pairs, capped at 20 entries.
-Uses cache when available.  Much faster than recursive tree fetch."
-  (let* ((key (format "%s@%s:%s" (remoto--repo-id forge owner repo) ref
-                      (or dir-path "")))
-         (entry (gethash key remoto--dir-contents-cache))
-         (now (float-time)))
-    (if (and entry
-             (or (zerop remoto-search-cache-ttl)
-                 (< (- now (car entry)) remoto-search-cache-ttl)))
-        (cdr entry)
-      (condition-case nil
-          (let* ((endpoint (if (or (null dir-path) (string-empty-p dir-path))
-                               (format "repos/%s/%s/contents?ref=%s"
-                                       owner repo ref)
-                             (format "repos/%s/%s/contents/%s?ref=%s"
-                                     owner repo (url-hexify-string dir-path) ref)))
-                 (data (remoto--api forge endpoint))
-                 (children
-                  (when (and (consp data) (consp (caar data)))
-                    (mapcar (lambda (item)
-                              (cons (alist-get 'name item)
-                                    (remoto--contents-entry item)))
-                            (seq-take data 20)))))
-            (puthash key (cons now children) remoto--dir-contents-cache)
-            children)
-        (error nil)))))
-
-(defun remoto--resolve-commit-sha (forge owner repo ref)
-  "Resolve REF in OWNER/REPO on FORGE to a commit SHA via the API.
-Used for permalinks so the link survives the ref moving on."
-  (let* ((data (remoto--api forge (format "repos/%s/%s/commits/%s" owner repo ref)))
-         (sha (alist-get 'sha data)))
-    (or sha
-        (user-error "Remoto: could not resolve commit SHA for %s/%s@%s"
-                    owner repo ref))))
-
-(defun remoto--fetch-pull-request (forge owner repo number)
-  "Fetch full PR data for NUMBER in OWNER/REPO on FORGE.
-Returns PR alist with merge status, diff stats, review state."
-  (condition-case nil
-      (remoto--api forge (format "repos/%s/%s/pulls/%s" owner repo number))
-    (user-error nil)))
-
-(defun remoto--fetch-reviews (forge owner repo number)
-  "Fetch reviews for PR NUMBER in OWNER/REPO on FORGE."
-  (condition-case nil
-      (remoto--api forge (format "repos/%s/%s/pulls/%s/reviews" owner repo number))
-    (user-error nil)))
-
 ;;;; The contract
+
+(defun remoto--fresh-entry (table key)
+  "Return the (TIMESTAMP . VALUE) of KEY in TABLE, nil once it is stale.
+An entry goes stale `remoto-search-cache-ttl' seconds after it is stored;
+a TTL of 0 keeps it for good."
+  (when-let* ((entry (gethash key table))
+              ((or (zerop remoto-search-cache-ttl)
+                   (< (- (float-time) (car entry)) remoto-search-cache-ttl))))
+    entry))
 
 (cl-defmethod remoto-forge-default-ref ((forge remoto-github) owner repo)
   "GitHub's `default-ref' for OWNER and REPO on FORGE.
 See `remoto-forge-default-ref'."
-  (remoto--default-branch forge owner repo))
+  (alist-get 'default_branch (remoto--api forge (format "repos/%s/%s" owner repo))))
 
 (cl-defmethod remoto-forge-tree ((forge remoto-github) owner repo ref)
   "GitHub's `tree' for OWNER, REPO and REF on FORGE, see `remoto-forge-tree'."
-  (remoto--fetch-tree forge owner repo ref))
+  (let ((data (remoto--api forge (format "repos/%s/%s/git/trees/%s?recursive=1"
+                                         owner repo ref))))
+    (remoto--tree-table (alist-get 'tree data) (eq (alist-get 'truncated data) t)
+                        owner repo ref)))
+
+(defun remoto--contents-endpoint (owner repo ref dir)
+  "Return the Contents API endpoint of DIR of OWNER/REPO at REF."
+  (if (or (null dir) (string-empty-p dir))
+      (format "repos/%s/%s/contents?ref=%s" owner repo ref)
+    (format "repos/%s/%s/contents/%s?ref=%s" owner repo (url-hexify-string dir) ref)))
+
+(defun remoto--contents-list-p (data)
+  "Return non-nil when DATA, a Contents API answer, lists a directory."
+  (and (consp data) (consp (caar data))))
 
 (cl-defmethod remoto-forge-directory-contents ((forge remoto-github) owner repo ref dir)
   "GitHub's `directory-contents' for OWNER, REPO, REF and DIR on FORGE.
 See `remoto-forge-directory-contents'."
-  (remoto--fetch-directory-entries forge owner repo ref dir))
+  (let ((data (remoto--api forge (remoto--contents-endpoint owner repo ref dir))))
+    (when (remoto--contents-list-p data)
+      (mapcar (lambda (item)
+                (cons (alist-get 'path item) (remoto--contents-entry item)))
+              data))))
 
 (cl-defmethod remoto-forge-children ((forge remoto-github) owner repo ref dir)
-  "GitHub's `children' for OWNER, REPO, REF and DIR on FORGE.
-See `remoto-forge-children'."
-  (remoto--fetch-dir-children-light forge owner repo ref dir))
+  "GitHub's `children' for OWNER, REPO, REF and DIR on FORGE, 20 at most.
+They come from the Contents API, cached.  See `remoto-forge-children'."
+  (let ((key (format "%s@%s:%s" (remoto--repo-id forge owner repo) ref (or dir ""))))
+    (if-let* ((entry (remoto--fresh-entry remoto--dir-contents-cache key)))
+        (cdr entry)
+      (condition-case nil
+          (let* ((data (remoto--api forge (remoto--contents-endpoint owner repo ref dir)))
+                 (children
+                  (when (remoto--contents-list-p data)
+                    (mapcar (lambda (item)
+                              (cons (alist-get 'name item) (remoto--contents-entry item)))
+                            (seq-take data 20)))))
+            (puthash key (cons (float-time) children) remoto--dir-contents-cache)
+            children)
+        (error nil)))))
 
 (cl-defmethod remoto-forge-content ((forge remoto-github) owner repo ref path)
   "GitHub's `content' for OWNER, REPO, REF and PATH on FORGE.
+The Contents API answers a file under 1MB, the Blobs API a larger one.
 See `remoto-forge-content'."
-  (remoto--fetch-file-content forge owner repo path ref))
+  (let* ((data (remoto--api forge (format "repos/%s/%s/contents/%s?ref=%s"
+                                          owner repo (url-hexify-string path) ref)))
+         (sha (alist-get 'sha data)))
+    (or (gethash sha remoto--content-cache)
+        (puthash sha
+                 (if (equal (alist-get 'encoding data) "base64")
+                     (base64-decode-string
+                      (string-replace "\n" "" (alist-get 'content data)))
+                   (remoto--fetch-blob forge owner repo sha))
+                 remoto--content-cache))))
 
 (cl-defmethod remoto-forge-resolve-ref ((forge remoto-github) owner repo ref)
   "GitHub's `resolve-ref' for OWNER, REPO and REF on FORGE: the commit SHA.
 See `remoto-forge-resolve-ref'."
-  (remoto--resolve-commit-sha forge owner repo ref))
+  (or (alist-get 'sha (remoto--api forge (format "repos/%s/%s/commits/%s"
+                                                 owner repo ref)))
+      (user-error "Remoto: could not resolve commit SHA for %s/%s@%s"
+                  owner repo ref)))
 
 (cl-defmethod remoto-forge-refs ((forge remoto-github) owner repo)
   "GitHub's `refs' for OWNER and REPO on FORGE: its branches, then its tags.
@@ -972,7 +817,9 @@ See `remoto-forge-refs'."
   "GitHub's `forget' on FORGE: the branches and tags of OWNER/REPO, or every cache.
 See `remoto-forge-forget'."
   (if owner
-      (remoto--forget-refs forge owner repo)
+      (let ((key (remoto--repo-id forge owner repo)))
+        (remhash key remoto--branches-cache)
+        (remhash key remoto--tags-cache))
     (dolist (cache (list remoto--branches-cache remoto--users-cache
                          remoto--content-cache remoto--tags-cache
                          remoto--issues-cache remoto--file-commits-cache
@@ -988,43 +835,89 @@ See `remoto-forge-forget'."
 
 (cl-defgeneric remoto--search-topics (forge owner repo query)
   "Return the issues and pull requests of OWNER/REPO on FORGE matching QUERY."
-  (remoto--search-issues forge owner repo query))
+  (condition-case nil
+      (alist-get 'items
+                 (remoto--api forge (format "search/issues?q=%s+repo:%s/%s&per_page=30"
+                                            (url-hexify-string query) owner repo)))
+    (user-error nil)))
 
 (cl-defmethod remoto-forge-topics ((forge remoto-github) owner repo query)
   "GitHub's `topics' for OWNER, REPO and QUERY on FORGE.
-See `remoto-forge-topics'."
-  (mapcar #'remoto--topic-item
-          (if (or (null query) (string-empty-p query))
-              (remoto--fetch-issues forge owner repo)
-            (remoto--search-topics forge owner repo query))))
+The open ones, cached, for a nil or empty QUERY.  See `remoto-forge-topics'."
+  (mapcar
+   #'remoto--topic-item
+   (if (and query (not (string-empty-p query)))
+       (remoto--search-topics forge owner repo query)
+     (let ((key (remoto--repo-id forge owner repo)))
+       (if-let* ((entry (remoto--fresh-entry remoto--issues-cache key)))
+           (cdr entry)
+         (condition-case nil
+             (let ((data (remoto--api
+                          forge (format "repos/%s/%s/issues?state=open&sort=updated&%s"
+                                        owner repo (remoto--page-params forge 30)))))
+               (cdr (puthash key (cons (float-time) data) remoto--issues-cache)))
+           (user-error nil)))))))
 
 (cl-defmethod remoto-forge-topic ((forge remoto-github) owner repo key)
   "GitHub's `topic' for OWNER, REPO and KEY on FORGE, see `remoto-forge-topic'."
   (when (remoto--topic-key-p forge key)
-    (remoto--topic-item (remoto--fetch-issue forge owner repo key))))
+    (remoto--topic-item
+     (condition-case nil
+         (remoto--api forge (format "repos/%s/%s/issues/%s" owner repo key))
+       (user-error nil)))))
 
 (cl-defmethod remoto-forge-topic-comments ((forge remoto-github) owner repo key)
   "GitHub's `topic-comments' for OWNER, REPO and KEY on FORGE.
 See `remoto-forge-topic-comments'."
-  (remoto--fetch-issue-comments forge owner repo key))
+  (condition-case nil
+      (remoto--api forge (format "repos/%s/%s/issues/%s/comments" owner repo key))
+    (user-error nil)))
 
 (cl-defgeneric remoto--reviews (forge owner repo key)
   "Return the reviews of pull request KEY of OWNER/REPO on FORGE."
-  (remoto--fetch-reviews forge owner repo key))
+  (condition-case nil
+      (remoto--api forge (format "repos/%s/%s/pulls/%s/reviews" owner repo key))
+    (user-error nil)))
 
 (cl-defmethod remoto-forge-topic-extra ((forge remoto-github) owner repo key)
   "GitHub's `topic-extra' for OWNER, REPO and KEY on FORGE: a pull request's.
 The pull request and its reviews; nil for an issue.  See
 `remoto-forge-topic-extra'."
-  (when-let* ((pr (remoto--fetch-pull-request forge owner repo key)))
+  (when-let* ((pr (condition-case nil
+                      (remoto--api forge (format "repos/%s/%s/pulls/%s" owner repo key))
+                    (user-error nil))))
     `((pull-request . ,pr)
       (reviews . ,(remoto--reviews forge owner repo key)))))
 
 (cl-defmethod remoto-forge-entry-notes ((forge remoto-github) owner repo ref dir names)
   "GitHub's `entry-notes' for OWNER, REPO, REF, DIR and NAMES on FORGE.
-Each note is the subject of the last commit that touched the name; see
-`remoto-forge-entry-notes'."
-  (remoto--fetch-file-commits forge owner repo ref dir names))
+Each note is the subject of the last commit that touched the name, for the
+first 20 NAMES, cached; see `remoto-forge-entry-notes'."
+  (let ((key (format "%s@%s:%s" (remoto--repo-id forge owner repo) ref dir)))
+    (if-let* ((entry (remoto--fresh-entry remoto--file-commits-cache key)))
+        (cdr entry)
+      (condition-case nil
+          (let ((notes
+                 (seq-keep
+                  (lambda (name)
+                    (let ((bare (string-trim-right name "/")))
+                      (when-let* ((commits
+                                   (remoto--api
+                                    forge
+                                    (format "repos/%s/%s/commits?sha=%s&path=%s&%s"
+                                            owner repo (url-hexify-string ref)
+                                            (url-hexify-string
+                                             (if (string-empty-p dir)
+                                                 bare
+                                               (concat dir "/" bare)))
+                                            (remoto--page-params forge 1))))
+                                  (raw (alist-get 'message
+                                                  (alist-get 'commit (car commits))))
+                                  (subject (car (split-string raw "\n" t))))
+                        (cons name subject))))
+                  (seq-take names 20))))
+            (cdr (puthash key (cons (float-time) notes) remoto--file-commits-cache)))
+        (error nil)))))
 
 (cl-defmethod remoto-forge-complete ((forge remoto-github) path query wait)
   "GitHub's `complete' for PATH, QUERY and WAIT on FORGE.

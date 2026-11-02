@@ -435,7 +435,7 @@ with that property intact and no live minibuffer."
     (expect (car kill-ring) :to-equal "https://github.com/o/r/commits/main/src/a.el"))
 
   (it "copies a permalink pinned to the commit SHA"
-    (spy-on 'remoto--resolve-commit-sha :and-return-value "sha123")
+    (spy-on 'remoto-forge-resolve-ref :and-return-value "sha123")
     (remoto-embark-copy-permalink "/github:o/r@main:/src/a.el")
     (expect (car kill-ring) :to-equal "https://github.com/o/r/blob/sha123/src/a.el"))
 
