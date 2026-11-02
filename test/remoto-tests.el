@@ -3637,6 +3637,106 @@ using unauthenticated access until M-x remoto-reset-auth")
     (remoto-path-create :forge forge :owner (match-string 1 input)
                         :repo (match-string 2 input) :path "/")))
 
+(defun remoto-test--forge-complete (forge owner query wait)
+  "Call `remoto-forge-complete' of FORGE for QUERY and WAIT.
+At the level of OWNER, or at the root without OWNER."
+  (remoto-forge-complete forge (remoto-path-create :forge forge :owner owner :query ""
+                                                   :level (if owner 'owner 'root))
+                         query wait))
+
+(cl-defstruct (remoto-test-fixed (:include remoto-forge)
+                                 (:constructor remoto-test-fixed-create)
+                                 (:copier nil))
+  "A forge whose completion answers the same two repositories.")
+
+(cl-defmethod remoto-forge-complete ((_forge remoto-test-fixed) _path _query _wait)
+  "Answer the repositories alpha and beta."
+  (list "alpha" "beta"))
+
+(describe "remoto-forge-complete"
+  (it "answers the token's account and organizations at the root for an empty query"
+    (remoto-test-with-listings
+      (let ((accounts (remoto-test--forge-complete remoto--github nil "" t)))
+        (expect accounts :to-equal '("me" "acme" "quiet"))
+        (expect (mapcar (lambda (a) (get-text-property 0 'remoto-acct-type a)) accounts)
+                :to-equal '("User" "Organization" "Organization"))
+        (expect (mapcar (lambda (a) (get-text-property 0 'remoto-acct-desc a)) accounts)
+                :to-equal '("" "Acme tools" "")))))
+
+  (it "searches the accounts at the root for text"
+    (remoto-test-with-cache
+      (spy-on 'remoto--api :and-return-value
+              '((items . (((login . "torvalds") (type . "User"))))))
+      (let ((found (remoto-test--forge-complete remoto--github nil "torv" t)))
+        (expect found :to-equal '("torvalds"))
+        (expect (get-text-property 0 'remoto-acct-type (car found)) :to-equal "User")
+        (expect (mapcar #'cadr (spy-calls-all-args 'remoto--api))
+                :to-equal (list (remoto--account-search-endpoint
+                                 remoto--github "torv" (remoto--page-size remoto--github)))))))
+
+  (it "answers the recent repositories at an owner for an empty query"
+    (remoto-test-with-cache
+      (spy-on 'remoto--api :and-return-value
+              '((items . (((name . "linux") (description . "kernel"))))))
+      (let ((repos (remoto-test--forge-complete remoto--github "torvalds" "" t)))
+        (expect repos :to-equal '("linux"))
+        (expect (get-text-property 0 'remoto-repo-desc (car repos)) :to-equal "kernel")
+        (expect (mapcar #'cadr (spy-calls-all-args 'remoto--api))
+                :to-equal (list (remoto--repo-search-endpoint
+                                 remoto--github "torvalds" "" 30))))))
+
+  (it "searches the repositories at an owner for text"
+    (remoto-test-with-cache
+      (spy-on 'remoto--api :and-return-value '((items . (((name . "linux"))))))
+      (expect (remoto-test--forge-complete remoto--github "torvalds" "lin" t)
+              :to-equal '("linux"))
+      (expect (mapcar #'cadr (spy-calls-all-args 'remoto--api))
+              :to-equal (list (remoto--repo-search-endpoint
+                               remoto--github "torvalds" "lin"
+                               (remoto--page-size remoto--github))))))
+
+  (it "answers the cache without WAIT and starts one request in the background"
+    (remoto-test-with-cache
+      (let ((remoto-min-search-chars 3)
+            (remoto-repo-cache-ttl 1800))
+        (puthash "\0repos-recent:/github:torvalds"
+                 (cons (float-time) '("linux" "subsurface"))
+                 remoto--search-cache)
+        (spy-on 'remoto--debounce :and-call-fake (lambda (_key fn) (funcall fn)))
+        (spy-on 'remoto--api)
+        (spy-on 'remoto--api-async)
+        (expect (remoto-test--forge-complete remoto--github "torvalds" "lin" nil)
+                :to-equal '("linux"))
+        (expect 'remoto--api :not :to-have-been-called)
+        (expect (mapcar #'cadr (spy-calls-all-args 'remoto--api-async))
+                :to-equal (list (remoto--repo-search-endpoint
+                                 remoto--github "torvalds" "lin"
+                                 (remoto--page-size remoto--github)))))))
+
+  (it "starts the recent repositories at an owner for a nil query, answering nothing"
+    (remoto-test-with-cache
+      (let ((remoto--prefetch-timer nil))
+        (spy-on 'run-with-idle-timer :and-call-fake
+                (lambda (_secs _repeat fn &rest args) (apply fn args) nil))
+        (spy-on 'remoto--api)
+        (spy-on 'remoto--api-async)
+        (expect (remoto-test--forge-complete remoto--github "torvalds" nil nil) :to-be nil)
+        (expect 'remoto--api :not :to-have-been-called)
+        (expect (mapcar #'cadr (spy-calls-all-args 'remoto--api-async))
+                :to-equal (list (remoto--repo-search-endpoint
+                                 remoto--github "torvalds" "" 30))))))
+
+  (it "completes at the owner level of a forge whose method answers a fixed list"
+    (let ((remoto--forges (copy-alist remoto--forges))
+          (remoto--handler-regexp remoto--handler-regexp)
+          (file-name-handler-alist (copy-alist file-name-handler-alist)))
+      (remoto-register-forge (remoto-test-fixed-create
+                              :name 'fixed :prefixes '("fixed") :delimiters '(?@)))
+      (let ((names (remoto--handle-file-name-all-completions "" "/fixed:o/")))
+        (expect names :to-equal '("alpha/" "beta/"))
+        (expect (get-text-property 0 'remoto-target (car names))
+                :to-equal "/fixed:o/alpha:/")))))
+
 (describe "the forge contract"
   :var ((fake (remoto-forge-create :name 'fake :prefixes '("fake") :delimiters '(?@))))
 
@@ -3647,7 +3747,8 @@ using unauthenticated access until M-x remoto-reset-auth")
                         (lambda () (remoto-forge-refs fake "o" "r"))
                         (lambda () (remoto-forge-topics fake "o" "r" nil))
                         (lambda () (remoto-forge-topic fake "o" "r" "1"))
-                        (lambda () (remoto-forge-search-accounts fake "q" t))
+                        (lambda () (remoto-test--forge-complete fake nil "q" t))
+                        (lambda () (remoto-test--forge-complete fake "o" "" t))
                         (lambda () (remoto-forge-entries
                                     fake (remoto-path-create :forge fake :level 'owner
                                                              :owner "o" :query "")))))
@@ -4168,11 +4269,11 @@ using unauthenticated access until M-x remoto-reset-auth")
                   ("repos/search?uid=70422&exclusive=true&sort=updated&order=desc&limit=30"
                    '((ok . t) (data . (((name . "website") (full_name . "forgejo/website"))))))
                   (_ (error "Unexpected %s" endpoint)))))
-      (expect (remoto-forge-search-accounts remoto--codeberg "forge" t)
+      (expect (remoto-test--forge-complete remoto--codeberg nil "forge" t)
               :to-equal '("forgejo-bot"))
-      (expect (remoto-forge-search-repos remoto--codeberg "forgejo" "doc" t)
+      (expect (remoto-test--forge-complete remoto--codeberg "forgejo" "doc" t)
               :to-equal '("docs"))
-      (expect (remoto-forge-recent-repos remoto--codeberg "forgejo" t)
+      (expect (remoto-test--forge-complete remoto--codeberg "forgejo" "" t)
               :to-equal '("website"))
       (expect (gethash "/codeberg:forgejo/docs" remoto--default-branch-cache)
               :to-equal "next")
@@ -4190,7 +4291,7 @@ using unauthenticated access until M-x remoto-reset-auth")
                    '((ok . t) (data . (((login . "forgejo-bot")) ((login . "niceforgejo"))))))
                   ("users/Forgejo" '((id . 70422) (login . "forgejo")))
                   (_ (error "Unexpected %s" endpoint)))))
-      (expect (remoto-forge-search-accounts remoto--codeberg "Forgejo" t)
+      (expect (remoto-test--forge-complete remoto--codeberg nil "Forgejo" t)
               :to-equal '("forgejo" "forgejo-bot" "niceforgejo"))
       (expect (cdr (remoto--account-matches "/codeberg:Forgejo"))
               :to-equal '("forgejo" "forgejo-bot" "niceforgejo"))))
@@ -4216,9 +4317,9 @@ using unauthenticated access until M-x remoto-reset-auth")
                   ("repos/search?uid=9&exclusive=true&sort=updated&order=desc&limit=30"
                    '((ok . t) (data . (((name . "r") (full_name . "forgejo-bot/r"))))))
                   (_ (error "Unexpected %s" endpoint)))))
-      (remoto-forge-search-accounts remoto--codeberg "forgejo" nil)
-      (expect (remoto-forge-recent-repos remoto--codeberg "forgejo-bot" t) :to-equal '("r"))
-      (expect (remoto-forge-search-accounts remoto--codeberg "forgejo" nil)
+      (remoto-test--forge-complete remoto--codeberg nil "forgejo" nil)
+      (expect (remoto-test--forge-complete remoto--codeberg "forgejo-bot" "" t) :to-equal '("r"))
+      (expect (remoto-test--forge-complete remoto--codeberg nil "forgejo" nil)
               :to-equal '("forgejo" "forgejo-bot"))
       (expect 'remoto--api-async :to-have-been-called-times 1)))
 
@@ -4234,8 +4335,8 @@ using unauthenticated access until M-x remoto-reset-auth")
                             '((ok . t) (data . (((login . "forgejo-bot"))))))
                            ("users/forgejo" '((id . 70422) (login . "forgejo")))
                            (_ (error "Unexpected %s" endpoint))))))
-      (remoto-forge-search-accounts remoto--codeberg "forgejo" nil)
-      (expect (remoto-forge-search-accounts remoto--codeberg "forgejo" nil)
+      (remoto-test--forge-complete remoto--codeberg nil "forgejo" nil)
+      (expect (remoto-test--forge-complete remoto--codeberg nil "forgejo" nil)
               :to-equal '("forgejo" "forgejo-bot"))
       (expect 'remoto--api-async :to-have-been-called-times 2)))
 
@@ -4255,7 +4356,7 @@ using unauthenticated access until M-x remoto-reset-auth")
               (lambda (_forge endpoint _callback &optional errback)
                 (expect endpoint :to-equal "users/zz9q/repos?limit=30")
                 (when errback (funcall errback))))
-      (expect (remoto-forge-recent-repos remoto--codeberg "zz9q" nil) :to-be nil)
+      (expect (remoto-test--forge-complete remoto--codeberg "zz9q" "" nil) :to-be nil)
       (expect (condition-case err (remoto--repo-matches "/codeberg:zz9q/x")
                 (user-error (cadr err)))
               :to-equal "Remoto: no account zz9q")

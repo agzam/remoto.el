@@ -168,16 +168,18 @@ does, and the completions refresh when it answers."
                                     (remoto--refresh-minibuffer-completions))))))
       nil)))
 
-(cl-defmethod remoto-forge-search-accounts ((forge remoto-forgejo) query wait)
-  "Forgejo's `search-accounts' for QUERY and WAIT on FORGE.
-The account QUERY names comes first: users/search finds no organization,
-users/QUERY answers for one."
-  (let* ((found (cl-call-next-method))
-         (account (cond (wait (remoto-forgejo--account forge query))
-                        ((<= remoto-min-search-chars (length query))
-                         (remoto-forgejo--account-soon forge query))))
-         (login (alist-get 'login account)))
-    (if login
+(cl-defmethod remoto-forge-complete ((forge remoto-forgejo) path query wait)
+  "Forgejo's `complete' for PATH, QUERY and WAIT on FORGE.
+In a root search the account QUERY names comes first: users/search finds
+no organization, users/QUERY answers for one."
+  (let ((found (cl-call-next-method)))
+    (if-let* (((eq (remoto-path-level path) 'root))
+              ((< 0 (length query)))
+              (account (if wait
+                           (remoto-forgejo--account forge query)
+                         (and (<= remoto-min-search-chars (length query))
+                              (remoto-forgejo--account-soon forge query))))
+              (login (alist-get 'login account)))
         (cons (propertize login 'remoto-acct-type "")
               (seq-remove (lambda (name) (string-equal-ignore-case name login))
                           found))

@@ -257,28 +257,6 @@ NOTE is the text shown after NAME in completion, such as the subject of
 the last commit that touched it."
   nil)
 
-(cl-defgeneric remoto-forge-search-accounts (forge _query _wait)
-  "Return the logins of the accounts on FORGE that match QUERY.
-With WAIT, ask and answer; without it, answer from a cache and start
-the request in the background."
-  (remoto--unsupported forge 'search-accounts))
-
-(cl-defgeneric remoto-forge-recent-repos (forge _owner _wait)
-  "Return the names of OWNER's repositories on FORGE, newest first.
-With WAIT, ask and answer; without it, answer from a cache and start
-the request in the background."
-  (remoto--unsupported forge 'recent-repos))
-
-(cl-defgeneric remoto-forge-search-repos (forge _owner _query _wait)
-  "Return the names of OWNER's repositories on FORGE that match QUERY.
-With WAIT, ask and answer; without it, answer from a cache and start
-the request in the background."
-  (remoto--unsupported forge 'search-repos))
-
-(cl-defgeneric remoto-forge-prefetch-repos (_forge _owner)
-  "Start fetching OWNER's repositories on FORGE for the completion that follows."
-  nil)
-
 (cl-defgeneric remoto-forge-entries (forge _path &optional _continuation _callback)
   "Return (ENTRIES . NEXT), a page of the listing at PATH on FORGE.
 PATH is a `remoto-path' at level root or owner.  CONTINUATION names the
@@ -294,6 +272,16 @@ So a method that ignores CALLBACK still serves the background pages."
     (if callback
         (ignore (funcall callback page))
       page)))
+
+(cl-defgeneric remoto-forge-complete (forge path query _wait)
+  "Return the TAB candidates for QUERY at PATH, a root or owner path of FORGE.
+An empty QUERY answers the accounts or the recent repositories, text a
+search; a nil QUERY only warms the cache that an empty one reads.  With
+WAIT, ask and answer; without it, answer from a cache and ask later."
+  (if (and (equal query "") (eq (remoto-path-level path) 'root))
+      (when (remoto--known-user forge)
+        (mapcar #'remoto--account-login (car (remoto-forge-entries forge path))))
+    (remoto--unsupported forge 'complete)))
 
 (cl-defgeneric remoto-forge-parse-url (_forge _input)
   "Return the `remoto-path' that INPUT names on FORGE, or nil.
@@ -1728,12 +1716,11 @@ Preserves OWNER's text properties (used for affixation) and attaches a
 
 (defun remoto--account-login (entry)
   "Return the login of ENTRY, a root listing entry, with account properties.
-The note of ENTRY holds the account type, then two spaces and the
-description, as the completion annotations show them."
-  (let* ((note (or (alist-get 'note (cdr entry)) ""))
-         (gap (string-search "  " note)))
-    (propertize (car entry) 'remoto-acct-type (substring note 0 gap)
-                'remoto-acct-desc (if gap (substring note (+ 2 gap)) ""))))
+The `account-type' and `description' fields of ENTRY give them."
+  (let ((fields (cdr entry)))
+    (propertize (car entry)
+                'remoto-acct-type (or (alist-get 'account-type fields) "")
+                'remoto-acct-desc (or (alist-get 'description fields) ""))))
 
 (defun remoto--minibuffer-input ()
   "Contents of the current buffer when it is an active completion minibuffer."
@@ -1828,39 +1815,35 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
         ('root
          ;; Empty query + authenticated: show user + orgs
          ;; Non-empty: search users/orgs matching the query (non-blocking)
-         (let ((query (remoto--completion-query file directory))
-               (candidate (lambda (acct) (remoto--owner-candidate acct prefix))))
+         (let* ((query (remoto--completion-query file directory))
+                (root (remoto--path-at forge 'root))
+                (candidate (lambda (acct) (remoto--owner-candidate acct prefix))))
            (if (string-empty-p query)
-               (when (remoto--known-user forge)
-                 (mapcar (lambda (entry)
-                           (funcall candidate (remoto--account-login entry)))
-                         (car (remoto-forge-entries forge (remoto--path-at forge 'root)))))
-             (when-let* ((result (remoto-forge-search-accounts forge query nil)))
+               (mapcar candidate (remoto-forge-complete forge root "" nil))
+             (when-let* ((result (remoto-forge-complete forge root query nil)))
                (let ((filtered (seq-filter (lambda (u) (string-prefix-p file u))
                                            result)))
                  ;; Pre-fetch repos for the top match so the cache is
                  ;; warm by the time the user types "/"
                  (when-let* ((top (car filtered)))
-                   (remoto-forge-prefetch-repos forge top))
+                   (remoto-forge-complete forge (remoto--path-at forge 'owner top)
+                                          nil nil))
                  (mapcar candidate filtered))))))
         ('owner
          ;; Repo completion at /github:OWNER/
          ;; Try cached/async results first; on cold-cache nil, fall
          ;; back to a synchronous fetch that yields to user input.
          (let* ((query (remoto--completion-query file directory))
-                (repos (if (string-empty-p query)
-                           (remoto-forge-recent-repos forge owner nil)
-                         (remoto-forge-search-repos forge owner query nil))))
-           (unless repos
-             (let ((sync (while-no-input
-                           (condition-case nil
-                               (if (string-empty-p query)
-                                   (remoto-forge-recent-repos forge owner t)
-                                 (when (<= remoto-min-search-chars (length query))
-                                   (remoto-forge-search-repos forge owner query t)))
-                             (error nil)))))
-               (when (consp sync)
-                 (setq repos sync))))
+                (path (remoto--path-at forge 'owner owner))
+                (repos (or (remoto-forge-complete forge path query nil)
+                           (let ((sync (while-no-input
+                                         (condition-case nil
+                                             (when (or (string-empty-p query)
+                                                       (<= remoto-min-search-chars
+                                                           (length query)))
+                                               (remoto-forge-complete forge path query t))
+                                           (error nil)))))
+                             (and (consp sync) sync)))))
            (mapcar (lambda (r)
                      (let* ((name (if (string-suffix-p "/" r) (substring r 0 -1) r))
                             (cand (concat name "/")))
@@ -3664,10 +3647,11 @@ Signal a `user-error' when no account matches."
               ((eq (remoto-path-level parsed) 'root))
               (query (remoto--bare-name parsed))
               ((not (remoto--dired-line-p name))))
-    (let ((prefix (remoto--path-prefix parsed))
-          (logins (seq-filter (lambda (login) (remoto--words-match-p query login))
-                              (remoto-forge-search-accounts
-                               (remoto-path-forge parsed) query t))))
+    (let* ((prefix (remoto--path-prefix parsed))
+           (forge (remoto-path-forge parsed))
+           (logins (seq-filter (lambda (login) (remoto--words-match-p query login))
+                               (remoto-forge-complete
+                                forge (remoto--path-at forge 'root) query t))))
       (dolist (login logins)
         (remoto--remember (concat prefix login)
                           `((type . "tree")
@@ -3687,7 +3671,8 @@ repository matches, or when OWNER is no account."
     (pcase-let* ((`(,owner . ,query) parts)
                  (dir (format "%s%s/" (remoto--prefix forge) owner))
                  (names (condition-case err
-                            (remoto-forge-search-repos forge owner query t)
+                            (remoto-forge-complete
+                             forge (remoto--path-at forge 'owner owner) query t)
                           (user-error
                            (if (string-prefix-p remoto--not-found (cadr err))
                                (user-error "Remoto: no account %s" owner)

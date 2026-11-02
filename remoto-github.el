@@ -387,8 +387,9 @@ comes from a list or a search endpoint."
 
 (defun remoto--account-entries (forge dir)
   "Return listing entries for the token's account on FORGE and its organizations.
-DIR is the root being listed.  Without a token no request names them:
-offer a login when remoto may ask, and signal a `user-error' otherwise."
+DIR is the root being listed; each entry has `account-type' and
+`description' fields.  Without a token no request names them: offer a
+login when remoto may ask, and signal a `user-error' otherwise."
   (let* ((title (remoto-forge-title forge))
          (user (or (remoto--get-authenticated-user forge)
                    (and (remoto--offer-login
@@ -399,12 +400,14 @@ offer a login when remoto may ask, and signal a `user-error' otherwise."
     (mapcar (lambda (account)
               (let ((type (or (get-text-property 0 'remoto-acct-type account)
                               "User"))
-                    (desc (get-text-property 0 'remoto-acct-desc account)))
+                    (desc (or (get-text-property 0 'remoto-acct-desc account) "")))
                 (cons (substring-no-properties account)
                       `((type . "tree")
-                        (note . ,(if (and desc (not (string-empty-p desc)))
-                                     (concat type "  " desc)
-                                   type))))))
+                        (account-type . ,type)
+                        (description . ,desc)
+                        (note . ,(if (string-empty-p desc)
+                                     type
+                                   (concat type "  " desc)))))))
             (cons user (remoto--fetch-user-orgs forge)))))
 
 (defun remoto--owner-endpoint (forge prefix owner)
@@ -1337,31 +1340,24 @@ Each note is the subject of the last commit that touched the name; see
 `remoto-forge-entry-notes'."
   (remoto--fetch-file-commits forge owner repo ref dir names))
 
-(cl-defmethod remoto-forge-search-accounts ((forge remoto-github) query wait)
-  "GitHub's `search-accounts' for QUERY and WAIT on FORGE.
-See `remoto-forge-search-accounts'."
-  (if wait
-      (remoto--account-search forge query)
-    (remoto--search-users forge query)))
-
-(cl-defmethod remoto-forge-recent-repos ((forge remoto-github) owner wait)
-  "GitHub's `recent-repos' for OWNER and WAIT on FORGE.
-See `remoto-forge-recent-repos'."
-  (if wait
-      (remoto--recent-owner-repos-sync forge owner)
-    (remoto--recent-owner-repos forge owner)))
-
-(cl-defmethod remoto-forge-search-repos ((forge remoto-github) owner query wait)
-  "GitHub's `search-repos' for OWNER, QUERY and WAIT on FORGE.
-See `remoto-forge-search-repos'."
-  (if wait
-      (remoto--owner-search forge owner query)
-    (remoto--search-owner-repos forge owner query)))
-
-(cl-defmethod remoto-forge-prefetch-repos ((forge remoto-github) owner)
-  "GitHub's `prefetch-repos' for OWNER on FORGE.
-See `remoto-forge-prefetch-repos'."
-  (remoto--prefetch-owner-repos forge owner))
+(cl-defmethod remoto-forge-complete ((forge remoto-github) path query wait)
+  "GitHub's `complete' for PATH, QUERY and WAIT on FORGE.
+The root's accounts come from the generic method; see
+`remoto-forge-complete'."
+  (let ((owner (remoto-path-owner path)))
+    (cond
+     ((eq (remoto-path-level path) 'root)
+      (cond ((equal query "") (cl-call-next-method))
+            ((null query) nil)
+            (wait (remoto--account-search forge query))
+            (t (remoto--search-users forge query))))
+     ((null query) (ignore (remoto--prefetch-owner-repos forge owner)))
+     ((string-empty-p query)
+      (if wait
+          (remoto--recent-owner-repos-sync forge owner)
+        (remoto--recent-owner-repos forge owner)))
+     (wait (remoto--owner-search forge owner query))
+     (t (remoto--search-owner-repos forge owner query)))))
 
 (cl-defmethod remoto-forge-entries ((forge remoto-github) path
                                     &optional continuation callback)
