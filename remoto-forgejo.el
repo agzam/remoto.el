@@ -18,12 +18,21 @@
 
 ;;; Code:
 
+(require 'loadhist)
 (require 'remoto)
 (require 'remoto-github)
 
+;; package.el reloads this file before remoto.el when it upgrades remoto in
+;; a running session, and the struct below needs the core of its version.
+;; While remoto.el loads and requires this file, its feature has no file.
+(when-let* ((file (macroexp-file-name))
+            (core (feature-file 'remoto))
+            ((not (file-equal-p (file-name-directory core) (file-name-directory file)))))
+  (load (expand-file-name "remoto" (file-name-directory file)) nil t))
+
 (defvar tramp-methods)
 
-(cl-defstruct (remoto-forgejo (:include remoto-github)
+(cl-defstruct (remoto-forgejo (:include remoto-github (title nil))
                               (:constructor remoto-forgejo-create)
                               (:copier nil))
   "A Forgejo or Gitea forge.  GitHub's methods serve it, against its host.")
@@ -41,12 +50,6 @@
 (cl-defmethod remoto--literal-token ((_forge remoto-forgejo))
   "A Forgejo server has no token option: `remoto-github-auth' is GitHub's."
   nil)
-
-(cl-defmethod remoto-forge-title ((forge remoto-forgejo))
-  "Codeberg by name, any other Forgejo FORGE by its host."
-  (if (equal (remoto-forge-host forge) "codeberg.org")
-      "Codeberg"
-    (remoto-forge-host forge)))
 
 (cl-defmethod remoto--anonymous-limit ((_forge remoto-forgejo))
   "No hint: 2,000 anonymous requests per 10 minutes seldom run out."
@@ -174,16 +177,18 @@ does, and the completions refresh when it answers."
                                     (remoto--refresh-minibuffer-completions))))))
       nil)))
 
-(cl-defmethod remoto-forge-search-accounts ((forge remoto-forgejo) query wait)
-  "Forgejo's `search-accounts' for QUERY and WAIT on FORGE.
-The account QUERY names comes first: users/search finds no organization,
-users/QUERY answers for one."
-  (let* ((found (cl-call-next-method))
-         (account (cond (wait (remoto-forgejo--account forge query))
-                        ((<= remoto-min-search-chars (length query))
-                         (remoto-forgejo--account-soon forge query))))
-         (login (alist-get 'login account)))
-    (if login
+(cl-defmethod remoto-forge-complete ((forge remoto-forgejo) path query wait)
+  "Forgejo's `complete' for PATH, QUERY and WAIT on FORGE.
+In a root search the account QUERY names comes first: users/search finds
+no organization, users/QUERY answers for one."
+  (let ((found (cl-call-next-method)))
+    (if-let* (((eq (remoto-path-level path) 'root))
+              ((< 0 (length query)))
+              (account (if wait
+                           (remoto-forgejo--account forge query)
+                         (and (<= remoto-min-search-chars (length query))
+                              (remoto-forgejo--account-soon forge query))))
+              (login (alist-get 'login account)))
         (cons (propertize login 'remoto-acct-type "")
               (seq-remove (lambda (name) (string-equal-ignore-case name login))
                           found))
@@ -206,8 +211,8 @@ repos/search without an id searches every account."
               (remoto--page-params forge count))
     (format "users/%s/repos?%s" owner (remoto--page-params forge count))))
 
-(cl-defmethod remoto-forge-search-topics ((forge remoto-forgejo) owner repo query)
-  "Forgejo's `search-topics' for OWNER, REPO and QUERY on FORGE.
+(cl-defmethod remoto--search-topics ((forge remoto-forgejo) owner repo query)
+  "Forgejo's topics of OWNER/REPO on FORGE that match QUERY.
 The issues endpoint of the repository searches in place."
   (condition-case nil
       (remoto--api forge (format "repos/%s/%s/issues?q=%s&state=all&type=all&%s"
@@ -258,15 +263,15 @@ They are listed at git/refs."
                                          owner repo kind (url-hexify-string prefix))))
     (error nil)))
 
-(cl-defmethod remoto-forge-commit-sha ((forge remoto-forgejo) owner repo ref)
-  "Forgejo's `commit-sha' for OWNER, REPO and REF on FORGE, from git/commits."
+(cl-defmethod remoto-forge-resolve-ref ((forge remoto-forgejo) owner repo ref)
+  "Forgejo's `resolve-ref' for OWNER, REPO and REF on FORGE, from git/commits."
   (or (alist-get 'sha (remoto--api forge (format "repos/%s/%s/git/commits/%s"
                                                  owner repo (url-hexify-string ref))))
       (user-error "Remoto: could not resolve commit SHA for %s/%s@%s"
                   owner repo ref)))
 
-(cl-defmethod remoto-forge-reviews ((forge remoto-forgejo) owner repo number)
-  "Forgejo's `reviews' for OWNER, REPO and NUMBER on FORGE.
+(cl-defmethod remoto--reviews ((forge remoto-forgejo) owner repo number)
+  "Forgejo's reviews of pull request NUMBER of OWNER/REPO on FORGE.
 The states come in GitHub's spelling, review requests left out."
   (seq-keep (lambda (review)
               (pcase (alist-get 'state review)
@@ -279,8 +284,8 @@ The states come in GitHub's spelling, review requests left out."
                        (assq-delete-all 'state (copy-sequence review))))))
             (cl-call-next-method forge owner repo number)))
 
-(cl-defmethod remoto-forge-user-orgs ((forge remoto-forgejo) _user)
-  "Forgejo's `user-orgs' for USER on FORGE, which names them by `username'."
+(cl-defmethod remoto--fetch-user-orgs ((forge remoto-forgejo))
+  "Forgejo's organizations of the token on FORGE, which names them by `username'."
   (condition-case nil
       (mapcar (lambda (item)
                 (propertize (alist-get 'username item)
@@ -289,10 +294,11 @@ The states come in GitHub's spelling, review requests left out."
               (remoto--paginated-api forge "user/orgs"))
     (user-error nil)))
 
-(cl-defmethod remoto-forge-forget-all ((forge remoto-forgejo))
-  "Forgejo's `forget-all' on FORGE drops the accounts too."
-  (clrhash remoto-forgejo--accounts)
-  (cl-call-next-method forge))
+(cl-defmethod remoto-forge-forget ((_forge remoto-forgejo) &optional owner _repo)
+  "Forgejo's `forget' drops the accounts too when it drops everything, no OWNER."
+  (unless owner
+    (clrhash remoto-forgejo--accounts))
+  (cl-call-next-method))
 
 ;;;; Web URLs
 
@@ -322,8 +328,7 @@ Forgejo spells the kind of a ref in its paths: src/branch/main, src/tag/v1."
   "The kind of REF of OWNER/REPO on FORGE, from the cached refs.
 A hex name that is no branch is a commit."
   (cond ((null ref) "branch")
-        ((member ref (remoto-forge-branches forge owner repo)) "branch")
-        ((member ref (remoto-forge-tags forge owner repo)) "tag")
+        ((remoto--ref-label (remoto-forge-refs forge owner repo) ref))
         ((string-match-p (rx bos (+ hex) eos) ref) "commit")
         (t "branch")))
 
@@ -332,41 +337,8 @@ A hex name that is no branch is a commit."
   (let ((host (regexp-quote (remoto-forge-host forge))))
     (concat "\\`\\(?:https://" host "/\\|git@" host ":\\|/?" host "/\\)")))
 
-(cl-defmethod remoto-forge-url-input-p ((forge remoto-forgejo) input)
-  "Non-nil when INPUT is a URL of the host of FORGE, or its ssh remote."
-  (and (stringp input)
-       (string-match-p (remoto-forgejo--host-regexp forge) input)))
-
-(cl-defmethod remoto-forge-parse-url ((forge remoto-forgejo) input)
-  "The repository, tree or file that INPUT, a web URL or remote of FORGE, names.
-The path after src, raw or blame carries the kind of the ref, or not;
-either way the ref may hold a slash, which `remoto--url-ref' settles."
-  (let ((rest (string-trim input)))
-    (when (string-match (remoto-forgejo--host-regexp forge) rest)
-      (setq rest (substring rest (match-end 0)))
-      (when (string-match
-             (rx bos
-                 (group (+ (not "/")))
-                 "/"
-                 (group (+ (not (in "/#?"))))
-                 (? "/" (or "src" "raw" "blame") "/"
-                    (? (or "branch" "tag" "commit") "/")
-                    (group (+ (not (in "/?#"))))
-                    (? "/" (group (+ (not (in "?#"))))))
-                 (* nonl)
-                 eos)
-             rest)
-        (let* ((owner (match-string 1 rest))
-               (repo (string-remove-suffix ".git" (match-string 2 rest)))
-               (ref (remoto--url-unescape (match-string 3 rest)))
-               (path (remoto--url-unescape (match-string 4 rest)))
-               (split (and ref (remoto--url-ref forge owner repo ref path))))
-          (remoto-path-create :forge forge :owner owner :repo repo
-                              :ref (car split)
-                              :path (if split (cdr split) "/")))))))
-
-(cl-defmethod remoto-forge-parse-topic-url ((forge remoto-forgejo) input)
-  "The (OWNER REPO NUMBER) of INPUT, an issue or pull request web URL of FORGE."
+(defun remoto-forgejo--topic-url (forge input)
+  "Return the topic path that INPUT, an issue or pull URL of FORGE, names."
   (when (string-match (rx-to-string
                        `(seq bos (? "/") (? "https://") ,(remoto-forge-host forge) "/"
                              (group (+ (not (in "/#?")))) "/"
@@ -375,7 +347,55 @@ either way the ref may hold a slash, which `remoto--url-ref' settles."
                              (group (+ digit))
                              (or eos (in "/#?"))))
                       input)
-    (list (match-string 1 input) (match-string 2 input) (match-string 3 input))))
+    (remoto--path-at forge 'topics (match-string 1 input) (match-string 2 input)
+                     (match-string 3 input))))
+
+(defun remoto-forgejo--account-url (forge input)
+  "Return the root or owner path that INPUT, a URL of FORGE, names."
+  (when-let* (((string-match (remoto-forgejo--host-regexp forge) input))
+              (rest (substring input (match-end 0)))
+              ((string-match (rx bos (? (group (+ (not (in "/?#")))) (? "/"))
+                                 (? (in "?#") (* nonl)) eos)
+                             rest)))
+    (if-let* ((owner (match-string 1 rest)))
+        (remoto--path-at forge 'owner owner)
+      (remoto--path-at forge 'root))))
+
+(defun remoto-forgejo--tree-url (forge input)
+  "Return the repository, tree or file that INPUT, a URL of FORGE, names.
+The path after src, raw or blame carries the kind of the ref, or not;
+either way the ref may hold a slash, which `remoto--url-ref' settles."
+  (when-let* (((string-match (remoto-forgejo--host-regexp forge) input))
+              (rest (substring input (match-end 0)))
+              ((string-match
+                (rx bos
+                    (group (+ (not "/")))
+                    "/"
+                    (group (+ (not (in "/#?"))))
+                    (? "/" (or "src" "raw" "blame") "/"
+                       (? (or "branch" "tag" "commit") "/")
+                       (group (+ (not (in "/?#"))))
+                       (? "/" (group (+ (not (in "?#"))))))
+                    (* nonl)
+                    eos)
+                rest)))
+    (let* ((owner (match-string 1 rest))
+           (repo (string-remove-suffix ".git" (match-string 2 rest)))
+           (ref (remoto--url-unescape (match-string 3 rest)))
+           (path (remoto--url-unescape (match-string 4 rest)))
+           (split (and ref (remoto--url-ref forge owner repo ref path))))
+      (remoto-path-create :forge forge :owner owner :repo repo :level 'tree
+                          :ref (car split)
+                          :path (if split (cdr split) "/")))))
+
+(cl-defmethod remoto-forge-parse-url ((forge remoto-forgejo) input)
+  "The account, topic, repository, tree or file that INPUT names on FORGE.
+INPUT is a web URL or a git remote of the host of FORGE."
+  (let ((input (string-trim input)))
+    (or (remoto-forgejo--topic-url forge input)
+        (remoto--remote-path forge input)
+        (remoto-forgejo--tree-url forge input)
+        (remoto-forgejo--account-url forge input))))
 
 ;;;; Codeberg and the other servers
 
@@ -384,14 +404,17 @@ either way the ref may hold a slash, which `remoto--url-ref' settles."
 PREFIXES are the path prefixes without slash or colon, the first one
 canonical.  The web URL templates of HOST go under NAME."
   (let ((forge (remoto-forgejo-create :name name :prefixes prefixes :host host
-                                      :delimiters '(?@ ?#))))
+                                      :delimiters '(?@ ?#)
+                                      ;; Codeberg by name, any other server by its host.
+                                      :title (if (equal host "codeberg.org") "Codeberg" host))))
     (setf (alist-get name remoto-forge-url-templates)
           (remoto-forgejo--url-templates host))
     (remoto-register-forge forge)
     forge))
 
-(defvar remoto--codeberg (remoto-forgejo-register 'codeberg '("codeberg" "cb")
-                                                   "codeberg.org")
+;; Made anew at each load, as `remoto--github' is.
+(defconst remoto--codeberg (remoto-forgejo-register 'codeberg '("codeberg" "cb")
+                                                     "codeberg.org")
   "The Codeberg forge, a Forgejo server.")
 
 (defvar remoto-forgejo--instances nil
@@ -417,9 +440,15 @@ another forge owns, that names a TRAMP method or that holds a colon or a
 slash, and a HOST with a scheme or a path, are refused with a warning."
   (let ((kept nil))
     (pcase-dolist (`(,prefix . ,forge) remoto-forgejo--instances)
-      (if (member (list prefix (remoto-forge-host forge)) instances)
-          (push (cons prefix forge) kept)
-        (remoto-forgejo--drop forge)))
+      (let ((host (remoto-forge-host forge)))
+        (cond ((not (member (list prefix host) instances))
+               (remoto-forgejo--drop forge))
+              ;; An older remoto, loaded earlier in this session, made it in
+              ;; the shape of its own struct: it is made anew, buffers kept.
+              ((/= (length forge) (length (remoto-forgejo-create)))
+               (push (cons prefix (remoto-forgejo-register (intern prefix) (list prefix) host))
+                     kept))
+              (t (push (cons prefix forge) kept)))))
     (setq remoto-forgejo--instances (nreverse kept)))
   (pcase-dolist (`(,prefix ,host) instances)
     (cond

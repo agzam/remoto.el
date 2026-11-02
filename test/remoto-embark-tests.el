@@ -435,9 +435,18 @@ with that property intact and no live minibuffer."
     (expect (car kill-ring) :to-equal "https://github.com/o/r/commits/main/src/a.el"))
 
   (it "copies a permalink pinned to the commit SHA"
-    (spy-on 'remoto--resolve-commit-sha :and-return-value "sha123")
+    (spy-on 'remoto-forge-resolve-ref :and-return-value "sha123")
     (remoto-embark-copy-permalink "/github:o/r@main:/src/a.el")
-    (expect (car kill-ring) :to-equal "https://github.com/o/r/blob/sha123/src/a.el")))
+    (expect (car kill-ring) :to-equal "https://github.com/o/r/blob/sha123/src/a.el"))
+
+  (it "refuses with one message an action whose URL kind the forge lacks"
+    (let ((remoto-forge-url-templates
+           (cons (cons 'github (assq-delete-all
+                                'blame (copy-alist (alist-get 'github remoto-forge-url-templates))))
+                 remoto-forge-url-templates)))
+      (expect (condition-case err (remoto-embark-copy-blame-url "/github:o/r@main:/src/a.el")
+                (user-error (cadr err)))
+              :to-equal "Remoto: GitHub has no blame URL"))))
 
 (describe "remoto-embark issue actions"
   (it "browses the issue page"
@@ -461,13 +470,44 @@ with that property intact and no live minibuffer."
   (it "opens an issue target via find-file"
     (spy-on 'find-file)
     (remoto-embark-open-issue "/github:o/r#42")
-    (expect 'find-file :to-have-been-called-with "/github:o/r#42")))
+    (expect 'find-file :to-have-been-called-with "/github:o/r#42"))
+
+  (it "reads a topic key by the topic-key of the forge"
+    (let ((remoto--forges (copy-alist remoto--forges))
+          (remoto--handler-regexp remoto--handler-regexp)
+          (file-name-handler-alist (copy-alist file-name-handler-alist)))
+      (remoto-register-forge
+       (remoto-forge-create :name 'fake :prefixes '("fake") :delimiters '(?@ ?#)
+                            :topic-key "\\`!?[0-9]+\\'"))
+      (expect (remoto--embark-issue-parts "/fake:o/r#!42")
+              :to-equal '(fake "o" "r" "!42"))
+      (expect (remoto--embark-classify "/fake:o/r#!42" 'remoto) :to-be 'remoto-issue)
+      (expect (remoto--embark-issue-parts "/github:o/r#!42") :to-be nil)
+      (expect (remoto--embark-issue-parts "/gh:o/r#42")
+              :to-equal '(github "o" "r" "42"))
+      (remoto-embark-copy-issue-ref "/fake:o/r#!42")
+      (expect (car kill-ring) :to-equal "o/r#!42")
+      (expect (remoto-embark-copy-issue-ref "/github:o/r#x") :to-throw 'user-error))))
 
 (describe "remoto-embark open-in-remoto (embark-url-map R)"
   (it "opens a forge URL as a remoto path"
     (spy-on 'find-file)
     (remoto-embark-open-in-remoto "https://github.com/o/r")
-    (expect 'find-file :to-have-been-called-with "/github:o/r:/")))
+    (expect 'find-file :to-have-been-called-with "/github:o/r:/"))
+
+  (it "opens a Codeberg URL, a topic URL and the shorthand at their repository"
+    (spy-on 'find-file)
+    (dolist (case '(("https://codeberg.org/o/r" . "/codeberg:o/r:/")
+                    ("https://codeberg.org/o/r/pulls/7" . "/codeberg:o/r:/")
+                    ("https://github.com/o/r/issues/42" . "/github:o/r:/")
+                    ("o/r@v1" . "/github:o/r@v1:/")))
+      (remoto-embark-open-in-remoto (car case))
+      (expect 'find-file :to-have-been-called-with (cdr case))))
+
+  (it "signals for a URL of no registered host"
+    (spy-on 'find-file)
+    (expect (remoto-embark-open-in-remoto "https://gitlab.com/o/r") :to-throw 'user-error)
+    (expect 'find-file :not :to-have-been-called)))
 
 ;;; Input-form equivalence: /gh:, /github: file-name, and canonical must
 ;;; all behave identically (regression for the shorthand/file-name hole).

@@ -100,9 +100,8 @@
   (when-let* ((number remoto-topic--number)
               (parsed (remoto-topic--parse-repo-path remoto-topic--repo-path)))
     (pcase-let ((`(,forge ,owner ,repo) parsed))
-      (browse-url (remoto--forge-issue-url (remoto-forge-name forge) owner repo
-                                           number
-                                           (if remoto-topic--is-pr 'pr 'issue))))))
+      (browse-url (remoto--url forge (if remoto-topic--is-pr 'pr 'issue)
+                               (list :owner owner :repo repo :key number))))))
 
 (defun remoto-topic-refresh ()
   "Re-fetch and redisplay the current issue/PR."
@@ -263,16 +262,16 @@ Detects whether NUMBER is a PR and renders accordingly."
     (pcase-let* ((`(,forge ,owner ,repo) parsed)
                  (issue (remoto-forge-topic forge owner repo number)))
       (unless issue
-        (user-error "Remoto: not found: %s/%s#%s" owner repo number))
-      (let* ((is-pr (and (alist-get 'pull_request issue) t))
-             (pr-data (when is-pr
-                        (remoto-forge-pull-request forge owner repo number)))
-             (reviews (when is-pr
-                        (remoto-forge-reviews forge owner repo number)))
+        (user-error "Remoto: not found: %s#%s" (remoto--repo-name owner repo) number))
+      (let* ((is-pr (equal (alist-get 'kind issue) "pr"))
+             (extra (when is-pr
+                      (remoto-forge-topic-extra forge owner repo number)))
+             (pr-data (alist-get 'pull-request extra))
+             (reviews (alist-get 'reviews extra))
              (comments (remoto-forge-topic-comments forge owner repo number))
              (display-data (or pr-data issue))
-             (buf-name (format "*remoto: %s%s/%s#%s*"
-                               (remoto--prefix forge) owner repo number))
+             (buf-name (format "*remoto: %s#%s*"
+                               (remoto--repo-id forge owner repo) number))
              (buf (get-buffer-create buf-name)))
         (with-current-buffer buf
           (let ((inhibit-read-only t))

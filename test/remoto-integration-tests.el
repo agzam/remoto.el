@@ -105,7 +105,7 @@
 (describe "integration: default branch"
   (it "resolves the default branch for emacs-mirror/emacs"
     (remoto-itest-with-clean-cache
-      (expect (remoto--default-branch remoto--github remoto-itest-owner remoto-itest-repo)
+      (expect (remoto-forge-default-ref remoto--github remoto-itest-owner remoto-itest-repo)
               :to-equal "master"))))
 
 ;;; Tree fetching
@@ -118,7 +118,7 @@
           (remoto--default-branch-cache remoto-itest--tree-branch-cache)
           (remoto--content-cache (make-hash-table :test 'equal)))
       (setq remoto-itest--tree
-            (remoto--fetch-tree
+            (remoto-forge-tree
              remoto--github remoto-itest-owner remoto-itest-repo remoto-itest-ref))))
 
   (after-all
@@ -243,17 +243,17 @@
 (describe "integration: file content"
   (it "fetches file content with correct first line"
     (remoto-itest-with-clean-cache
-      (let ((content (remoto--fetch-file-content
+      (let ((content (remoto-forge-content
                       remoto--github remoto-itest-owner remoto-itest-repo
-                      "README" remoto-itest-ref)))
+                      remoto-itest-ref "README")))
         (expect (length content) :to-be-greater-than 100)
         (expect content :to-match "\\`Copyright"))))
 
   (it "caches content by SHA"
     (remoto-itest-with-clean-cache
       ;; Fetch once
-      (remoto--fetch-file-content
-       remoto--github remoto-itest-owner remoto-itest-repo "README" remoto-itest-ref)
+      (remoto-forge-content
+       remoto--github remoto-itest-owner remoto-itest-repo remoto-itest-ref "README")
       (expect (hash-table-count remoto--content-cache) :to-be-greater-than 0)
       ;; Second fetch should use cache (we can't easily count API calls,
       ;; but we can verify the cache has the entry)

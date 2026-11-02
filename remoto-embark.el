@@ -155,15 +155,16 @@ non-strings and unrecognized strings are returned as-is."
        ((null parsed) path)
        ((and (eq (remoto-path-level parsed) 'tree)
              (remoto-path-short parsed))
-        (format "%s%s/%s:%s" (remoto--path-prefix parsed) (remoto-path-owner parsed)
-                (remoto-path-repo parsed) (remoto-path-path parsed)))
+        (concat (remoto--repo-id (remoto-path-forge parsed) (remoto-path-owner parsed)
+                                 (remoto-path-repo parsed))
+                ":" (remoto-path-path parsed)))
        ((remoto--repo-root parsed)
         (remoto--canonical-path (remoto--repo-root parsed)))
        (t path)))))
 
 (defun remoto--embark-classify (path fallback &optional ref)
   "Return the Embark target type for the remoto PATH string, else FALLBACK.
-Classifies by shape: an issue/PR (a trailing `#N'), an account/owner
+Classifies by shape: an issue/PR (a trailing `#KEY'), an account/owner
 \(`/FORGE:OWNER'), otherwise the repo, directory, or file type from the
 context layer.  A bare `@REF' root is the branch or tag only when REF is
 non-nil, which a branch or tag completion candidate and a line of a Dired
@@ -173,7 +174,7 @@ normalized with `remoto--embark-canonicalize' first, so the shorthand and
 file-name forms classify like the canonical one."
   (let ((path (remoto--embark-canonicalize path)))
     (cond
-     ((string-match-p (rx "#" (+ digit) eos) path) 'remoto-issue)
+     ((remoto--embark-issue-parts path) 'remoto-issue)
      ((and ref (string-match-p (rx "@" (+ nonl) ":/" eos) path)) 'remoto-branch)
      ((remoto--embark-owner-parts path) 'remoto-owner)
      (t (let ((ctx (remoto--embark-context-or-nil path)))
@@ -203,9 +204,9 @@ generic `remoto' fallback keymap."
          (ctx (remoto--path-context path))
          (owner (remoto--embark-owner-parts path)))
     (cond
-     (issue (apply #'remoto--forge-issue-url issue))
+     (issue (remoto--embark-issue-url path))
      (ctx (remoto--context-web-url ctx))
-     (owner (apply #'remoto--forge-owner-url owner))
+     (owner (remoto--embark-owner-url path))
      (t (user-error "Remoto: no web URL for target `%s'" target)))))
 
 ;;;; Actions
@@ -263,9 +264,8 @@ TARGET may be a repository, directory, file, issue/PR, or owner."
 (defun remoto-embark-copy-permalink (target)
   "Copy a permalink, pinned to the commit SHA, for remoto file TARGET."
   (interactive "sRemoto file: ")
-  (let* ((ctx (remoto--embark-context target))
-         (sha (remoto--context-commit-sha ctx)))
-    (remoto--kill-url (remoto--context-url ctx (plist-get ctx :kind) sha))))
+  (remoto--kill-url
+   (remoto--context-permalink-or-refuse (remoto--embark-context target))))
 
 (defun remoto-embark-open-in-remoto (url)
   "Open the forge URL (or `owner/repo' shorthand) URL in remoto.
@@ -307,46 +307,45 @@ This routes to the remoto-topic display via `find-file', which needs
 (defun remoto-embark-copy-issue-ref (target)
   "Copy the OWNER/REPO#N reference for the remoto issue/PR TARGET."
   (interactive "sRemoto issue: ")
-  (if (string-match (rx "/" (+ (not (in ":"))) ":"
-                        (group (+ (not (in "/")))) "/"
-                        (group (+ (not (in "#")))) "#" (group (+ digit)))
-                    target)
-      (remoto--kill-url (format "%s/%s#%s"
-                                (match-string 1 target)
-                                (match-string 2 target)
-                                (match-string 3 target)))
+  (if-let* ((parts (remoto--embark-issue-parts target)))
+      (pcase-let ((`(,_forge ,owner ,repo ,key) parts))
+        (remoto--kill-url (concat (remoto--repo-name owner repo) "#" key)))
     (user-error "Remoto: not an issue target: %s" target)))
 
 (defun remoto--embark-issue-parts (target)
-  "Return (FORGE OWNER REPO NUMBER) for an issue TARGET like /github:O/R#N."
-  (when (string-match (rx "/" (+ (not (in ":"))) ":"
-                          (group (+ (not (in "/")))) "/"
-                          (group (+ (not (in "#")))) "#" (group (+ digit)))
-                      target)
-    ;; Bind the match strings before `remoto--forge-type', which runs its
-    ;; own `string-match' and would otherwise clobber the match data.
-    (let ((owner (match-string 1 target))
-          (repo (match-string 2 target))
-          (number (match-string 3 target)))
-      (list (remoto--forge-type target) owner repo number))))
+  "Return (FORGE OWNER REPO KEY) for an issue TARGET like /github:O/R#KEY.
+KEY matches the `topic-key' of the forge; FORGE is the forge's name."
+  (when-let* ((parsed (remoto--parse (remoto--normalize-shorthand target)))
+              ((eq (remoto-path-level parsed) 'topics))
+              (key (remoto-path-query parsed))
+              (forge (remoto-path-forge parsed))
+              ((remoto--topic-key-p forge key)))
+    (list (remoto-forge-name forge) (remoto-path-owner parsed)
+          (remoto-path-repo parsed) key)))
+
+(defun remoto--embark-issue-url (target &optional kind)
+  "Return the URL of KIND, `issue' by default, of the issue/PR TARGET."
+  (pcase-let ((`(,forge ,owner ,repo ,key)
+               (or (remoto--embark-issue-parts target)
+                   (user-error "Remoto: not an issue target: %s" target))))
+    (remoto--url (remoto--forge-named forge) (or kind 'issue)
+                 (list :owner owner :repo repo :key key))))
 
 (defun remoto-embark-browse-issue (target)
   "Open the web page for the remoto issue/PR TARGET in a browser."
   (interactive "sRemoto issue: ")
-  (browse-url (apply #'remoto--forge-issue-url (remoto--embark-issue-parts target))))
+  (browse-url (remoto--embark-issue-url target)))
 
 (defun remoto-embark-copy-issue-url (target)
   "Copy the web URL for the remoto issue/PR TARGET."
   (interactive "sRemoto issue: ")
-  (remoto--kill-url (apply #'remoto--forge-issue-url
-                           (remoto--embark-issue-parts target))))
+  (remoto--kill-url (remoto--embark-issue-url target)))
 
 (defun remoto-embark-browse-pr-diff (target)
   "Open the PR files-diff page for the remoto issue/PR TARGET in a browser.
 For an issue the forge redirects to the issue page."
   (interactive "sRemoto PR: ")
-  (browse-url (apply #'remoto--forge-issue-url
-                     (append (remoto--embark-issue-parts target) '(pr-diff)))))
+  (browse-url (remoto--embark-issue-url target 'pr-diff)))
 
 (defun remoto--embark-owner-parts (target)
   "Return (FORGE OWNER) for an account TARGET like /github:OWNER."
@@ -358,22 +357,28 @@ For an issue the forge redirects to the issue page."
     (let ((owner (match-string 1 target)))
       (list (remoto--forge-type target) owner))))
 
+(defun remoto--embark-owner-url (target &optional kind)
+  "Return the URL of KIND, `owner' by default, of the owner TARGET."
+  (pcase-let ((`(,forge ,owner)
+               (or (remoto--embark-owner-parts target)
+                   (user-error "Remoto: not an owner target: %s" target))))
+    (remoto--url (remoto--forge-named forge) (or kind 'owner)
+                 (list :owner owner))))
+
 (defun remoto-embark-browse-owner (target)
   "Open the account/organization page for the remoto owner TARGET."
   (interactive "sRemoto owner: ")
-  (browse-url (apply #'remoto--forge-owner-url (remoto--embark-owner-parts target))))
+  (browse-url (remoto--embark-owner-url target)))
 
 (defun remoto-embark-copy-owner-url (target)
   "Copy the account/organization page URL for the remoto owner TARGET."
   (interactive "sRemoto owner: ")
-  (remoto--kill-url (apply #'remoto--forge-owner-url
-                           (remoto--embark-owner-parts target))))
+  (remoto--kill-url (remoto--embark-owner-url target)))
 
 (defun remoto-embark-browse-owner-repos (target)
   "Open the repositories page for the remoto owner TARGET in a browser."
   (interactive "sRemoto owner: ")
-  (browse-url (apply #'remoto--forge-owner-url
-                     (append (remoto--embark-owner-parts target) '(owner-repos)))))
+  (browse-url (remoto--embark-owner-url target 'owner-repos)))
 
 (defun remoto--clone-directory ()
   "Return a local directory to run a clone in and resolve it against."

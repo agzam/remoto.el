@@ -3,6 +3,18 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [Unreleased]
+
+** Added
+- ~remoto-browse~ opens names and URLs of every registered forge, ~/cb:~ input included
+- adds ~remoto-default-forge~ - the forge a bare ~OWNER/REPO~ in ~remoto-browse~ names, ~github~ by default
+- ~remoto-browse~ opens more GitHub input: ~/gh:~ and canonical paths, owner and root URLs, ~github.com/OWNER/REPO~
+
+** Changed
+- copy and browse commands refuse a URL kind a forge lacks with one message: "Remoto: TITLE has no KIND URL"
+- TRAMP leaves remoto prefixes alone while ~global-remoto-mode~ is on
+- for source authors: the forge contract is 18 methods, described in SPEC.md
+
 * [2.7.0] - 2026-11-01
 
 ** Changed

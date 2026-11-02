@@ -35,14 +35,17 @@ Users should never have to type the canonical form manually. `remoto-browse` (an
 | `git@github.com:torvalds/linux` | `/github:torvalds/linux:/` |
 | `torvalds/linux` | `/github:torvalds/linux:/` |
 | `torvalds/linux@v6.5` | `/github:torvalds/linux@v6.5:/` |
+| `github.com/torvalds/linux`, `/gh:torvalds/linux` | `/github:torvalds/linux:/` |
+| `https://github.com/torvalds/linux?tab=readme-ov-file` | `/github:torvalds/linux:/` |
+| `https://github.com/torvalds` | `/github:torvalds/` (the owner's listing) |
 
-The parser is a single function `remoto--parse-input` that normalizes any of the above into `(owner repo ref path)`. The rules:
+`remoto--parse-url` turns each URL, remote and shorthand above into a `remoto-path`, through `remoto-forge-parse-url` of each forge (see Forges). GitHub's rules:
 
 1. Strip `https://github.com/` prefix if present.
 2. Strip `git@github.com:` prefix if present.
 3. Strip trailing `.git` if present.
 4. From the remaining string, extract `owner/repo`. Everything after that is path context.
-5. For web URLs: `/tree/REF/PATH` means directory, `/blob/REF/PATH` means file. Fragment (`#L10-L20`) is stripped.
+5. For web URLs: `/tree/REF/PATH` means directory, `/blob/REF/PATH` means file. A fragment (`#L10-L20`) and a query string (`?plain=1`) are stripped.
 6. `@REF` suffix on the repo portion sets the ref explicitly.
 7. Missing ref -> nil (resolved lazily to default branch on first API call).
 
@@ -50,7 +53,7 @@ When `@REF` is omitted, the first access resolves the default branch via the rep
 
 ### URL rewriting
 
-GitHub URLs are also detected and rewritten automatically in `dired` and `find-file-noselect` via `:around` advice. The function `remoto--github-input-p` detects GitHub-like inputs (https URLs, git SSH URLs, `/github.com/...` paths), and `remoto--maybe-rewrite` converts them to canonical remoto paths. This lets users do:
+GitHub URLs are also detected and rewritten automatically in `dired` and `find-file-noselect` via `:around` advice. The function `remoto--url-forge` detects forge inputs (https URLs, git SSH URLs, `/github.com/...` paths), and `remoto--maybe-rewrite` converts them to canonical remoto paths. This lets users do:
 
 ```
 C-x d /github.com/torvalds/linux RET
@@ -285,7 +288,7 @@ dr-xr-xr-x  1 github github    20480 Mar  3  2021 old-thing
 - The size is the API's `size` in bytes, the date the last push (`ls -l` format, local time, English month names), the mode `drwx------` for a private repository and `dr-x` in front for an archived one. An account line has the fixed size and date of tree entries.
 - A note follows each name: the description, `fork` in front for a fork; at `/github:` the account type and description. Notes start 4 columns past the longest name, so `dired-hide-details-mode` hides them with symlink targets (dired.el hides a line from 4 columns past its name under `dired-hide-details-link`).
 - The switches order the lines as in a tree (see Dired Integration); `-t` sorts by the last push, newest first.
-- The first page of 100 is a blocking `remoto--api` call. When it is full, `remoto--fetch-listing-page` fetches the next page through `remoto--api-async`, one at a time, until a short page or `remoto-listing-cap` (1000); then every Dired buffer of the listing reverts once. The `.` line's note tells a partial listing: fetching, capped, or failed; switches without `-a` leave the `.` line out, and only the messages tell it then. Not the `total` line: Dired deletes that under the default `dired-free-space`. The end of the pages, failed or not, renews the listing's time, because the revert that shows the end would otherwise find a listing older than `remoto-repo-cache-ttl` stale and fetch it all again, and again; `remoto-refresh` retries a failed one.
+- The first page of 100, from `remoto-forge-entries`, is a blocking call. When it names a next page, `remoto--fetch-listing-page` asks `remoto-forge-entries` for it with a callback (`remoto--api-async` on GitHub), one at a time, until a short page or `remoto-listing-cap` (1000); then every Dired buffer of the listing reverts once. The `.` line's note tells a partial listing: fetching, capped, or failed; switches without `-a` leave the `.` line out, and only the messages tell it then. Not the `total` line: Dired deletes that under the default `dired-free-space`. The end of the pages, failed or not, renews the listing's time, because the revert that shows the end would otherwise find a listing older than `remoto-repo-cache-ttl` stale and fetch it all again, and again; `remoto-refresh` retries a failed one.
 - Each repository's `default_branch` goes into `remoto--default-branch-cache`, so `RET` on a line costs one tree request.
 - A Dired line names `/github:OWNER/REPO` or `/github:OWNER`, bare names that `file-exists-p` denies to keep the `[Confirm]` of a half-typed name. `remoto--listed-p` lets them through once a cached listing holds them, whatever its age, so a buffer that still shows a name can open it.
 - A bare `/github:OWNER/NAME` that names no repository opens a Dired of OWNER's repositories that match NAME (`remoto--repo-matches`, called by the `find-file-noselect` and `dired-noselect` advice). The repository check stays first: `remoto--repository-p` asks for the default branch, and only a 404 (a `user-error` starting with `remoto--not-found`) means no; a NAME with a character no repository name has (a space from orderless, say) is not asked about. The matches come from the search completion ran at `/github:OWNER/` (`\0repos:OWNER/NAME` in `remoto--search-cache`), or from that search run then, whose failure signals. They open as Dired on a list of names, `(DIR . NAMES)`, so they take the place of an open `/github:OWNER/` listing until `C-x d /github:OWNER/` brings it back. Dired asks `insert-directory` for each name without FULL-DIRECTORY-P and checks `file-readable-p` of `/github:OWNER` first. Each line comes from `remoto--entry-cache`, which listing pages and every repository search fill (`remoto--remember-repo`, with the default branch); the names in `dired-directory` line the notes up, from widths counted once per reading (`remoto--entry-widths`), since a count per line made a long list quadratic.
@@ -299,13 +302,13 @@ dr-xr-xr-x  1 github github    20480 Mar  3  2021 old-thing
 
 ## TRAMP Coexistence
 
-TRAMP's `tramp-file-name-regexp` matches `/method:...` patterns, which would intercept `/github:...` paths. The remoto handler is pushed to the front of `file-name-handler-alist` so it's checked first. First match wins.
+TRAMP's `tramp-file-name-regexp` matches `/method:...` patterns, which would intercept `/github:...` paths. The remoto handler is pushed to the front of `file-name-handler-alist` so it's checked first. First match wins. While `global-remoto-mode` is on, `tramp-ignored-file-name-regexp` also matches every registered prefix (see Forges).
 
 ## Error Handling
 
 Two policies:
 
-1. During completion (typing/TAB): all errors swallowed, empty list returned. Every `remoto--fetch-*` uses `(condition-case nil ... (user-error nil))`.
+1. During completion (typing/TAB): all errors swallowed, empty list returned. Every fetcher that completion calls wraps its requests in `(condition-case nil ... (user-error nil))`.
 2. During open (RET): errors surface as `user-error` ("Remoto: not found: ...").
 
 ghub signals typed conditions for HTTP errors. `remoto--api` catches these and re-signals as `user-error`:
@@ -319,7 +322,7 @@ ghub signals typed conditions for HTTP errors. `remoto--api` catches these and r
 
 ## Interactive Commands
 
-- `remoto-browse` - prompt for a repo using standard `completing-read` with a programmed completion table (`remoto--repo-completion-table`), open dired at root or find-file for blob paths. Type 3+ characters to trigger GitHub search via the search API. Tab completes repo names. Append `@` to complete branch names - fetches branches via the GitHub Branches API and offers `owner/repo@branch` candidates, with prefix filtering. Works with any completion frontend (vertico, ivy, helm, vanilla Emacs). Search results are cached for `remoto-search-cache-ttl` seconds (default 300). Branch results are cached in `remoto--branches-cache` with the same TTL as search results. Owner-scoped repo search shares the `remoto--search-owner-repos` engine with `/github:` completion (results are reformatted from bare repo names to `owner/repo`), and the ⟳ indicator shows while searching and during the post-selection fetch (see Fetch indicator).
+- `remoto-browse` - prompt for a repo using standard `completing-read` with a programmed completion table (`remoto--repo-completion-table`), open dired at root or find-file for blob paths. It opens names and URLs of every registered forge: a prefix such as `/cb:` picks the forge, a URL names its own, and a bare `OWNER/REPO` goes to `remoto-default-forge` (see Forges). Type 3+ characters to search. Tab completes repo names. Append `@` to complete refs, `#` topics, `/` files. Works with any completion frontend (vertico, ivy, helm, vanilla Emacs). Search results are cached for `remoto-search-cache-ttl` seconds (default 300). Owner-scoped repo search shares `remoto-forge-complete` with `/github:` completion (results are reformatted from bare repo names to `owner/repo`), and the ⟳ indicator shows while searching and during the post-selection fetch (see Fetch indicator).
 - `remoto-refresh` - invalidate tree and branch caches for current repo, re-fetch. Reverts dired buffer if in one. In a listing of `/github:` or `/github:OWNER/` it drops that listing and fetches it again; in a Dired of branches and tags it forgets the repository's branches and tags.
 - URL commands - `remoto-copy-url`, `remoto-copy-blame-url`, `remoto-copy-permalink`, `remoto-copy-raw-url`, `remoto-copy-history-url`, `remoto-browse-url` - and the `remoto-mode` minor mode. See "Forge-agnostic URL Layer" below. `remoto-copy-github-url` remains as an obsolete alias of `remoto-copy-url`.
 
@@ -393,11 +396,10 @@ Returns nil for incomplete paths (triggers `[Confirm]` prompt):
 - `remoto--search-owner-repos` - `search/repositories?q=QUERY+in:name+user:OWNER`. Cached, client-side narrowing.
 - `remoto--fetch-branches` - `repos/OWNER/REPO/branches`. TTL-cached in `remoto--branches-cache`.
 - `remoto--fetch-tags` - `repos/OWNER/REPO/tags`. TTL-cached in `remoto--tags-cache`.
-- `remoto--fetch-issues` - `repos/OWNER/REPO/issues?state=open&sort=updated`. TTL-cached in `remoto--issues-cache`.
-- `remoto--search-issues` - `search/issues?q=QUERY+repo:OWNER/REPO`. Not cached (ephemeral).
-- `remoto--fetch-issue` - `repos/OWNER/REPO/issues/NUMBER`. Not cached.
+- `remoto-forge-topics` - `repos/OWNER/REPO/issues?state=open&sort=updated` for an empty query, TTL-cached in `remoto--issues-cache`; text goes to `remoto--search-topics`, `search/issues?q=QUERY+repo:OWNER/REPO`, not cached.
+- `remoto-forge-topic` - `repos/OWNER/REPO/issues/KEY`. Not cached.
 - `remoto--fetch-user-orgs` - `/user/orgs` (authenticated endpoint, includes private memberships).
-- `remoto--fetch-file-commits` - `repos/OWNER/REPO/commits?sha=REF&path=FILE&per_page=1` per file (capped at 20). TTL-cached in `remoto--file-commits-cache`.
+- `remoto-forge-entry-notes` - `repos/OWNER/REPO/commits?sha=REF&path=FILE&per_page=1` per file (capped at 20). TTL-cached in `remoto--file-commits-cache`.
 
 #### Caches
 
@@ -417,7 +419,7 @@ Returns nil for incomplete paths (triggers `[Confirm]` prompt):
 
 #### Partial path handling
 
-The handler recognizes partial paths (`/github:`, `/github:OWNER/`) that don't match `remoto--path-regexp`. For these: `file-exists-p` and `file-directory-p` return t, `file-name-directory`/`nondirectory` split correctly, `file-remote-p` returns `/github:` prefix. `remoto--parse-partial-canonical` handles `/github:OWNER/REPO[@REF]` (excludes `#` from repo name character class).
+`remoto--parse` parses every path with a canonical prefix, partial ones included (`/github:`, `/github:OWNER/`, `/github:OWNER/REPO@REF`), into a `remoto-path` whose level is the deepest directory it names and whose query is the text after it. For the partial ones: `file-exists-p` and `file-directory-p` return t, `file-name-directory`/`nondirectory` split correctly, `file-remote-p` returns the `/github:` prefix.
 
 ### Fetch indicator
 
@@ -437,9 +439,9 @@ Faces: `remoto-topic-title`, `remoto-topic-state-open`, `remoto-topic-state-clos
 
 ## Forge-agnostic URL Layer
 
-The web-URL features sit on a small forge-agnostic core, so adding a forge (GitLab, Codeberg, ...) is a data change, not new command code. Two pieces:
+The web-URL features sit on a small forge-agnostic core: every command asks `remoto-forge-url`, whose default method fills the templates below, so a forge with URLs of that form adds data, not code. A forge whose URLs differ writes a method instead, and a kind it answers nil for is refused by every command (see Forges). Two pieces:
 
-1. `remoto-forge-url-templates` - an alist keyed by forge symbol. Each value maps a URL KIND to a `format-spec` template. Path-level kinds: `blob`, `tree`, `blame`, `history`, `raw`. Repository-level kinds: `repo` (web root), `ssh` and `https` (clone URLs). Account-level kinds: `owner` (profile page), `owner-repos` (repositories tab). Issue/PR kinds: `issue`, `pr-diff`; branch kinds: `compare`, `new-pr`. Plus the `line`/`region` fragment builders. Specs: `%o` owner, `%r` repo, `%R` ref, `%p` repo-relative path, `%N` issue/PR number, `%L` line fragment.
+1. `remoto-forge-url-templates` - an alist keyed by forge symbol. Each value maps a URL KIND to a `format-spec` template. Path-level kinds: `blob`, `tree`, `blame`, `history`, `raw`. Repository-level kinds: `repo` (web root), `ssh` and `https` (clone URLs). Account-level kinds: `owner` (profile page), `owner-repos` (repositories tab). Issue/PR kinds: `issue`, `pr`, `pr-diff`; branch kinds: `compare`, `new-pr`. Plus the `line`/`region` fragment builders. Specs: `%o` owner, `%r` repo, `%R` ref, `%k` ref kind, `%p` repo-relative path, `%N` topic key, `%L` line fragment.
 
 2. A context plist - the currency every command and Embark action consumes, built by `remoto--path-context PATH &optional LINE-START LINE-END`:
 
@@ -536,7 +538,7 @@ project.el asks `file-remote-p` of every root it reads, writes and prunes, and r
 
 ## Known Technical Debt
 
-- `remoto-browse` and `find-file` completion still have parallel dispatch/formatting code. The fetch logic is shared (`remoto--fetch-dir-children-light`, `remoto--fetch-branches`, `remoto--fetch-issues`, etc.) and, as of 1.6.0, so is the owner repo search: `remoto-browse` delegates to `remoto--search-owner-repos` / `remoto--recent-owner-repos` and reformats the bare repo names to `owner/repo`, instead of keeping its own copy (the divergent `remoto--search-repos-from-parent` narrowing was removed). What still differs is the mode parsing (`remoto--browse-parse-input` vs `remoto--parse-partial-github-path`) and candidate formatting (full `owner/repo` strings vs bare path segments). A shared dispatcher returning raw candidates per mode, with each UI layer applying its prefix, would eliminate the rest. Non-trivial because `file-name-all-completions` splits input into `(file directory)` while `completing-read` uses a single string.
+- `remoto-browse` and `find-file` completion still have parallel dispatch/formatting code. Both get their data from the forge contract (`remoto-forge-complete`, `remoto-forge-refs`, `remoto-forge-topics`, `remoto-forge-children`). What still differs is the mode parsing (`remoto--browse-parse-input` vs `remoto--parse`) and candidate formatting (full `owner/repo` strings vs bare path segments). A shared dispatcher returning raw candidates per mode, with each UI layer applying its prefix, would eliminate the rest. Non-trivial because `file-name-all-completions` splits input into `(file directory)` while `completing-read` uses a single string.
 
 ## Limitations
 
@@ -550,11 +552,73 @@ project.el asks `file-remote-p` of every root it reads, writes and prunes, and r
 - Rate limit: 5,000 requests/hour. Normal browsing stays well within this.
 - Submodules appear as entries in the tree but are not traversable.
 
-## Multi-forge Direction
+## Forges
 
-The core speaks to a forge through the generic functions of the forge contract (`remoto-forge-*`), dispatching on a `cl-defstruct` type per forge; a forge registers its path prefixes with `remoto-register-forge`. Two forges ship: GitHub in `remoto-github.el` and Forgejo in `remoto-forgejo.el`, which registers Codeberg under `/codeberg:` and `/cb:`.
+The core speaks to a source of repositories through the forge contract: 18 generic functions named `remoto-forge-*`, which dispatch on a `cl-defstruct` type per forge. A forge registers its path prefixes with `remoto-register-forge`. Two forges ship: GitHub in `remoto-github.el` and Forgejo in `remoto-forgejo.el`, which registers Codeberg under `/codeberg:` and `/cb:`.
 
-### Forgejo: GitHub's API against another host
+The contract uses three words broadly. A repo is anything with a tree: a repository, a gist, a package version. A ref is anything that selects a tree: a branch, a tag, a commit, a version. A topic is an item with a key and a buffer of its own: an issue, a pull request.
+
+### The forge struct
+
+A source defines a struct that includes `remoto-forge` and sets these slots:
+
+| Slot | Meaning |
+|---|---|
+| `name` | the symbol of the forge, such as `github` or `codeberg`; `remoto-forge-url-templates` and `remoto-default-forge` name a forge by it |
+| `prefixes` | the path prefixes without slash or colon, the first canonical: `("github" "gh")` |
+| `host` | the web host, such as `github.com`: the host of its URLs and git remotes, and of its login rows in auth-source |
+| `delimiters` | the characters after a repository that the forge supports, each registered with `remoto-register-delimiter`: `@` opens the refs, `#` the topics. A forge without them has no refs or topics levels, and the characters are plain in its paths |
+| `title` | the name in messages and prompts: "GitHub", "Codeberg", or a Forgejo server's host |
+| `topic-key` | a regexp of a topic key, digits by default. `file-exists-p`, completion, the routing to the topic buffer and Embark's classifier test a key against it and ask the forge nothing |
+| `locator` | how many path segments name a repository, 2 by default (see Locators) |
+
+`remoto-register-forge` computes the slot `repo-end` from the delimiters and the locator; a source does not set it.
+
+### Locators
+
+| `locator` | Repository name | Canonical path |
+|---|---|---|
+| `2` | `OWNER/REPO` | `/PREFIX:OWNER/REPO@REF:/PATH` |
+| `1` | one name, no owner: the path's owner is nil | `/PREFIX:NAME@REF:/PATH` |
+| a function | called with the segments after the prefix, it answers the count, for names whose depth varies, such as scoped package names | as for the count it answers |
+| `open` | groups of any depth: the last slash before a delimiter or colon ends the owner | `/PREFIX:GROUP/SUBGROUP/NAME@REF:/PATH` |
+
+`remoto--parse` reads the locator and asks the forge nothing. The short form of an `open` locator, `/PREFIX:GROUP/SUBGROUP/NAME/FILE`, does not show where the repository ends: the rewrite and the Dired of matches ask `remoto-forge-split`, first without WAIT and then with it, and a name that no answer splits stays a group directory. A one-name repository appears without a slash in messages, completion targets, topic buffer names and Embark targets (`remoto--repo-name`).
+
+### Forge contract
+
+Every method takes the forge first. The data methods signal `remoto-unsupported` by default; the URL methods answer nil.
+
+| Method | Answer | Default |
+|---|---|---|
+| `remoto-forge-default-ref (forge owner repo)` | the name of the default branch; nil for a source without refs, whose `/PREFIX:OWNER/REPO/` then opens at `/PREFIX:OWNER/REPO:/` | signals |
+| `remoto-forge-tree (forge owner repo ref)` | a hash table from path to entry, an alist of `type` ("tree" or "blob"), `size`, `sha` and `mode`; `""` and `"/"` hold the root, `"\0truncated"` is t for a partial tree | signals |
+| `remoto-forge-directory-contents (forge owner repo ref dir)` | `((PATH . ENTRY) ...)` under DIR, PATH from the repository root; asked when the tree is truncated | signals |
+| `remoto-forge-children (forge owner repo ref dir)` | `((NAME . ENTRY) ...)`, the direct children of DIR, cheap enough for completion | the children in the tree |
+| `remoto-forge-content (forge owner repo ref path)` | the bytes of the file as a unibyte string; the caller decodes it. `file-local-copy` and `copy-file` read it too | signals |
+| `remoto-forge-resolve-ref (forge owner repo ref)` | the exact ref a permalink pins: a commit SHA on a forge | signals |
+| `remoto-forge-refs (forge owner repo)` | `((LABEL . NAMES) ...)` in listing order; the refs Dired and completion show LABEL beside each name. GitHub and Forgejo answer a "branch" group and a "tag" group | signals |
+| `remoto-forge-forget (forge &optional owner repo)` | drops what the forge caches of OWNER/REPO, or everything without them; `remoto-refresh` asks for one repository, `remoto-unload-function` for all | nil |
+| `remoto-forge-topics (forge owner repo query)` | a list of items: the open topics, newest first, for a nil or empty QUERY, a search for text. Each item is the source's alist plus `key`, the text after `#`, and `kind`, "issue" or "pr" | signals |
+| `remoto-forge-topic (forge owner repo key)` | the item of KEY, with `key` and `kind`, or nil when KEY names no topic | signals |
+| `remoto-forge-topic-comments (forge owner repo key)` | the comments of the topic | signals |
+| `remoto-forge-topic-extra (forge owner repo key)` | what the topic buffer shows past title, body, state and comments; for a GitHub pull request `((pull-request . DATA) (reviews . REVIEWS))` | nil |
+| `remoto-forge-entry-notes (forge owner repo ref dir names)` | `((NAME . NOTE) ...)`, the text completion shows after a name; the subject of the last commit on GitHub | nil |
+| `remoto-forge-entries (forge path &optional continuation callback)` | `(ENTRIES . NEXT)`, one page of the listing at PATH, a root or owner `remoto-path`: the first page without CONTINUATION, the page it names with it. NEXT names the next page, nil after the last. With CALLBACK the method may answer nil and later call CALLBACK with the pair or `failed` | signals; an `:around` method passes a page answered at once to CALLBACK |
+| `remoto-forge-complete (forge path query wait)` | the TAB candidates at a root or owner PATH: an empty QUERY answers the accounts or the recent repositories, text a search. A nil QUERY is the prefetch: it starts fetching an owner's repositories and answers nothing. Without WAIT the method answers from a cache and asks later; with WAIT it asks and answers | at the root, for an empty QUERY, the accounts of `remoto-forge-entries` once the token's account is known; signals otherwise |
+| `remoto-forge-url (forge kind context)` | the web or clone URL of KIND, or nil for a kind the forge lacks. KIND is `blob`, `tree`, `blame`, `history`, `raw`, `repo`, `ssh`, `https`, `owner`, `owner-repos`, `issue`, `pr`, `pr-diff`, `compare` or `new-pr`; CONTEXT is a plist of `:owner :repo :ref :path :key :line-start :line-end` | fills the templates of the forge's name in `remoto-forge-url-templates`; nil without them |
+| `remoto-forge-parse-url (forge input)` | the `remoto-path` that INPUT names at any level: a web URL, a git remote or a shorthand. A topic URL gives the topics level with the topic key as the query | nil |
+| `remoto-forge-split (forge names &optional wait)` | `(OWNER . REPO)` for NAMES, the segments of a short form, OWNER nil for one name; nil while the forge cannot tell. WAIT asks the forge to look the name up | splits by a numeric or function locator; an `open` locator needs a method |
+
+Conventions the core relies on:
+
+- Paging: the core pages a listing. The first page comes at once; `remoto--fetch-listing-page` asks for the later ones with a callback, one at a time, up to `remoto-listing-cap`, and drops a page that a refresh outlived.
+- URLs: the commands ask `remoto-forge-url` through `remoto--url`, which refuses a nil answer with `user-error` "Remoto: TITLE has no KIND URL". A permalink is the `blob` or `tree` URL at the ref `remoto-forge-resolve-ref` answers, so a source without refs has none. Embark keeps such actions in its keymaps, since it holds the target in a lexical binding that a keymap filter cannot read; the action refuses with the same message.
+- Parsing URLs: `remoto--parse-url` asks every registered forge for the input first and GitHub's bare `OWNER/REPO[@REF]` shorthand last, so a URL of another forge never reads as a GitHub shorthand. To tell the forge of a URL, the core binds `remoto--url-ref-lookup` to nil (`remoto--url-shape`): the parse answers from the URL's shape and asks the forge for no refs. A forge parses a ref with a slash, such as `tree/feature/x/dir`, by its refs only while that variable is non-nil.
+
+### Forges with GitHub's API
+
+`remoto-github.el` keeps a private layer for forges whose API copies GitHub's: generic functions named `remoto--...` that `remoto-forgejo.el` overrides. In `remoto.el`: the transport (`remoto--api-host`, `remoto--ghub-forge`, `remoto--literal-token`, `remoto--page-params`, `remoto--page-size`, `remoto--paginated-api`, `remoto--anonymous-limit`), the login (`remoto--token-url`, `remoto--token-prompt`), `remoto--ref-kind` for the `%k` of URL templates and `remoto--browse-repos` for `remoto-browse`. In `remoto-github.el`: `remoto--search-items`, `remoto--account-search-endpoint`, `remoto--repo-search-endpoint`, `remoto--extract-search-users`, `remoto--matching-refs`, `remoto--fetch-user-orgs`, `remoto--search-topics` and `remoto--reviews`. This layer is not part of the contract. A source of another shape implements the 18 methods only, with its own transport.
 
 Forgejo (and Gitea, and Codeberg, which runs Forgejo) cloned GitHub's REST API, so `remoto-forgejo` includes `remoto-github` and inherits its methods. Every GitHub function takes the forge it speaks for, and the transport asks the forge for its API host (`remoto--api-host`, `codeberg.org/api/v1`) and its kind for ghub (`remoto--ghub-forge`, `forgejo`). Forgejo overrides only what differs:
 
@@ -593,9 +657,43 @@ Every cache key starts with the canonical prefix of the forge (`remoto--repo-id`
 
 Each forge file carries an autoload cookie that registers `remoto-autoload-file-name-handler` for its prefixes, so the first path of a session loads remoto, `file-remote-p` aside (see project.el); the mode then installs the real handler under `remoto--handler-regexp`, every registered prefix. An instance's prefix exists once remoto is loaded.
 
+### Upgrades in a running session
+
+package.el reloads an upgraded package's files in the order they first loaded, so the forge files, which remoto.el requires at its end, reload before remoto.el. When the struct changes, the old code and records stay until something replaces them:
+
+- `remoto-forgejo.el` defines a struct that includes `remoto-github`, so it loads the remoto.el beside it first when the loaded core comes from another directory (`feature-file`, which has no file for `remoto` while remoto.el itself is loading).
+- `remoto--github` and `remoto--codeberg` are constants, made anew at each load: the accessors of a new struct fail on a record of the old shape.
+- A server of `remoto-forgejo-instances` whose forge an older remoto made is made anew when the option is set again at load, its buffers kept.
+
+A source whose struct includes `remoto-forge` needs the same care. A spec of "a fresh session" in `test/remoto-tests.el` loads the files in package.el's order in a child Emacs.
+
+### remoto-browse and the default forge
+
+`remoto-browse` lives in the core and asks the forge contract only, so it opens names and URLs of every registered forge. The forge of the input comes from a registered prefix (`/cb:OWNER/REPO`), else from the host of a URL or remote (`remoto--url-forge`), else from the user option `remoto-default-forge` for a bare `OWNER/REPO`; the option names a forge by its `name` and defaults to `github`. Completion asks `remoto-forge-complete` for accounts and repositories, `remoto-forge-refs` after `@`, `remoto-forge-topics` after `#` and `remoto-forge-children` after `/`. A URL being typed offers no candidates.
+
+### TRAMP while the mode is on
+
+A one-name path such as `/gist:abc` has TRAMP's `/METHOD:HOST:` shape. While `global-remoto-mode` is on, `tramp-ignored-file-name-regexp` also matches every registered prefix (`remoto--refresh-tramp-ignored`), and it follows the forges registered or unregistered meanwhile. Turning the mode off puts back the value it had (`remoto--restore-tramp-ignored`). remoto's own entry stays first in `file-name-handler-alist`.
+
+### Writing a source
+
+A source is one file that requires `remoto`:
+
+1. Define a struct that includes `remoto-forge`, with the slot defaults of the source: `(cl-defstruct (my-forge (:include remoto-forge (title "My forge") (locator 1))))`.
+2. Write a `cl-defmethod` for each contract method the source serves. Those it leaves out signal `remoto-unsupported` or answer nil, as the table above says.
+3. At load, make an instance and call `remoto-register-forge` with it; a delimiter other than `@` and `#` needs `remoto-register-delimiter` first. `remoto-unregister-forge` removes it and kills its buffers first, so that `uniquify` can still kill buffers of the same name.
+4. A source with more than one server registers one instance per server, from an option of `(PREFIX HOST)` pairs, as `remoto-forgejo-instances` does.
+
+Everything named `remoto--` is private, the layer for GitHub-shaped APIs included.
+
+The specs in `test/remoto-tests.el` test sources in two ways:
+
+- Fake forges: a struct that includes `remoto-forge` with a few methods (`remoto-test-latest`, `remoto-test-open`, `remoto-test-refless`, `remoto-test-paged`), registered with copies of `remoto--forges`, `remoto--handler-regexp` and `file-name-handler-alist` bound, as `remoto-test-with-registry` binds them, so the registry outside the spec stays as it was.
+- A fixture kit: a plist that names the forge, an account, an owner, a repository, a ref, a tag, a directory, a file, a topic and their URLs, with a function that answers `remoto--api` from recorded fixtures. `remoto-test-with-kit` runs a body with the forge answering from them, and `remoto-test--conformance` defines the specs of every level for the kit: GitHub's kit replays the fixtures of `make test-e2e`, Codeberg's those of `test/record-codeberg-fixtures.el`. A source with its own transport spies on that transport in its kit instead of `remoto--api`.
+
 ### Next
 
-GitLab (`/gitlab:`) and gists (`/gist:`) follow, after the contract is reshaped around the sources they need (nested groups, flat files, no refs).
+Gists (`/gist:`), GitLab (`/gitlab:`), SourceHut and npm follow, each on the 18 methods, with the locator they need: one name for gists, `open` for GitLab's nested groups.
 
 ## Dependencies
 
@@ -608,7 +706,7 @@ GitLab (`/gitlab:`) and gists (`/gist:`) follow, after the contract is reshaped 
 ```
 remoto.el/
   remoto.el          ;; core: file-name-handler, completion, transport, caching, the forge contract
-  remoto-github.el   ;; GitHub: the REST endpoints behind the contract, URL parsers, remoto-browse
+  remoto-github.el   ;; GitHub: the REST endpoints behind the contract, URL parsers, the private layer for GitHub-shaped APIs
   remoto-forgejo.el  ;; Forgejo and Gitea on GitHub's shape; registers Codeberg, remoto-forgejo-instances
   remoto-topic.el    ;; issue/PR display buffers
   remoto-embark.el   ;; optional Embark integration (loaded only when embark is present)
