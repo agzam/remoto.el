@@ -190,9 +190,10 @@ names, `uniquify' fails to kill any buffer that shares their name."
 
 ;;;; Forge contract
 
-;; A forge answers these with plain data; the core turns the data into
-;; file operations, Dired lines and completion candidates.  The data
-;; methods signal `remoto-unsupported' by default; the URL ones say nil.
+;; A forge answers these with plain data that the core turns into files,
+;; Dired lines and candidates.  Data methods signal `remoto-unsupported'
+;; by default; URL methods answer nil.  A repo is anything with a tree, a
+;; ref anything that selects one, a topic an item with a key and a buffer.
 
 (define-error 'remoto-unsupported "Remoto: the forge does not support this")
 
@@ -201,7 +202,8 @@ names, `uniquify' fails to kill any buffer that shares their name."
   (signal 'remoto-unsupported (list (remoto-forge-name forge) operation)))
 
 (cl-defgeneric remoto-forge-default-ref (forge _owner _repo)
-  "Return the name of the default branch of OWNER/REPO on FORGE."
+  "Return the name of the default branch of OWNER/REPO on FORGE.
+A source without refs answers nil."
   (remoto--unsupported forge 'default-ref))
 
 (cl-defgeneric remoto-forge-tree (forge _owner _repo _ref)

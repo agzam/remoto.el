@@ -947,8 +947,6 @@ See `remoto-forge-entries'."
       (list (remoto--account-entries forge (remoto--path-prefix path)))
     (remoto--owner-page forge path continuation callback)))
 
-
-
 (cl-defmethod remoto-forge-parse-url ((forge remoto-github) input)
   "GitHub's `parse-url' for INPUT on FORGE, see `remoto-forge-parse-url'."
   (let* ((input (string-trim input))
