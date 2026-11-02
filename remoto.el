@@ -210,8 +210,9 @@ moves on."
   "Return the tag names of OWNER/REPO on FORGE."
   (remoto--unsupported forge 'tags))
 
-(cl-defgeneric remoto-forge-forget-refs (_forge _owner _repo)
-  "Drop what FORGE remembers of the branches and tags of OWNER/REPO."
+(cl-defgeneric remoto-forge-forget (_forge &optional _owner _repo)
+  "Drop what FORGE caches of OWNER/REPO, or everything it caches without them.
+`remoto-refresh' asks for one repository, `remoto-unload-function' for all."
   nil)
 
 (cl-defgeneric remoto-forge-topics (forge _owner _repo)
@@ -285,10 +286,6 @@ Those are the account of the token and its organizations."
   "Return the `remoto--listing' of DIR, an owner directory of FORGE, cached.
 Later pages may keep loading in the background."
   (remoto--unsupported forge 'owner-listing))
-
-(cl-defgeneric remoto-forge-forget-all (_forge)
-  "Drop everything FORGE caches, as `remoto-unload-function' asks."
-  nil)
 
 (cl-defgeneric remoto-forge-url-input-p (_forge _input)
   "Return non-nil when INPUT has the shape of a URL or remote of FORGE."
@@ -2914,9 +2911,9 @@ a Dired of branches and tags, forget the repository's branches and tags."
       (let* ((resolved (remoto--resolve-ref parsed))
              (key (remoto--repo-key resolved)))
         (remhash key remoto--tree-cache)
-        (remoto-forge-forget-refs (remoto-path-forge resolved)
-                                  (remoto-path-owner resolved)
-                                  (remoto-path-repo resolved))
+        (remoto-forge-forget (remoto-path-forge resolved)
+                             (remoto-path-owner resolved)
+                             (remoto-path-repo resolved))
         (message "Remoto: cache cleared for %s" key)
         (when (derived-mode-p 'dired-mode)
           (revert-buffer))))
@@ -2924,8 +2921,8 @@ a Dired of branches and tags, forget the repository's branches and tags."
       (let* ((refs (remoto--parse dir))
              (repo-id (format "%s/%s" (remoto-path-owner refs)
                               (remoto-path-repo refs))))
-        (remoto-forge-forget-refs (remoto-path-forge refs)
-                                  (remoto-path-owner refs) (remoto-path-repo refs))
+        (remoto-forge-forget (remoto-path-forge refs)
+                             (remoto-path-owner refs) (remoto-path-repo refs))
         (message "Remoto: cache cleared for %s" repo-id)
         (when (derived-mode-p 'dired-mode)
           (revert-buffer))))
@@ -4495,7 +4492,7 @@ remoto was loaded some other way and the mode never turned on."
   (clrhash remoto--pending-requests)
   (clrhash remoto--logins)
   (dolist (forge (seq-uniq (mapcar #'cdr remoto--forges)))
-    (remoto-forge-forget-all forge))
+    (remoto-forge-forget forge))
   nil)
 
 (provide 'remoto)

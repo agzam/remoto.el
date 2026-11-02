@@ -1311,10 +1311,16 @@ See `remoto-forge-resolve-ref'."
   "GitHub's `tags' for OWNER and REPO on FORGE, see `remoto-forge-tags'."
   (remoto--fetch-tags forge owner repo))
 
-(cl-defmethod remoto-forge-forget-refs ((forge remoto-github) owner repo)
-  "GitHub's `forget-refs' for OWNER and REPO on FORGE.
-See `remoto-forge-forget-refs'."
-  (remoto--forget-refs forge owner repo))
+(cl-defmethod remoto-forge-forget ((forge remoto-github) &optional owner repo)
+  "GitHub's `forget' on FORGE: the branches and tags of OWNER/REPO, or every cache.
+See `remoto-forge-forget'."
+  (if owner
+      (remoto--forget-refs forge owner repo)
+    (dolist (cache (list remoto--branches-cache remoto--users-cache
+                         remoto--content-cache remoto--tags-cache
+                         remoto--issues-cache remoto--file-commits-cache
+                         remoto--dir-contents-cache))
+      (clrhash cache))))
 
 (cl-defmethod remoto-forge-topics ((forge remoto-github) owner repo)
   "GitHub's `topics' for OWNER and REPO on FORGE, see `remoto-forge-topics'."
@@ -1393,13 +1399,7 @@ See `remoto-forge-account-entries'."
   "GitHub's `owner-listing' for DIR on FORGE, see `remoto-forge-owner-listing'."
   (remoto--fetch-owner-listing forge dir))
 
-(cl-defmethod remoto-forge-forget-all ((_forge remoto-github))
-  "GitHub's `forget-all', see `remoto-forge-forget-all'."
-  (dolist (cache (list remoto--branches-cache remoto--users-cache
-                       remoto--content-cache remoto--tags-cache
-                       remoto--issues-cache remoto--file-commits-cache
-                       remoto--dir-contents-cache))
-    (clrhash cache)))
+
 
 (cl-defmethod remoto-forge-url-input-p ((_forge remoto-github) input)
   "GitHub's `url-input-p' for INPUT, see `remoto-forge-url-input-p'."

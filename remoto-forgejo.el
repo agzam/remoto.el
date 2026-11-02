@@ -283,10 +283,11 @@ The states come in GitHub's spelling, review requests left out."
               (remoto--paginated-api forge "user/orgs"))
     (user-error nil)))
 
-(cl-defmethod remoto-forge-forget-all ((forge remoto-forgejo))
-  "Forgejo's `forget-all' on FORGE drops the accounts too."
-  (clrhash remoto-forgejo--accounts)
-  (cl-call-next-method forge))
+(cl-defmethod remoto-forge-forget ((_forge remoto-forgejo) &optional owner _repo)
+  "Forgejo's `forget' drops the accounts too when it drops everything, no OWNER."
+  (unless owner
+    (clrhash remoto-forgejo--accounts))
+  (cl-call-next-method))
 
 ;;;; Web URLs
 
