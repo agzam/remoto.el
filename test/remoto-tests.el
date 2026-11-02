@@ -3531,7 +3531,7 @@ using unauthenticated access until M-x remoto-reset-auth")
 
   (it "answers nil, not an error, where nothing is a fine answer"
     (expect (remoto-forge-user fake) :to-be nil)
-    (expect (remoto-forge-file-commits fake "o" "r" "main" "" '("a")) :to-be nil)
+    (expect (remoto-forge-entry-notes fake "o" "r" "main" "" '("a")) :to-be nil)
     (expect (remoto-forge-url-input-p fake "https://x/o/r") :to-be nil)
     (expect (remoto-forge-parse-url fake "https://x/o/r") :to-be nil)
     (expect (remoto-forge-parse-topic-url fake "https://x/o/r/pull/1") :to-be nil)
@@ -3553,7 +3553,7 @@ using unauthenticated access until M-x remoto-reset-auth")
     (spy-on 'remoto--resolve-commit-sha :and-return-value "abc")
     (expect (remoto-forge-branches remoto--github "o" "r") :to-equal '("main"))
     (expect (remoto-forge-topic remoto--github "o" "r" "1") :to-equal '((number . 1)))
-    (expect (remoto-forge-commit-sha remoto--github "o" "r" "main") :to-equal "abc")
+    (expect (remoto-forge-resolve-ref remoto--github "o" "r" "main") :to-equal "abc")
     (expect 'remoto--fetch-branches :to-have-been-called-with remoto--github "o" "r"))
 
   (it "routes a URL to the forge that recognizes it"
@@ -4051,7 +4051,7 @@ using unauthenticated access until M-x remoto-reset-auth")
                 (_ (error "Unexpected %s" endpoint)))))
     (expect (remoto--matching-refs remoto--codeberg "o" "r" "heads" "v12")
             :to-equal '("v12.0/forgejo"))
-    (expect (remoto-forge-commit-sha remoto--codeberg "o" "r" "main") :to-equal "abc"))
+    (expect (remoto-forge-resolve-ref remoto--codeberg "o" "r" "main") :to-equal "abc"))
 
   (it "escapes the slash of a ref in the endpoints that take the ref in their path"
     ;; Codeberg answers 404 to git/trees/v15.0/forgejo, 200 to v15.0%2Fforgejo.
@@ -4066,7 +4066,7 @@ using unauthenticated access until M-x remoto-reset-auth")
                   ("repos/o/r/git/commits/v15.0%2Fforgejo" '((sha . "115c575")))
                   (_ (error "Unexpected %s" endpoint)))))
       (expect (file-exists-p "/codeberg:o/r@v15.0/forgejo:/go.mod") :to-be t)
-      (expect (remoto-forge-commit-sha remoto--codeberg "o" "r" "v15.0/forgejo")
+      (expect (remoto-forge-resolve-ref remoto--codeberg "o" "r" "v15.0/forgejo")
               :to-equal "115c575")))
 
   (it "leaves the slash of a ref as it is in GitHub's tree endpoint"
@@ -7086,7 +7086,7 @@ Returns the full path after completion, or INPUT if no completion."
     (let ((dirs nil)
           (remoto--tree-cache (make-hash-table :test 'equal))
           (remoto--default-branch-cache (make-hash-table :test 'equal)))
-      (spy-on 'remoto-forge-file-commits
+      (spy-on 'remoto-forge-entry-notes
               :and-call-fake (lambda (_forge _owner _repo _ref dir _names) (push dir dirs) nil))
       (puthash "/github:testowner/testrepo" "main" remoto--default-branch-cache)
       (remoto-test--install-mock-tree)

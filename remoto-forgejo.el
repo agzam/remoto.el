@@ -252,8 +252,8 @@ They are listed at git/refs."
                                          owner repo kind (url-hexify-string prefix))))
     (error nil)))
 
-(cl-defmethod remoto-forge-commit-sha ((forge remoto-forgejo) owner repo ref)
-  "Forgejo's `commit-sha' for OWNER, REPO and REF on FORGE, from git/commits."
+(cl-defmethod remoto-forge-resolve-ref ((forge remoto-forgejo) owner repo ref)
+  "Forgejo's `resolve-ref' for OWNER, REPO and REF on FORGE, from git/commits."
   (or (alist-get 'sha (remoto--api forge (format "repos/%s/%s/git/commits/%s"
                                                  owner repo (url-hexify-string ref))))
       (user-error "Remoto: could not resolve commit SHA for %s/%s@%s"

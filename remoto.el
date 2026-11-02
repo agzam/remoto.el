@@ -196,9 +196,11 @@ by default."
 A unibyte string; the caller decodes it."
   (remoto--unsupported forge 'content))
 
-(cl-defgeneric remoto-forge-commit-sha (forge _owner _repo _ref)
-  "Return the commit SHA that REF names in OWNER/REPO on FORGE."
-  (remoto--unsupported forge 'commit-sha))
+(cl-defgeneric remoto-forge-resolve-ref (forge _owner _repo _ref)
+  "Return the exact ref that REF names in OWNER/REPO on FORGE, for a permalink.
+A commit SHA on a forge: the link keeps naming the same tree when REF
+moves on."
+  (remoto--unsupported forge 'resolve-ref))
 
 (cl-defgeneric remoto-forge-branches (forge _owner _repo)
   "Return the branch names of OWNER/REPO on FORGE."
@@ -238,9 +240,10 @@ request, `pull_request'."
   "Return the reviews of pull request NUMBER of OWNER/REPO on FORGE."
   nil)
 
-(cl-defgeneric remoto-forge-file-commits (_forge _owner _repo _ref _dir _names)
-  "Return (NAME . MESSAGE) for the NAMES under DIR of OWNER/REPO at REF on FORGE.
-MESSAGE is the first line of the last commit that touched NAME."
+(cl-defgeneric remoto-forge-entry-notes (_forge _owner _repo _ref _dir _names)
+  "Return (NAME . NOTE) for the NAMES under DIR of OWNER/REPO at REF on FORGE.
+NOTE is the text shown after NAME in completion, such as the subject of
+the last commit that touched it."
   nil)
 
 (cl-defgeneric remoto-forge-user (_forge)
@@ -1954,7 +1957,7 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
                                     (seq-filter (lambda (name)
                                                   (string-prefix-p file name)))))
                 (commits (when ref
-                           (remoto-forge-file-commits
+                           (remoto-forge-entry-notes
                             forge owner repo ref dir-path names))))
            (mapcar (lambda (name)
                      (let ((cand (copy-sequence name))
@@ -3045,8 +3048,8 @@ Used for permalinks so the link survives the ref moving on."
   (let ((owner (plist-get ctx :owner))
         (repo (plist-get ctx :repo))
         (ref (plist-get ctx :ref)))
-    (or (remoto-forge-commit-sha (remoto--forge-named (plist-get ctx :forge))
-                                 owner repo ref)
+    (or (remoto-forge-resolve-ref (remoto--forge-named (plist-get ctx :forge))
+                                  owner repo ref)
         (user-error "Remoto: could not resolve commit SHA for %s/%s@%s"
                     owner repo ref))))
 

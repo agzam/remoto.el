@@ -1298,9 +1298,9 @@ See `remoto-forge-children'."
 See `remoto-forge-content'."
   (remoto--fetch-file-content forge owner repo path ref))
 
-(cl-defmethod remoto-forge-commit-sha ((forge remoto-github) owner repo ref)
-  "GitHub's `commit-sha' for OWNER, REPO and REF on FORGE.
-See `remoto-forge-commit-sha'."
+(cl-defmethod remoto-forge-resolve-ref ((forge remoto-github) owner repo ref)
+  "GitHub's `resolve-ref' for OWNER, REPO and REF on FORGE: the commit SHA.
+See `remoto-forge-resolve-ref'."
   (remoto--resolve-commit-sha forge owner repo ref))
 
 (cl-defmethod remoto-forge-branches ((forge remoto-github) owner repo)
@@ -1344,9 +1344,10 @@ See `remoto-forge-pull-request'."
 See `remoto-forge-reviews'."
   (remoto--fetch-reviews forge owner repo number))
 
-(cl-defmethod remoto-forge-file-commits ((forge remoto-github) owner repo ref dir names)
-  "GitHub's `file-commits' for OWNER, REPO, REF, DIR and NAMES on FORGE.
-See `remoto-forge-file-commits'."
+(cl-defmethod remoto-forge-entry-notes ((forge remoto-github) owner repo ref dir names)
+  "GitHub's `entry-notes' for OWNER, REPO, REF, DIR and NAMES on FORGE.
+Each note is the subject of the last commit that touched the name; see
+`remoto-forge-entry-notes'."
   (remoto--fetch-file-commits forge owner repo ref dir names))
 
 (cl-defmethod remoto-forge-user ((forge remoto-github))
