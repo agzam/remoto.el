@@ -3337,7 +3337,7 @@ using unauthenticated access until M-x remoto-reset-auth")
       (setq remoto--logins (remoto-test--logins :failed t))
       (spy-on 'y-or-n-p :and-return-value t)
       (remoto-test--login-as "alice")
-      (spy-on 'remoto-forge-user-orgs :and-return-value nil)
+      (spy-on 'remoto--fetch-user-orgs :and-return-value nil)
       (remoto-test-as-command
         (expect (mapcar #'car (remoto--account-entries remoto--github "/github:"))
                 :to-equal '("alice")))
@@ -3648,12 +3648,13 @@ using unauthenticated access until M-x remoto-reset-auth")
                         (lambda () (remoto-forge-topics fake "o" "r" nil))
                         (lambda () (remoto-forge-topic fake "o" "r" "1"))
                         (lambda () (remoto-forge-search-accounts fake "q" t))
-                        (lambda () (remoto-forge-owner-listing fake "/fake:o/"))))
+                        (lambda () (remoto-forge-entries
+                                    fake (remoto-path-create :forge fake :level 'owner
+                                                             :owner "o" :query "")))))
       (expect (condition-case err (funcall call) (remoto-unsupported (cadr err)))
               :to-be 'fake)))
 
   (it "answers nil, not an error, where nothing is a fine answer"
-    (expect (remoto-forge-user fake) :to-be nil)
     (expect (remoto-forge-entry-notes fake "o" "r" "main" "" '("a")) :to-be nil)
     (expect (remoto-forge-parse-url fake "https://x/o/r") :to-be nil)
     (expect (remoto-forge-parse-url fake "https://x/o/r/pull/1") :to-be nil)
@@ -4364,7 +4365,7 @@ using unauthenticated access until M-x remoto-reset-auth")
   (it "reads the organizations of the token by their username"
     (spy-on 'remoto--api :and-return-value
             '(((username . "forgejo") (description . "We forge."))))
-    (let ((orgs (remoto-forge-user-orgs remoto--codeberg "me")))
+    (let ((orgs (remoto--fetch-user-orgs remoto--codeberg)))
       (expect (mapcar #'substring-no-properties orgs) :to-equal '("forgejo"))
       (expect (get-text-property 0 'remoto-acct-desc (car orgs)) :to-equal "We forge."))))
 
@@ -5557,20 +5558,21 @@ Buffers BODY creates are killed afterwards."
       (with-current-buffer (remoto-test--visit-entry "/github:" "..")
         (expect dired-directory :to-equal "/github:")))))
 
-(describe "remoto--add-listing-page"
+(describe "a page of a Forgejo owner listing"
   (it "lists only the owner's repositories, and pages by what the page held"
     ;; Forgejo's user/repos ignores affiliation=owner: the organizations' come too.
     (remoto-test-with-cache
       (let* ((item (lambda (owner name)
                      `((name . ,name) (full_name . ,(concat owner "/" name))
                        (owner (login . ,owner)))))
-             (page (cons (funcall item "testy-shmeisty" "testy-besty")
-                         (cl-loop for i below 49 collect (funcall item "Ag" (format "r%d" i)))))
-             (listing (remoto--listing-create)))
-        (remoto--add-listing-page listing "/codeberg:ag/" "ag" page)
-        (expect (length (remoto--listing-entries listing)) :to-equal 49)
-        (expect (assoc "testy-besty" (remoto--listing-entries listing)) :to-be nil)
-        (expect (remoto--listing-state listing) :to-be 'fetching)))))
+             (items (cons (funcall item "testy-shmeisty" "testy-besty")
+                          (cl-loop for i below 49 collect (funcall item "Ag" (format "r%d" i))))))
+        (spy-on 'remoto--api :and-return-value items)
+        (let ((page (remoto-forge-entries remoto--codeberg (remoto--parse "/codeberg:ag/")
+                                          '("users/ag/repos?sort=pushed" . 1))))
+          (expect (length (car page)) :to-equal 49)
+          (expect (assoc "testy-besty" (car page)) :to-be nil)
+          (expect (cdr page) :to-equal '("users/ag/repos?sort=pushed" . 2)))))))
 
 (describe "Dired listing of /github:OWNER/"
   (it "shows each repository's size, last push, mode and note"
@@ -5776,6 +5778,125 @@ Buffers BODY creates are killed afterwards."
       (expect (gethash "/github:me/alpha" remoto--default-branch-cache) :to-equal "trunk")
       (expect (remoto--maybe-rewrite "/github:me/alpha") :to-equal "/github:me/alpha@trunk:/")
       (expect 'remoto--api :not :to-have-been-called-with "repos/me/alpha"))))
+
+(describe "GitHub's entries"
+  (it "answers one page of an owner listing and the continuation of the next"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--with-big-owner)
+      (spy-on 'remoto--api-async)
+      (let* ((path (remoto--parse "/github:big/"))
+             (first (remoto-forge-entries remoto--github path)))
+        (expect (length (car first)) :to-equal 100)
+        (expect (cdr first) :to-equal '("users/big/repos?sort=pushed" . 2))
+        (expect (cdr (remoto-forge-entries remoto--github path (cdr first)))
+                :to-equal '("users/big/repos?sort=pushed" . 3))
+        (expect (remoto-forge-entries remoto--github path (cdr first) #'ignore) :to-be nil)
+        (expect (seq-filter (lambda (endpoint) (string-prefix-p "users/big/" endpoint))
+                            (mapcar #'cadr (spy-calls-all-args 'remoto--api)))
+                :to-equal '("users/big/repos?sort=pushed&per_page=100&page=1"
+                            "users/big/repos?sort=pushed&per_page=100&page=2"))
+        (expect (mapcar #'cadr (spy-calls-all-args 'remoto--api-async))
+                :to-equal '("users/big/repos?sort=pushed&per_page=100&page=2")))))
+
+  (it "ends with a short page, and answers the root in one page"
+    (remoto-test-with-listings
+      (expect (cdr (remoto-forge-entries remoto--github (remoto--parse "/github:torvalds/")))
+              :to-be nil)
+      (let ((root (remoto-forge-entries remoto--github (remoto--parse "/github:"))))
+        (expect (mapcar #'car (car root)) :to-equal '("me" "acme" "quiet"))
+        (expect (cdr root) :to-be nil)))))
+
+(cl-defstruct (remoto-test-paged (:include remoto-forge)
+                                 (:constructor remoto-test-paged-create)
+                                 (:copier nil))
+  "A forge whose listings are three pages of two entries.
+With SYNC it answers every page at once, else later pages in the background."
+  sync)
+
+(defvar remoto-test--pending nil
+  "The answers a `remoto-test-paged' forge owes, oldest first.")
+
+(defun remoto-test--paged-page (continuation)
+  "Return (ENTRIES . NEXT) of the page CONTINUATION names, the first without it."
+  (let ((page (or continuation 1)))
+    (cons (mapcar (lambda (i) (list (format "p%d-%d" page i) '(type . "tree"))) '(0 1))
+          (and (< page 3) (1+ page)))))
+
+(cl-defmethod remoto-forge-entries ((forge remoto-test-paged) _path
+                                    &optional continuation callback)
+  "Answer the page CONTINUATION names on FORGE, through CALLBACK unless SYNC."
+  (if (or (null callback) (remoto-test-paged-sync forge))
+      (remoto-test--paged-page continuation)
+    (ignore (setq remoto-test--pending
+                  (append remoto-test--pending
+                          (list (lambda ()
+                                  (funcall callback
+                                           (remoto-test--paged-page continuation)))))))))
+
+(defmacro remoto-test-with-paged (sync &rest body)
+  "Run BODY with a `remoto-test-paged' forge at /paged:, SYNC as given."
+  (declare (indent 1))
+  `(let ((remoto--forges (copy-alist remoto--forges))
+         (remoto--handler-regexp remoto--handler-regexp)
+         (file-name-handler-alist (copy-alist file-name-handler-alist))
+         (remoto-test--pending nil))
+     (remoto-test-with-cache
+       (remoto-register-forge (remoto-test-paged-create
+                               :name 'paged :prefixes '("paged") :delimiters '(?@)
+                               :sync ,sync))
+       (spy-on 'remoto-forge-entries :and-call-through)
+       ,@body)))
+
+(defun remoto-test--continuations ()
+  "Return the continuations `remoto-forge-entries' was asked for."
+  (mapcar #'caddr (spy-calls-all-args 'remoto-forge-entries)))
+
+(describe "the listing pager of the core"
+  (it "builds a listing of every page that CONTINUATION names, one at a time"
+    (remoto-test-with-paged nil
+      (let ((listing (remoto--listing "/paged:o/")))
+        (expect (mapcar #'car (remoto--listing-entries listing)) :to-equal '("p1-0" "p1-1"))
+        (expect (remoto--listing-state listing) :to-be 'fetching)
+        (expect (length remoto-test--pending) :to-equal 1)
+        (funcall (pop remoto-test--pending))
+        (expect (length remoto-test--pending) :to-equal 1)
+        (funcall (pop remoto-test--pending))
+        (expect remoto-test--pending :to-be nil)
+        (expect (mapcar #'car (remoto--listing-entries listing))
+                :to-equal '("p1-0" "p1-1" "p2-0" "p2-1" "p3-0" "p3-1"))
+        (expect (remoto--listing-state listing) :to-be nil)
+        (expect (remoto-test--continuations) :to-equal '(nil 2 3))
+        (expect (gethash "/paged:o/" remoto--listing-cache) :to-be listing))))
+
+  (it "stops at remoto-listing-cap"
+    (remoto-test-with-paged nil
+      (let* ((remoto-listing-cap 3)
+             (listing (remoto--listing "/paged:o/")))
+        (funcall (pop remoto-test--pending))
+        (expect remoto-test--pending :to-be nil)
+        (expect (mapcar #'car (remoto--listing-entries listing))
+                :to-equal '("p1-0" "p1-1" "p2-0"))
+        (expect (remoto--listing-state listing) :to-be 'capped)
+        (expect (remoto-test--continuations) :to-equal '(nil 2)))))
+
+  (it "fills the later pages of a forge that answers at once, through the default CALLBACK"
+    (remoto-test-with-paged t
+      (let ((listing (remoto--listing "/paged:o/")))
+        (expect remoto-test--pending :to-be nil)
+        (expect (length (remoto--listing-entries listing)) :to-equal 6)
+        (expect (remoto--listing-state listing) :to-be nil)
+        ;; A spy records a call when it returns, and these calls nest.
+        (expect (remoto-test--continuations) :to-have-same-items-as '(nil 2 3)))))
+
+  (it "drops a late page of a listing that a refresh replaced"
+    (remoto-test-with-paged nil
+      (remoto--listing "/paged:o/")
+      (let ((late (pop remoto-test--pending)))
+        (remhash "/paged:o/" remoto--listing-cache)
+        (let ((fresh (remoto--listing "/paged:o/")))
+          (funcall late)
+          (expect (gethash "/paged:o/" remoto--listing-cache) :to-be fresh)
+          (expect (length (remoto--listing-entries fresh)) :to-equal 2))))))
 
 (describe "file-exists-p of a bare account or repository name"
   (it "answers t once a cached listing holds it, however old the listing"
@@ -7299,7 +7420,7 @@ Returns the full path after completion, or INPUT if no completion."
 (describe "fetch-user-orgs"
   (it "calls user/orgs endpoint (authenticated)"
     (spy-on 'remoto--api :and-return-value '(((login . "org1")) ((login . "org2"))))
-    (remoto--fetch-user-orgs remoto--github "anyone")
+    (remoto--fetch-user-orgs remoto--github)
     (expect 'remoto--api :to-have-been-called-with remoto--github "user/orgs?per_page=100&page=1")))
 
 ;;; ---- remoto--paginated-api ----
@@ -10687,7 +10808,7 @@ repository name, as `remoto--normalize-name' resolves it."
   (declare (indent 0))
   `(remoto-test-with-cache
      (let ((remoto--logins (remoto-test--logins :user "me")))
-       (spy-on 'remoto-forge-user-orgs :and-return-value
+       (spy-on 'remoto--fetch-user-orgs :and-return-value
                (list (propertize "testowner" 'remoto-acct-type "Organization")))
        (spy-on 'remoto--recent-owner-repos :and-return-value '("testrepo" "other"))
        (spy-on 'remoto--fetch-branches :and-return-value '("main" "rel/1"))

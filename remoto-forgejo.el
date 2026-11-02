@@ -273,8 +273,8 @@ The states come in GitHub's spelling, review requests left out."
                        (assq-delete-all 'state (copy-sequence review))))))
             (cl-call-next-method forge owner repo number)))
 
-(cl-defmethod remoto-forge-user-orgs ((forge remoto-forgejo) _user)
-  "Forgejo's `user-orgs' for USER on FORGE, which names them by `username'."
+(cl-defmethod remoto--fetch-user-orgs ((forge remoto-forgejo))
+  "Forgejo's organizations of the token on FORGE, which names them by `username'."
   (condition-case nil
       (mapcar (lambda (item)
                 (propertize (alist-get 'username item)

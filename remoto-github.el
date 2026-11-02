@@ -361,10 +361,10 @@ Cached per `remoto-search-cache-ttl'.  Capped at 20 API calls."
             result)
         (error nil)))))
 
-(defun remoto--fetch-user-orgs (forge _user)
-  "Fetch organization memberships for the authenticated user of FORGE.
-Uses /user/orgs which includes private memberships.
-Returns propertized login strings with type and description."
+(cl-defgeneric remoto--fetch-user-orgs (forge)
+  "Return the organizations of the account of the token on FORGE.
+Each is a login with its type and description as text properties;
+GitHub's /user/orgs includes the private memberships."
   (condition-case nil
       (let ((data (remoto--paginated-api forge "user/orgs")))
         (mapcar (lambda (item)
@@ -405,7 +405,7 @@ offer a login when remoto may ask, and signal a `user-error' otherwise."
                         (note . ,(if (and desc (not (string-empty-p desc)))
                                      (concat type "  " desc)
                                    type))))))
-            (cons user (remoto-forge-user-orgs forge user)))))
+            (cons user (remoto--fetch-user-orgs forge)))))
 
 (defun remoto--owner-endpoint (forge prefix owner)
   "Return the endpoint of FORGE that lists OWNER's repositories, newest push first.
@@ -443,62 +443,46 @@ drwx------, an archived one dr-xr-xr-x, and a fork says so in its note."
                       (concat (and (alist-get 'fork item) "fork  ")
                               (alist-get 'description item))))))))
 
-(defun remoto--add-listing-page (listing dir owner items)
-  "Add ITEMS, one page of OWNER's repositories, to LISTING, the one of DIR.
-Each repository is remembered on the way, so opening a listed one asks
-for nothing but its tree."
-  (let* ((forge (remoto--canonical-forge dir))
-         ;; Forgejo's user/repos ignores affiliation=owner and lists the
-         ;; repositories of the token's organizations too.
-         (owned (seq-filter (lambda (item)
-                              (let ((login (alist-get 'login (alist-get 'owner item))))
-                                (or (null login) (string-equal-ignore-case login owner))))
-                            items)))
-    (dolist (item owned)
-      (remoto--remember-repo (remoto--prefix forge)
-                             (format "%s/%s" owner (alist-get 'name item)) item))
-    (let ((entries (append (remoto--listing-entries listing)
-                           (mapcar #'remoto--repo-entry owned))))
-      (setf (remoto--listing-entries listing) (seq-take entries remoto-listing-cap)
-            (remoto--listing-state listing)
-            (cond ((< remoto-listing-cap (length entries)) 'capped)
-                  ((< (length items) (remoto--page-size forge)) nil)
-                  ((< (length entries) remoto-listing-cap) 'fetching)
-                  (t 'capped))))))
+(defun remoto--owner-page-entries (forge owner endpoint page items)
+  "Return (ENTRIES . NEXT) of ITEMS, PAGE of OWNER's repositories at ENDPOINT.
+Each repository of OWNER on FORGE is remembered on the way, so opening a
+listed one asks for nothing but its tree.  A short page is the last."
+  (let ((owned (seq-filter
+                (lambda (item)
+                  ;; Forgejo's user/repos ignores affiliation=owner and lists
+                  ;; the repositories of the token's organizations too.
+                  (let ((login (alist-get 'login (alist-get 'owner item))))
+                    (or (null login) (string-equal-ignore-case login owner))))
+                items)))
+    (mapc (lambda (item)
+            (remoto--remember-repo (remoto--prefix forge)
+                                   (format "%s/%s" owner (alist-get 'name item)) item))
+          owned)
+    (cons (mapcar #'remoto--repo-entry owned)
+          (unless (< (length items) (remoto--page-size forge))
+            (cons endpoint (1+ page))))))
 
-(defun remoto--fetch-owner-listing (forge dir)
-  "Fetch the first page of the owner listing DIR of FORGE and cache the listing.
-When more pages follow, they load in the background."
-  (let* ((parsed (remoto--parse dir))
-         (owner (remoto-path-owner parsed))
-         (endpoint (remoto--owner-endpoint forge (remoto--path-prefix parsed) owner))
-         (items (remoto--api forge (remoto--listing-page-endpoint forge endpoint 1)))
-         (listing (puthash dir (remoto--listing-create) remoto--listing-cache)))
-    (remoto--add-listing-page listing dir owner items)
-    (when (eq (remoto--listing-state listing) 'fetching)
-      (message "Remoto: listing the first %d repositories of %s, fetching the rest"
-               (length items) owner)
-      (remoto--fetch-listing-page forge dir listing owner endpoint 2))
-    listing))
-
-(defun remoto--fetch-listing-page (forge dir listing owner endpoint page)
-  "Fetch PAGE of ENDPOINT of FORGE into LISTING, DIR's listing, in the background.
-One page at a time, as GitHub asks of clients, until the last page, the
-cap or a failure.  A LISTING no longer cached, as after `remoto-refresh',
-ends it; OWNER names the account for the cache and the messages."
-  (remoto--api-async
-   forge
-   (remoto--listing-page-endpoint forge endpoint page)
-   (lambda (items)
-     (when (eq listing (gethash dir remoto--listing-cache))
-       (remoto--add-listing-page listing dir owner items)
-       (if (eq (remoto--listing-state listing) 'fetching)
-           (remoto--fetch-listing-page forge dir listing owner endpoint (1+ page))
-         (remoto--listing-done dir listing owner))))
-   (lambda ()
-     (when (eq listing (gethash dir remoto--listing-cache))
-       (setf (remoto--listing-state listing) 'failed)
-       (remoto--listing-done dir listing owner)))))
+(defun remoto--owner-page (forge path continuation callback)
+  "Return a page of the owner listing at PATH on FORGE.
+CONTINUATION is (ENDPOINT . PAGE), the first page of the endpoint that
+`remoto--owner-endpoint' picks without it.  With CALLBACK, ask in the
+background and return nil, as `remoto-forge-entries' allows."
+  (pcase-let* ((owner (remoto-path-owner path))
+               (`(,endpoint . ,page)
+                (or continuation
+                    (cons (remoto--owner-endpoint forge (remoto--path-prefix path) owner)
+                          1)))
+               (resource (remoto--listing-page-endpoint forge endpoint page)))
+    (if callback
+        (ignore
+         (remoto--api-async
+          forge resource
+          (lambda (items)
+            (funcall callback
+                     (remoto--owner-page-entries forge owner endpoint page items)))
+          (lambda () (funcall callback 'failed))))
+      (remoto--owner-page-entries forge owner endpoint page
+                                  (remoto--api forge resource)))))
 
 (defun remoto--account-search (forge query)
   "Return the logins of the accounts on FORGE in a search for QUERY.
@@ -1353,14 +1337,6 @@ Each note is the subject of the last commit that touched the name; see
 `remoto-forge-entry-notes'."
   (remoto--fetch-file-commits forge owner repo ref dir names))
 
-(cl-defmethod remoto-forge-user ((forge remoto-github))
-  "GitHub's `user' on FORGE, see `remoto-forge-user'."
-  (remoto--get-authenticated-user forge))
-
-(cl-defmethod remoto-forge-user-orgs ((forge remoto-github) user)
-  "GitHub's `user-orgs' for USER on FORGE, see `remoto-forge-user-orgs'."
-  (remoto--fetch-user-orgs forge user))
-
 (cl-defmethod remoto-forge-search-accounts ((forge remoto-github) query wait)
   "GitHub's `search-accounts' for QUERY and WAIT on FORGE.
 See `remoto-forge-search-accounts'."
@@ -1387,14 +1363,14 @@ See `remoto-forge-search-repos'."
 See `remoto-forge-prefetch-repos'."
   (remoto--prefetch-owner-repos forge owner))
 
-(cl-defmethod remoto-forge-account-entries ((forge remoto-github) dir)
-  "GitHub's `account-entries' for DIR on FORGE.
-See `remoto-forge-account-entries'."
-  (remoto--account-entries forge dir))
-
-(cl-defmethod remoto-forge-owner-listing ((forge remoto-github) dir)
-  "GitHub's `owner-listing' for DIR on FORGE, see `remoto-forge-owner-listing'."
-  (remoto--fetch-owner-listing forge dir))
+(cl-defmethod remoto-forge-entries ((forge remoto-github) path
+                                    &optional continuation callback)
+  "GitHub's `entries' for PATH, CONTINUATION and CALLBACK on FORGE.
+The root is one page: the account of the token and its organizations.
+See `remoto-forge-entries'."
+  (if (eq (remoto-path-level path) 'root)
+      (list (remoto--account-entries forge (remoto--path-prefix path)))
+    (remoto--owner-page forge path continuation callback)))
 
 
 

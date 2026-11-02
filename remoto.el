@@ -257,14 +257,6 @@ NOTE is the text shown after NAME in completion, such as the subject of
 the last commit that touched it."
   nil)
 
-(cl-defgeneric remoto-forge-user (_forge)
-  "Return the login of the account of the token on FORGE, or nil."
-  nil)
-
-(cl-defgeneric remoto-forge-user-orgs (_forge _user)
-  "Return the organizations of USER on FORGE, logins with account properties."
-  nil)
-
 (cl-defgeneric remoto-forge-search-accounts (forge _query _wait)
   "Return the logins of the accounts on FORGE that match QUERY.
 With WAIT, ask and answer; without it, answer from a cache and start
@@ -287,15 +279,21 @@ the request in the background."
   "Start fetching OWNER's repositories on FORGE for the completion that follows."
   nil)
 
-(cl-defgeneric remoto-forge-account-entries (forge _dir)
-  "Return the listing entries of DIR, the root of FORGE.
-Those are the account of the token and its organizations."
-  (remoto--unsupported forge 'account-entries))
+(cl-defgeneric remoto-forge-entries (forge _path &optional _continuation _callback)
+  "Return (ENTRIES . NEXT), a page of the listing at PATH on FORGE.
+PATH is a `remoto-path' at level root or owner.  CONTINUATION names the
+page, the first without it; NEXT names the next one, nil after the last.
+With CALLBACK, return nil and later call it with the pair or `failed'."
+  (remoto--unsupported forge 'entries))
 
-(cl-defgeneric remoto-forge-owner-listing (forge _dir)
-  "Return the `remoto--listing' of DIR, an owner directory of FORGE, cached.
-Later pages may keep loading in the background."
-  (remoto--unsupported forge 'owner-listing))
+(cl-defmethod remoto-forge-entries :around
+  (_forge _path &optional _continuation callback)
+  "Pass the page FORGE answers for PATH and CONTINUATION at once to CALLBACK.
+So a method that ignores CALLBACK still serves the background pages."
+  (when-let* ((page (cl-call-next-method)))
+    (if callback
+        (ignore (funcall callback page))
+      page)))
 
 (cl-defgeneric remoto-forge-parse-url (_forge _input)
   "Return the `remoto-path' that INPUT names on FORGE, or nil.
@@ -1728,6 +1726,15 @@ Preserves OWNER's text properties (used for affixation) and attaches a
   (propertize (concat owner "/")
               'remoto-target (concat prefix (substring-no-properties owner))))
 
+(defun remoto--account-login (entry)
+  "Return the login of ENTRY, a root listing entry, with account properties.
+The note of ENTRY holds the account type, then two spaces and the
+description, as the completion annotations show them."
+  (let* ((note (or (alist-get 'note (cdr entry)) ""))
+         (gap (string-search "  " note)))
+    (propertize (car entry) 'remoto-acct-type (substring note 0 gap)
+                'remoto-acct-desc (if gap (substring note (+ 2 gap)) ""))))
+
 (defun remoto--minibuffer-input ()
   "Contents of the current buffer when it is an active completion minibuffer."
   (when (and (minibufferp) minibuffer-completion-table)
@@ -1824,10 +1831,10 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
          (let ((query (remoto--completion-query file directory))
                (candidate (lambda (acct) (remoto--owner-candidate acct prefix))))
            (if (string-empty-p query)
-               (when-let* ((user (remoto--known-user forge)))
-                 (let* ((orgs (remoto-forge-user-orgs forge user))
-                        (all (cons (propertize user 'remoto-acct-type "User") orgs)))
-                   (mapcar candidate all)))
+               (when (remoto--known-user forge)
+                 (mapcar (lambda (entry)
+                           (funcall candidate (remoto--account-login entry)))
+                         (car (remoto-forge-entries forge (remoto--path-at forge 'root)))))
              (when-let* ((result (remoto-forge-search-accounts forge query nil)))
                (let ((filtered (seq-filter (lambda (u) (string-prefix-p file u))
                                            result)))
@@ -3501,15 +3508,53 @@ that shows the end would otherwise fetch it all again, and again."
 (defun remoto--listing (dir)
   "Return the listing of DIR, fetching it unless a fresh one is cached.
 DIR is what `remoto--listing-dir' returns."
-  (let ((cached (gethash dir remoto--listing-cache))
-        (forge (remoto--canonical-forge dir)))
-    (cond
-     ((and cached (remoto--listing-fresh-p cached)) cached)
-     ((eq (remoto--directory-level dir) 'root)
-      (puthash dir (remoto--listing-create
-                    :entries (remoto-forge-account-entries forge dir))
-               remoto--listing-cache))
-     (t (remoto-forge-owner-listing forge dir)))))
+  (let ((cached (gethash dir remoto--listing-cache)))
+    (if (and cached (remoto--listing-fresh-p cached))
+        cached
+      (remoto--fetch-listing (remoto--canonical-forge dir) dir))))
+
+(defun remoto--listing-owner (dir)
+  "Return the name of DIR's listing in the messages: its owner, or DIR."
+  (or (remoto-path-owner (remoto--parse dir)) dir))
+
+(defun remoto--add-listing-page (listing entries next)
+  "Add ENTRIES, one page, to LISTING, up to `remoto-listing-cap'.
+NEXT is the continuation of the page after, nil after the last."
+  (let ((all (append (remoto--listing-entries listing) entries)))
+    (setf (remoto--listing-entries listing) (seq-take all remoto-listing-cap)
+          (remoto--listing-state listing)
+          (cond ((< remoto-listing-cap (length all)) 'capped)
+                ((null next) nil)
+                ((< (length all) remoto-listing-cap) 'fetching)
+                (t 'capped)))))
+
+(defun remoto--fetch-listing (forge dir)
+  "Fetch the first page of the listing DIR of FORGE and cache the listing.
+When more pages follow, they load in the background."
+  (pcase-let* ((`(,entries . ,next) (remoto-forge-entries forge (remoto--parse dir)))
+               (listing (puthash dir (remoto--listing-create) remoto--listing-cache)))
+    (remoto--add-listing-page listing entries next)
+    (when (eq (remoto--listing-state listing) 'fetching)
+      (message "Remoto: listing the first %d repositories of %s, fetching the rest"
+               (length entries) (remoto--listing-owner dir))
+      (remoto--fetch-listing-page forge dir listing next))
+    listing))
+
+(defun remoto--fetch-listing-page (forge dir listing continuation)
+  "Fetch the page CONTINUATION names into LISTING, the one of DIR on FORGE.
+In the background and one page at a time, as GitHub asks of clients,
+until the last page, the cap or a failure.  A LISTING no longer cached,
+as after `remoto-refresh', ends it."
+  (remoto-forge-entries
+   forge (remoto--parse dir) continuation
+   (lambda (page)
+     (when (eq listing (gethash dir remoto--listing-cache))
+       (if (eq page 'failed)
+           (setf (remoto--listing-state listing) 'failed)
+         (remoto--add-listing-page listing (car page) (cdr page)))
+       (if (eq (remoto--listing-state listing) 'fetching)
+           (remoto--fetch-listing-page forge dir listing (cdr page))
+         (remoto--listing-done dir listing (remoto--listing-owner dir)))))))
 
 (defun remoto--listing-done (dir listing owner)
   "Say how the background fetch of LISTING ended, and revert DIR's buffers.
