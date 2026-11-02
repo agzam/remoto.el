@@ -3458,6 +3458,18 @@ using unauthenticated access until M-x remoto-reset-auth")
               :to-be #'remoto-file-name-handler)
       (expect (remoto--forge-type "/fk:o/r") :to-be 'fake)))
 
+  (it "titles a forge for messages: GitHub, Codeberg, another server by its host"
+    (let ((remoto--forges (copy-alist remoto--forges))
+          (remoto--handler-regexp remoto--handler-regexp)
+          (file-name-handler-alist (copy-alist file-name-handler-alist))
+          (remoto-forge-url-templates (copy-alist remoto-forge-url-templates)))
+      (expect (remoto-forge-title remoto--github) :to-equal "GitHub")
+      (expect (remoto-forge-title remoto--codeberg) :to-equal "Codeberg")
+      (expect (remoto-forge-title (remoto-forgejo-register 'x '("x") "x.org"))
+              :to-equal "x.org")
+      (expect (remoto-forge-title (remoto-forge-create :name 'fake :title "Fake"))
+              :to-equal "Fake")))
+
   (it "parses with the delimiters of the forge only"
     (let ((remoto--forges (copy-alist remoto--forges))
           (remoto--handler-regexp remoto--handler-regexp)
@@ -5615,7 +5627,7 @@ repository than tool, and a search for anything else finds none."
       (spy-on 'remoto--api :and-call-fake #'remoto-test--search-api)
       (expect (buffer-local-value 'dired-directory (find-file-noselect "/gh:acme/tool"))
               :to-equal "/github:acme/tool@main:/")
-      (expect (seq-filter (lambda (args) (string-prefix-p "search/" (car args)))
+      (expect (seq-filter (lambda (args) (string-prefix-p "search/" (cadr args)))
                           (spy-calls-all-args 'remoto--api))
               :to-be nil)))
 
@@ -5767,7 +5779,7 @@ repository."
       (spy-on 'remoto--api :and-call-fake #'remoto-test--account-api)
       (expect (buffer-local-value 'dired-directory (find-file-noselect "/gh:qlik-trial/"))
               :to-equal "/github:qlik-trial/")
-      (expect (seq-filter (lambda (args) (string-prefix-p "search/" (car args)))
+      (expect (seq-filter (lambda (args) (string-prefix-p "search/" (cadr args)))
                           (spy-calls-all-args 'remoto--api))
               :to-be nil)))
 

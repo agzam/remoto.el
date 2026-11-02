@@ -57,10 +57,11 @@
                             (:copier nil))
   "A source of repositories that remoto paths name.
 PREFIXES are the path prefixes without slash or colon, the first one
-canonical; DELIMITERS the characters after OWNER/REPO it supports."
-  name prefixes host delimiters repo-end)
+canonical; DELIMITERS the characters after OWNER/REPO it supports;
+TITLE the name that messages show, such as \"GitHub\"."
+  name prefixes host delimiters repo-end title)
 
-(cl-defstruct (remoto-github (:include remoto-forge)
+(cl-defstruct (remoto-github (:include remoto-forge (title "GitHub"))
                              (:constructor remoto-github-create)
                              (:copier nil))
   "The GitHub forge.")
@@ -932,10 +933,6 @@ explicit: ghub's default for a forge is its web host, which answers HTML."
                               forge endpoint err ghub-response-headers)))))
       (json-error
        (user-error "Remoto: could not parse API response for %s" endpoint)))))
-
-(cl-defgeneric remoto-forge-title (_forge)
-  "Return the name of FORGE that messages show, such as \"GitHub\"."
-  "GitHub")
 
 (defun remoto--login-keys ()
   "Return how to call `remoto-login', in the face Emacs gives keys.

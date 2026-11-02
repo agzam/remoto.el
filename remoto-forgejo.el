@@ -23,7 +23,7 @@
 
 (defvar tramp-methods)
 
-(cl-defstruct (remoto-forgejo (:include remoto-github)
+(cl-defstruct (remoto-forgejo (:include remoto-github (title nil))
                               (:constructor remoto-forgejo-create)
                               (:copier nil))
   "A Forgejo or Gitea forge.  GitHub's methods serve it, against its host.")
@@ -41,12 +41,6 @@
 (cl-defmethod remoto--literal-token ((_forge remoto-forgejo))
   "A Forgejo server has no token option: `remoto-github-auth' is GitHub's."
   nil)
-
-(cl-defmethod remoto-forge-title ((forge remoto-forgejo))
-  "Codeberg by name, any other Forgejo FORGE by its host."
-  (if (equal (remoto-forge-host forge) "codeberg.org")
-      "Codeberg"
-    (remoto-forge-host forge)))
 
 (cl-defmethod remoto--anonymous-limit ((_forge remoto-forgejo))
   "No hint: 2,000 anonymous requests per 10 minutes seldom run out."
@@ -384,7 +378,9 @@ either way the ref may hold a slash, which `remoto--url-ref' settles."
 PREFIXES are the path prefixes without slash or colon, the first one
 canonical.  The web URL templates of HOST go under NAME."
   (let ((forge (remoto-forgejo-create :name name :prefixes prefixes :host host
-                                      :delimiters '(?@ ?#))))
+                                      :delimiters '(?@ ?#)
+                                      ;; Codeberg by name, any other server by its host.
+                                      :title (if (equal host "codeberg.org") "Codeberg" host))))
     (setf (alist-get name remoto-forge-url-templates)
           (remoto-forgejo--url-templates host))
     (remoto-register-forge forge)
