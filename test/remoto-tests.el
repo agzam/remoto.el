@@ -5052,6 +5052,28 @@ At the level of OWNER, or at the root without OWNER."
         (when (buffer-live-p file)
           (kill-buffer file)))))
 
+  (it "makes anew a server's forge that an older remoto made, and keeps its buffers"
+    ;; An upgrade in a running session sets the option again over the forges
+    ;; the older remoto made, in the shape of its struct.
+    (remoto-forgejo--register-instances '(("gitea" "gitea.com")))
+    (let ((older (record 'remoto-forgejo 'gitea '("gitea") "gitea.com" '(?@ ?#) "[/:@#]"))
+          (file (generate-new-buffer "README.md")))
+      (unwind-protect
+          (progn
+            (with-current-buffer file
+              (setq buffer-file-name "/gitea:o/r@main:/README.md"))
+            (setcdr (assoc "gitea" remoto-forgejo--instances) older)
+            (setcdr (assoc "gitea" remoto--forges) older)
+            (remoto-forgejo--register-instances '(("gitea" "gitea.com")))
+            (let ((forge (cdr (remoto--prefix-of "/gitea:o/r"))))
+              (expect forge :not :to-be older)
+              (expect (length forge) :to-equal (length (remoto-forgejo-create)))
+              (expect (cdr (assoc "gitea" remoto-forgejo--instances)) :to-be forge)
+              (expect (remoto-forge-title forge) :to-equal "gitea.com"))
+            (expect (buffer-live-p file) :to-be t))
+        (when (buffer-live-p file)
+          (kill-buffer file)))))
+
   (it "forgets the web URL templates and the login of a removed server"
     (let ((remoto--logins (remoto-test--logins)))
       (remoto-forgejo--register-instances '(("gitea" "gitea.com") ("cbx" "codeberg.org")))
@@ -11047,7 +11069,40 @@ with what the same call does once the mode is on."
               (expect (file-name-directory (or (plist-get result :github) "")) :to-equal dir)
               (expect (file-name-directory (or (plist-get result :forgejo) "")) :to-equal dir)
               (expect (plist-get result :codeberg) :to-be t)))
-        (delete-directory dir t)))))
+        (delete-directory dir t))))
+
+  (it "loads the core beside remoto-forgejo.el and makes the forges anew when an upgrade reloads it"
+    ;; package.el reloads an upgrade's files in the order they first loaded:
+    ;; the forge files, which remoto.el requires, before remoto.el.
+    (let ((source (file-name-directory (locate-library "remoto")))
+          (old (file-name-as-directory (make-temp-file "remoto-old" t)))
+          (new (file-name-as-directory (make-temp-file "remoto-new" t))))
+      (unwind-protect
+          (progn
+            (dolist (dir (list old new))
+              (dolist (file '("remoto.el" "remoto-github.el" "remoto-forgejo.el"))
+                (copy-file (expand-file-name file source) dir)))
+            (let ((result (remoto-test--fresh-session
+                           nil
+                           `(progn
+                              (load ,(expand-file-name "remoto.el" old) nil t)
+                              (let ((github remoto--github)
+                                    (codeberg remoto--codeberg))
+                                (load ,(expand-file-name "remoto-github.el" new) nil t)
+                                (load ,(expand-file-name "remoto-forgejo.el" new) nil t)
+                                (list :core (symbol-file 'remoto-register-forge)
+                                      :github (eq github remoto--github)
+                                      :codeberg (eq codeberg remoto--codeberg)
+                                      :registry (list (eq remoto--github
+                                                          (cdr (assoc "gh" remoto--forges)))
+                                                      (eq remoto--codeberg
+                                                          (cdr (assoc "cb" remoto--forges))))))))))
+              (expect (file-name-directory (or (plist-get result :core) "")) :to-equal new)
+              (expect (plist-get result :github) :to-be nil)
+              (expect (plist-get result :codeberg) :to-be nil)
+              (expect (plist-get result :registry) :to-equal '(t t))))
+        (delete-directory old t)
+        (delete-directory new t)))))
 
 (describe "remoto-inhibited-functions in a fresh session"
   (it "advises nothing when remoto is only required"

@@ -183,7 +183,9 @@ names, `uniquify' fails to kill any buffer that shares their name."
   "Return the text of the remoto NAME after its canonical prefix."
   (substring name (length (remoto--prefix (remoto--canonical-forge name)))))
 
-(defvar remoto--github
+;; Made anew at each load: a newer remoto loaded into a running session
+;; redefines the struct, whose accessors fail on a record of the old shape.
+(defconst remoto--github
   (remoto-github-create :name 'github :prefixes '("github" "gh")
                         :host "github.com" :delimiters '(?@ ?#))
   "The GitHub forge.  A `remoto-path' built without a forge is GitHub's.")

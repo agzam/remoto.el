@@ -18,8 +18,17 @@
 
 ;;; Code:
 
+(require 'loadhist)
 (require 'remoto)
 (require 'remoto-github)
+
+;; package.el reloads this file before remoto.el when it upgrades remoto in
+;; a running session, and the struct below needs the core of its version.
+;; While remoto.el loads and requires this file, its feature has no file.
+(when-let* ((file (macroexp-file-name))
+            (core (feature-file 'remoto))
+            ((not (file-equal-p (file-name-directory core) (file-name-directory file)))))
+  (load (expand-file-name "remoto" (file-name-directory file)) nil t))
 
 (defvar tramp-methods)
 
@@ -403,8 +412,9 @@ canonical.  The web URL templates of HOST go under NAME."
     (remoto-register-forge forge)
     forge))
 
-(defvar remoto--codeberg (remoto-forgejo-register 'codeberg '("codeberg" "cb")
-                                                   "codeberg.org")
+;; Made anew at each load, as `remoto--github' is.
+(defconst remoto--codeberg (remoto-forgejo-register 'codeberg '("codeberg" "cb")
+                                                     "codeberg.org")
   "The Codeberg forge, a Forgejo server.")
 
 (defvar remoto-forgejo--instances nil
@@ -430,9 +440,15 @@ another forge owns, that names a TRAMP method or that holds a colon or a
 slash, and a HOST with a scheme or a path, are refused with a warning."
   (let ((kept nil))
     (pcase-dolist (`(,prefix . ,forge) remoto-forgejo--instances)
-      (if (member (list prefix (remoto-forge-host forge)) instances)
-          (push (cons prefix forge) kept)
-        (remoto-forgejo--drop forge)))
+      (let ((host (remoto-forge-host forge)))
+        (cond ((not (member (list prefix host) instances))
+               (remoto-forgejo--drop forge))
+              ;; An older remoto, loaded earlier in this session, made it in
+              ;; the shape of its own struct: it is made anew, buffers kept.
+              ((/= (length forge) (length (remoto-forgejo-create)))
+               (push (cons prefix (remoto-forgejo-register (intern prefix) (list prefix) host))
+                     kept))
+              (t (push (cons prefix forge) kept)))))
     (setq remoto-forgejo--instances (nreverse kept)))
   (pcase-dolist (`(,prefix ,host) instances)
     (cond

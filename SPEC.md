@@ -657,6 +657,16 @@ Every cache key starts with the canonical prefix of the forge (`remoto--repo-id`
 
 Each forge file carries an autoload cookie that registers `remoto-autoload-file-name-handler` for its prefixes, so the first path of a session loads remoto, `file-remote-p` aside (see project.el); the mode then installs the real handler under `remoto--handler-regexp`, every registered prefix. An instance's prefix exists once remoto is loaded.
 
+### Upgrades in a running session
+
+package.el reloads an upgraded package's files in the order they first loaded, so the forge files, which remoto.el requires at its end, reload before remoto.el. When the struct changes, the old code and records stay until something replaces them:
+
+- `remoto-forgejo.el` defines a struct that includes `remoto-github`, so it loads the remoto.el beside it first when the loaded core comes from another directory (`feature-file`, which has no file for `remoto` while remoto.el itself is loading).
+- `remoto--github` and `remoto--codeberg` are constants, made anew at each load: the accessors of a new struct fail on a record of the old shape.
+- A server of `remoto-forgejo-instances` whose forge an older remoto made is made anew when the option is set again at load, its buffers kept.
+
+A source whose struct includes `remoto-forge` needs the same care. A spec of "a fresh session" in `test/remoto-tests.el` loads the files in package.el's order in a child Emacs.
+
 ### remoto-browse and the default forge
 
 `remoto-browse` lives in the core and asks the forge contract only, so it opens names and URLs of every registered forge. The forge of the input comes from a registered prefix (`/cb:OWNER/REPO`), else from the host of a URL or remote (`remoto--url-forge`), else from the user option `remoto-default-forge` for a bare `OWNER/REPO`; the option names a forge by its `name` and defaults to `github`. Completion asks `remoto-forge-complete` for accounts and repositories, `remoto-forge-refs` after `@`, `remoto-forge-topics` after `#` and `remoto-forge-children` after `/`. A URL being typed offers no candidates.
