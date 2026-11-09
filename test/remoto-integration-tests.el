@@ -323,6 +323,49 @@
         (expect attrs :to-be-truthy)
         (expect (file-attribute-size attrs) :to-be-greater-than 100)))))
 
+;;; From a local file to its forge copy
+
+(describe "integration: remoto-project-find-file from a local file"
+  (it "marks the lines of the region on the forge copy, past three local lines"
+    (assume (executable-find "git") "no git")
+    (remoto-itest-with-clean-cache
+      (let* ((remote (decode-coding-string
+                      (remoto-forge-content remoto--github remoto-itest-owner remoto-itest-repo
+                                            remoto-itest-ref "README")
+                      'utf-8))
+             (want (with-temp-buffer
+                     (insert remote)
+                     (goto-char (point-min))
+                     (forward-line 6)
+                     (buffer-substring-no-properties (point) (progn (forward-line 1)
+                                                                    (line-end-position)))))
+             (dir (file-name-as-directory (make-temp-file "remoto-itest" t)))
+             (file (expand-file-name "README" dir))
+             (transient-mark-mode t)
+             (before (buffer-list)))
+        ;; The clone's git remotes and refs are the unit specs' part.
+        (spy-on 'remoto--forge-directory :and-return-value (concat remoto-itest-prefix "/"))
+        (unwind-protect
+            (save-window-excursion
+              (with-temp-file file (insert "one\ntwo\nthree\n" remote))
+              (with-current-buffer (find-file-noselect file)
+                (goto-char (point-min))
+                (forward-line 9)
+                (push-mark (point) t t)
+                (forward-line 2)
+                (call-interactively #'remoto-project-find-file)
+                (expect buffer-file-name :to-equal (concat remoto-itest-prefix "/README"))
+                (expect (list (line-number-at-pos (region-beginning))
+                              (line-number-at-pos (region-end)))
+                        :to-equal '(7 8))
+                (expect (buffer-substring-no-properties (region-beginning) (region-end))
+                        :to-equal want)))
+          (dolist (buffer (buffer-list))
+            (unless (memq buffer before)
+              (with-current-buffer buffer (set-buffer-modified-p nil))
+              (kill-buffer buffer)))
+          (delete-directory dir t))))))
+
 ;;; Listing of an owner
 
 (describe "integration: Dired listing of an owner"
