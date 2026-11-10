@@ -419,6 +419,13 @@ delimiters it supports; the others are plain characters in its paths."
   (when-let* ((delimiter (remoto--delimiter-of level)))
     (remoto-delimiter-kind delimiter)))
 
+(defun remoto--refs-p (forge)
+  "Return non-nil when FORGE has refs: it supports a delimiter of kind `ref'."
+  (seq-some (lambda (char)
+              (when-let* ((delimiter (alist-get char remoto--delimiters)))
+                (eq 'ref (remoto-delimiter-kind delimiter))))
+            (remoto-forge-delimiters forge)))
+
 (cl-defstruct (remoto-path (:constructor remoto-path-create)
                            (:copier nil))
   "Parsed components of a remoto path.
@@ -1092,10 +1099,13 @@ the auth-source search; without one, the login reads anonymously until
              'none))))
 
 (defun remoto--account-endpoint-p (endpoint)
-  "Return non-nil when ENDPOINT is of the token's account, user and below.
-Asked without a token, those answer 401, which url.el takes for a cue to
-prompt for a password."
-  (string-match-p (rx bos "user" (or eos (in "/?"))) endpoint))
+  "Return non-nil when ENDPOINT is of the token's account.
+That is user and below, and the token's own gists and starred ones.
+Asked without a token, they answer 401, which url.el takes for a cue to
+prompt for a password, or with the public gists of everyone."
+  (string-match-p (rx bos (or (seq "user" (or eos (in "/?")))
+                              (seq "gists" (? "/starred") (or eos "?"))))
+                  endpoint))
 
 (defun remoto--anonymous-get (forge endpoint)
   "GET ENDPOINT of the API of FORGE without a token.
@@ -1217,9 +1227,15 @@ no organizations."
     (remoto-path-forge parsed)))
 
 (defun remoto--read-forge (prompt)
-  "Read a registered forge with PROMPT, the forge of the current buffer first."
-  (let* ((forges (seq-uniq (mapcar #'cdr remoto--forges)))
-         (default (remoto-forge-title (or (remoto--buffer-forge) remoto--github)))
+  "Read a registered forge with PROMPT, the forge of the current buffer first.
+Forges on one API host share their login, so the first one registered
+stands for them all, as GitHub does for gists."
+  (let* ((same-host (lambda (a b) (equal (remoto--api-host a) (remoto--api-host b))))
+         (forges (seq-uniq (mapcar #'cdr remoto--forges) same-host))
+         (current (or (remoto--buffer-forge) remoto--github))
+         (default (remoto-forge-title
+                   (or (seq-find (lambda (forge) (funcall same-host forge current)) forges)
+                       current)))
          (title (completing-read (format-prompt prompt default)
                                  (mapcar #'remoto-forge-title forges)
                                  nil t nil nil default)))
@@ -3701,13 +3717,16 @@ after %d; M-x remoto-refresh retries" owner count))
 
 (defun remoto--listing-line (line)
   "Return LINE, a bare /PREFIX:OWNER/REPO, as the cached listing above spells it.
-Letter case does not count, as on the forges.  A listing that lacks the
-line, its page still loading or past the cap, gets the entry remoto
-remembered of it; without one, return nil, as asking would cost a request."
+Letter case does not count, as on the forges; a line that goes on past
+REPO, as a gist's ID/FILE does, counts.  A listing that lacks the line gets
+the entry remoto remembered of it; without one, nil: asking costs a request."
   (when-let* ((dir (remoto--handle-file-name-directory line))
               (listing (gethash dir remoto--listing-cache))
               (name (remoto--handle-file-name-nondirectory line)))
-    (if-let* ((listed (assoc-string name (remoto--listing-entries listing) t)))
+    (if-let* ((listed (seq-find (lambda (entry)
+                                  (or (string-equal-ignore-case (car entry) name)
+                                      (string-prefix-p (concat name "/") (car entry) t)))
+                                (remoto--listing-entries listing))))
         (concat dir (car listed))
       (when-let* ((entry (remoto--entry-for line)))
         (setf (remoto--listing-entries listing)
@@ -3731,14 +3750,17 @@ OTHER-WINDOW shows the listing in another window."
 
 (defun remoto--root-lists-p (parsed)
   "Return non-nil when the root listing has a line for the owner of PARSED.
-It holds the token's account and its organizations.  Asking costs no
-request: any listing with a token knows the account, and the listing of
-an account other than the token's reads the root listing."
+An account's line counts, and so does a line OWNER/NAME of a repository,
+as gists have.  Asking costs no request: any listing with a token knows
+the account, and GitHub's listing of another account reads the root's."
   (let ((owner (remoto-path-owner parsed))
         (user (remoto--login-user (remoto--forge-login (remoto-path-forge parsed))))
         (root (gethash (remoto--path-prefix parsed) remoto--listing-cache)))
     (or (and user (string-equal-ignore-case owner user))
-        (and root (assoc-string owner (remoto--listing-entries root) t)))))
+        (and root (seq-some (lambda (entry)
+                              (string-equal-ignore-case
+                               owner (car (split-string (car entry) "/"))))
+                            (remoto--listing-entries root))))))
 
 (defun remoto--dired-up (other-window)
   "Go up from this remoto Dired where Dired's commands cannot; non-nil if so.
@@ -4687,9 +4709,12 @@ has that.  Nil is the default branch."
          (remoto--git "rev-parse" "HEAD"))))
 
 (defun remoto--root-at (root ref)
-  "Return the root of the repository of ROOT at REF, a new `remoto-path'."
-  (remoto-path-create :forge (remoto-path-forge root) :owner (remoto-path-owner root)
-                      :repo (remoto-path-repo root) :ref ref :level 'tree :path "/"))
+  "Return the root of the repository of ROOT at REF, a new `remoto-path'.
+A forge without refs, such as gists, has one tree and takes no REF."
+  (let ((forge (remoto-path-forge root)))
+    (remoto-path-create :forge forge :owner (remoto-path-owner root)
+                        :repo (remoto-path-repo root) :ref (and (remoto--refs-p forge) ref)
+                        :level 'tree :path "/")))
 
 (defun remoto--remote-tree (pick branch upstream)
   "Return the root of the forge tree of BRANCH, which tracks UPSTREAM.
@@ -5118,10 +5143,11 @@ Each candidate follows HEAD and carries the label of its ref."
 
 (defun remoto--browse-file-candidates (forge head owner repo query)
   "Return the / candidates of OWNER/REPO on FORGE for QUERY, after HEAD.
-QUERY is a path from the root of the default ref; its last segment
-filters the entries of its directory."
-  (let ((ref (while-no-input (remoto-forge-default-ref forge owner repo))))
-    (when (stringp ref)
+QUERY is a path from the root of the default ref, or of the one tree of
+a forge without refs; its last segment filters the entries of its directory."
+  (let* ((refs (remoto--refs-p forge))
+         (ref (and refs (while-no-input (remoto-forge-default-ref forge owner repo)))))
+    (when (or (stringp ref) (not refs))
       (let* ((subpath (or (file-name-directory query) ""))
              (file-part (file-name-nondirectory query))
              (children (while-no-input
@@ -5135,7 +5161,8 @@ filters the entries of its directory."
                                                       "/" subpath name)
                                               'remoto-target
                                               (concat (remoto--repo-id forge owner repo)
-                                                      "@" ref ":/" subpath name))))
+                                                      (and ref (concat "@" ref))
+                                                      ":/" subpath name))))
                               children))))
         (if (string-empty-p file-part)
             names

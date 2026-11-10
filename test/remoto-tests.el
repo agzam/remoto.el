@@ -3234,6 +3234,15 @@ using unauthenticated access until M-x remoto-reset-auth")
       (expect 'ghub-get :not :to-have-been-called)
       (expect 'message :not :to-have-been-called))))
 
+(cl-defstruct (remoto-test-shared (:include remoto-forge)
+                                  (:constructor remoto-test-shared-create)
+                                  (:copier nil))
+  "A source on GitHub's API host, as gists are.")
+
+(cl-defmethod remoto--api-host ((_forge remoto-test-shared))
+  "GitHub's API host."
+  "api.github.com")
+
 (describe "remoto-login"
   (before-each
     (spy-on 'browse-url)
@@ -3366,7 +3375,22 @@ using unauthenticated access until M-x remoto-reset-auth")
               :to-equal "Remoto: log in to (default Codeberg): ")
       (setq buffer-file-name nil))
     (with-temp-buffer
-      (expect (remoto--read-forge "Remoto: log in to") :to-be remoto--github))))
+      (expect (remoto--read-forge "Remoto: log in to") :to-be remoto--github)))
+
+  (it "offers one forge per API host, so a source on GitHub's API logs in as GitHub"
+    (remoto-test-with-registry
+      (remoto-register-forge (remoto-test-shared-create
+                              :name 'shared :prefixes '("shared") :host "github.com"
+                              :title "GitHub Gist"))
+      (spy-on 'completing-read :and-call-fake
+              (lambda (_prompt _table &rest args) (nth 4 args)))
+      (with-temp-buffer
+        (setq buffer-file-name "/shared:o/r:/a.txt")
+        (expect (remoto--read-forge "Remoto: log in to") :to-be remoto--github)
+        (setq buffer-file-name nil))
+      (expect (nth 1 (spy-calls-args-for 'completing-read 0)) :to-contain "GitHub")
+      (expect (nth 1 (spy-calls-args-for 'completing-read 0))
+              :not :to-contain "GitHub Gist"))))
 
 (describe "remoto--store-token"
   (it "writes remoto's row first and drops its earlier row for the host, nothing else"
@@ -4107,6 +4131,26 @@ Turn `global-remoto-mode' back to its state before BODY."
               :to-equal "Remoto: rl has no permalink URL")
       (expect (seq-uniq (mapcar #'cdr (spy-calls-all-args 'remoto-forge-resolve-ref)))
               :to-equal '(("o" "r" nil)))))
+
+  (it "completes its files in remoto-browse, at no ref"
+    (let ((remoto--forges (copy-alist remoto--forges))
+          (remoto--handler-regexp remoto--handler-regexp)
+          (file-name-handler-alist (copy-alist file-name-handler-alist))
+          (remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (remoto-register-forge rl)
+      (let ((names (remoto--browse-file-candidates rl "/rl:" "o" "r" "")))
+        (expect (mapcar #'substring-no-properties names)
+                :to-equal '("/rl:o/r/a.txt" "/rl:o/r/lib/"))
+        (expect (get-text-property 0 'remoto-target (car names)) :to-equal "/rl:o/r:/a.txt"))))
+
+  (it "takes no ref in the root of a clone's repository, which a forge with refs keeps"
+    (expect (remoto-path-ref
+             (remoto--root-at (remoto-path-create :forge rl :owner "o" :repo "r") "dev"))
+            :to-be nil)
+    (expect (remoto-path-ref
+             (remoto--root-at (remoto-path-create :forge remoto--github :owner "o" :repo "r")
+                              "dev"))
+            :to-equal "dev"))
 
   (it "pins a permalink to what the source answers for no ref, as a gist's revision"
     (let ((remoto--forges (copy-alist remoto--forges))
@@ -5654,6 +5698,18 @@ At the level of OWNER, or at the root without OWNER."
       (expect (remoto--get-authenticated-user remoto--codeberg) :to-be nil)
       (expect 'ghub-get :not :to-have-been-called))))
 
+(describe "remoto--account-endpoint-p"
+  (it "names the endpoints of the token's account, its own and starred gists among them"
+    (expect (seq-remove #'remoto--account-endpoint-p
+                        '("user" "user/repos?affiliation=owner" "user?x=1" "gists"
+                          "gists?per_page=100&page=2" "gists/starred"
+                          "gists/starred?per_page=100"))
+            :to-be nil)
+    (expect (seq-filter #'remoto--account-endpoint-p
+                        '("users/agzam/repos" "users/agzam/gists" "gists/0a1b"
+                          "gists/0a1b/f00d" "usersx" "gistsx" "repos/user/x"))
+            :to-be nil)))
+
 (describe "the root listing without a token"
   (it "says it needs a token and sends no request, on either forge"
     (remoto-test-with-cache
@@ -6620,6 +6676,29 @@ b050 is on the second page of big's listing, which the specs hand over."
       (with-current-buffer (remoto-test--in-dired "/github:me/zeta@main:/")
         (remoto-dired-jump-other-window))
       (expect 'dired-other-window :to-have-been-called-with "/github:me/"))))
+
+(describe "remoto--listing-line"
+  (it "finds the line of a repository, or of a file in it as a one-file gist's line holds"
+    (remoto-test-with-cache
+      (puthash "/github:me/" (remoto--listing-create
+                              :entries '(("zetaplus" (type . "tree"))
+                                         ("0a1b/kitty.sh" (type . "blob"))
+                                         ("Other" (type . "tree"))))
+               remoto--listing-cache)
+      (expect (remoto--listing-line "/github:me/0a1b") :to-equal "/github:me/0a1b/kitty.sh")
+      (expect (remoto--listing-line "/github:me/other") :to-equal "/github:me/Other")
+      (expect (remoto--listing-line "/github:me/zeta") :to-be nil))))
+
+(describe "remoto--root-lists-p"
+  (it "counts the token's account, and a root line whose first segment is the owner"
+    (remoto-test-with-cache
+      (let ((remoto--logins (remoto-test--logins :user "me" :token "ghp_me")))
+        (puthash "/github:" (remoto--listing-create
+                             :entries '(("tpope/0a1b/vimrc" (type . "blob"))))
+                 remoto--listing-cache)
+        (expect (remoto--root-lists-p (remoto--parse "/github:me/")) :to-be-truthy)
+        (expect (remoto--root-lists-p (remoto--parse "/github:TPope/")) :to-be-truthy)
+        (expect (remoto--root-lists-p (remoto--parse "/github:tpopex/")) :not :to-be-truthy)))))
 
 (describe "remoto--find-file-in"
   (it "runs the command on C-x 4 f for another window"
