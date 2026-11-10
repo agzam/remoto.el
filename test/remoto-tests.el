@@ -10566,10 +10566,20 @@ Return the directory its C-x C-f started in."
       (remoto-test--git "checkout" "--quiet" "-b" "local")
       (expect (remoto-test--find-remote) :to-equal "/codeberg:o/r:/")))
 
-  (it "opens at the default branch from a detached HEAD"
+  (it "opens at the full commit of a detached HEAD that the remote has"
+    (remoto-test-in-clone _dir
+      (remoto-test--git "remote" "add" "origin" "git@github.com:o/r.git")
+      (let ((commit (string-trim (remoto-test--git "rev-parse" "HEAD"))))
+        (remoto-test--git "commit" "--quiet" "--allow-empty" "--message=next")
+        (remoto-test--git "update-ref" "refs/remotes/origin/main" "HEAD")
+        (remoto-test--git "checkout" "--quiet" "--detach" commit)
+        (expect (remoto-test--find-remote) :to-equal (format "/github:o/r@%s:/" commit)))))
+
+  (it "opens at the default branch from a detached HEAD the remote lacks"
     (remoto-test-in-clone _dir
       (remoto-test--git "remote" "add" "origin" "git@github.com:o/r.git")
       (remoto-test--git "update-ref" "refs/remotes/origin/main" "HEAD")
+      (remoto-test--git "commit" "--quiet" "--allow-empty" "--message=local")
       (remoto-test--git "checkout" "--quiet" "--detach")
       (expect (remoto-test--find-remote) :to-equal "/github:o/r:/")))
 
@@ -10630,6 +10640,254 @@ Return the directory its C-x C-f started in."
     (let ((default-directory "/github:o/r@main:/src/"))
       (expect (remoto-test--find-remote) :to-equal "/github:o/r@main:/src/"))
     (expect 'remoto--git :not :to-have-been-called)))
+
+(describe "remoto--diff-hunks"
+  (it "is nil for equal texts and asks git nothing"
+    (spy-on 'process-file)
+    (expect (remoto--diff-hunks "a\nb\n" "a\nb\n") :to-be nil)
+    (expect 'process-file :not :to-have-been-called))
+
+  (it "gives the line ranges of each hunk, an empty one where lines went or came"
+    (assume (executable-find "git") "no git")
+    (let ((process-environment (append remoto-test--git-environment process-environment)))
+      (expect (remoto--diff-hunks "a\nb\nc\nd\ne\nf\n" "a\nX\nc\nd\nNEW1\nNEW2\ne\n")
+              :to-equal '((2 3 2 3) (5 5 5 7) (6 7 8 8)))
+      (expect (remoto--diff-hunks "a\nb" "a\nb\n") :to-equal '((2 3 2 3))))))
+
+(describe "remoto--hunk-ranges"
+  (it "counts 1 where the header leaves the count out, and puts an empty range after its line"
+    (expect (remoto--hunk-ranges "@@ -2 +2 @@ a") :to-equal '(2 3 2 3))
+    (expect (remoto--hunk-ranges "@@ -0,0 +1,2 @@") :to-equal '(1 1 1 3))
+    (expect (remoto--hunk-ranges "@@ -1 +0,0 @@") :to-equal '(1 2 1 1)))
+
+  (it "is nil for any other line"
+    (dolist (line '("-b" "+X" "diff --git a b" "" "@@ -x +2 @@" " @@ -2 +2 @@"))
+      (expect (remoto--hunk-ranges line) :to-be nil))))
+
+(describe "remoto--map-line"
+  ;; From a b c d e f to a X c d NEW1 NEW2 e.
+  (let ((hunks '((2 3 2 3) (5 5 5 7) (6 7 8 8))))
+    (it "moves a line by what the hunks above it added and removed"
+      (expect (mapcar (lambda (line) (remoto--map-line line hunks)) '(1 3 4 5))
+              :to-equal '(1 3 4 7)))
+
+    (it "keeps a changed line in its hunk and sends a deleted one to the line after"
+      (expect (remoto--map-line 2 hunks) :to-equal 2)
+      (expect (remoto--map-line 6 hunks) :to-equal 8)
+      (expect (remoto--map-line 4 '((2 5 2 8))) :to-equal 4)
+      (expect (remoto--map-line 4 '((2 5 2 3))) :to-equal 2))
+
+    (it "moves the first line past the lines added above it, and back past the deleted"
+      (expect (remoto--map-line 1 '((1 1 1 3))) :to-equal 3)
+      (expect (remoto--map-line 2 '((1 2 1 1))) :to-equal 1))
+
+    (it "is the same line without hunks"
+      (expect (remoto--map-line 42 nil) :to-equal 42))))
+
+(describe "remoto--region-lines"
+  (it "leaves out the line a region ends at the start of, but not the line of an empty region"
+    (with-temp-buffer
+      (insert "one\ntwo\nthree\n")
+      (let ((transient-mark-mode t)
+            (use-empty-active-region t))
+        (goto-char (point-min))
+        (push-mark (point) t t)
+        (forward-line 2)
+        (expect (remoto--region-lines) :to-equal '(1 . 2))
+        (goto-char (point-min))
+        (forward-line 1)
+        (push-mark (point) t t)
+        (expect (remoto--region-lines) :to-equal '(2 . 2))
+        (deactivate-mark)
+        (expect (remoto--region-lines) :to-equal '(2))))))
+
+(defmacro remoto-test-in-tracked-clone (var &rest body)
+  "Run BODY in a clone whose main tracks testowner/testrepo's main, VAR its directory.
+The caches hold the mock tree of that branch."
+  (declare (indent 1))
+  `(remoto-test-in-clone ,var
+     (remoto-test--git "remote" "add" "origin" "git@github.com:testowner/testrepo.git")
+     (remoto-test--git "update-ref" "refs/remotes/origin/main" "HEAD")
+     (remoto-test--git "branch" "--quiet" "--set-upstream-to=origin/main")
+     (make-directory (expand-file-name "src" ,var))
+     (remoto-test-with-cache ,@body)))
+
+(defun remoto-test--from-file (file text setup)
+  "Visit FILE, which holds TEXT, call SETUP there, then C-x p R from it.
+Return what C-x p R left: the file, line and column of point, the lines
+of an active region, and whether FILE's buffer keeps its region."
+  (with-temp-file file (insert text))
+  (let* ((transient-mark-mode t)
+         (local (find-file-noselect file))
+         (before (buffer-list)))
+    (unwind-protect
+        (save-window-excursion
+          (with-current-buffer local
+            (funcall setup)
+            (call-interactively #'remoto-project-find-file)
+            (list :file buffer-file-name
+                  :line (line-number-at-pos nil t)
+                  :column (current-column)
+                  :region (and (region-active-p) (not deactivate-mark)
+                               (list (line-number-at-pos (region-beginning) t)
+                                     (save-excursion (goto-char (region-beginning)) (bolp))
+                                     (line-number-at-pos (region-end) t)
+                                     (save-excursion (goto-char (region-end)) (eolp))))
+                  :local-region (buffer-local-value 'mark-active local))))
+      (dolist (buffer (buffer-list))
+        (unless (memq buffer before)
+          (kill-buffer buffer)))
+      (with-current-buffer local (set-buffer-modified-p nil))
+      (kill-buffer local))))
+
+(defun remoto-test--goto (line &optional column)
+  "Return a function that puts point on LINE at COLUMN."
+  (lambda ()
+    (goto-char (point-min))
+    (forward-line (1- line))
+    (move-to-column (or column 0))))
+
+(describe "remoto-project-find-file in a file buffer"
+  (it "opens the forge copy at the same line and column"
+    (remoto-test-in-tracked-clone dir
+      (spy-on 'remoto-forge-content :and-return-value "one\ntwo\nthree\nfour\n")
+      (spy-on 'completing-read)
+      (expect (remoto-test--from-file (expand-file-name "src/main.el" dir)
+                                      "one\ntwo\nthree\nfour\n" (remoto-test--goto 3 2))
+              :to-equal '(:file "/github:testowner/testrepo@main:/src/main.el"
+                                :line 3 :column 2 :region nil :local-region nil))
+      (expect 'completing-read :not :to-have-been-called)))
+
+  (it "follows a line that the forge copy moved"
+    (remoto-test-in-tracked-clone dir
+      (spy-on 'remoto-forge-content :and-return-value "new\nnewer\none\ntwo\nthree\nfour\n")
+      (expect (plist-get (remoto-test--from-file (expand-file-name "src/main.el" dir)
+                                                 "one\ntwo\nthree\nfour\n"
+                                                 (remoto-test--goto 3))
+                         :line)
+              :to-be 5)))
+
+  (it "follows the unsaved edits of the buffer"
+    (remoto-test-in-tracked-clone dir
+      (spy-on 'remoto-forge-content :and-return-value "one\ntwo\nthree\nfour\n")
+      (expect (plist-get (remoto-test--from-file
+                          (expand-file-name "src/main.el" dir) "one\ntwo\nthree\nfour\n"
+                          (lambda ()
+                            (goto-char (point-min))
+                            (insert "added\n")
+                            (funcall (remoto-test--goto 4))))
+                         :line)
+              :to-be 3)))
+
+  (it "marks the lines of the region, which leaves out a line it ends at the start of"
+    (remoto-test-in-tracked-clone dir
+      (spy-on 'remoto-forge-content :and-return-value "new\nnewer\none\ntwo\nthree\nfour\nfive\n")
+      (expect (remoto-test--from-file (expand-file-name "src/main.el" dir)
+                                      "one\ntwo\nthree\nfour\nfive\n"
+                                      (lambda ()
+                                        (funcall (remoto-test--goto 2))
+                                        (push-mark (point) t t)
+                                        (forward-line 3)))
+              :to-equal '(:file "/github:testowner/testrepo@main:/src/main.el"
+                                :line 6 :column 4 :region (4 t 6 t) :local-region nil))))
+
+  (it "counts lines from the start of a narrowed buffer"
+    (remoto-test-in-tracked-clone dir
+      (spy-on 'remoto-forge-content :and-return-value "one\ntwo\nthree\nfour\nfive\n")
+      (expect (plist-get (remoto-test--from-file
+                          (expand-file-name "src/main.el" dir) "one\ntwo\nthree\nfour\nfive\n"
+                          (lambda ()
+                            (funcall (remoto-test--goto 3))
+                            (narrow-to-region (point) (point-max))
+                            (forward-line 1)))
+                         :line)
+              :to-be 4)))
+
+  (it "refuses a file the forge copy lacks, and opens no buffer"
+    (remoto-test-in-tracked-clone dir
+      (spy-on 'remoto-forge-content)
+      (let ((before (buffer-list)))
+        (expect (remoto-test--from-file (expand-file-name "src/new.el" dir) "new\n" #'ignore)
+                :to-throw 'user-error
+                '("Remoto: /github:testowner/testrepo@main:/src/new.el does not exist"))
+        (expect (buffer-list) :to-have-same-items-as before))
+      (expect 'remoto-forge-content :not :to-have-been-called))))
+
+(defun remoto-test--from-refs (ref &optional pick)
+  "Run C-x p R in a magit-refs buffer of this clone, REF at point; PICK as its prefix.
+REF is what `remoto--magit-ref-at-point' answers.  Return the directory
+its C-x C-f started in."
+  (cl-letf (((symbol-function 'remoto--magit-ref-at-point) (lambda () ref)))
+    (with-temp-buffer
+      (setq major-mode 'magit-refs-mode)
+      (remoto-test--find-remote pick))))
+
+(describe "remoto-project-find-file in magit-refs"
+  (it "starts at the branch at point, a remote one on its remote"
+    (remoto-test-in-clone _dir
+      (remoto-test--git "remote" "add" "origin" "git@github.com:o/r.git")
+      (remoto-test--git "remote" "add" "upstream" "git@github.com:u/r.git")
+      (remoto-test--git "update-ref" "refs/remotes/upstream/feature/x" "HEAD")
+      (spy-on 'completing-read)
+      (expect (remoto-test--from-refs '("feature/x" nil "upstream"))
+              :to-equal "/github:u/r@feature/x:/")
+      (expect 'completing-read :not :to-have-been-called)))
+
+  (it "starts at the branch a local branch at point tracks, else at @"
+    (remoto-test-in-clone _dir
+      (remoto-test--git "remote" "add" "origin" "git@github.com:o/r.git")
+      (remoto-test--git "update-ref" "refs/remotes/origin/feature/x" "HEAD")
+      (remoto-test--git "branch" "--quiet" "--track" "topic" "origin/feature/x")
+      (remoto-test--git "branch" "--quiet" "local")
+      (expect (remoto-test--from-refs '("topic" nil nil)) :to-equal "/github:o/r@feature/x:/")
+      (expect (remoto-test--from-refs '("local" nil nil)) :to-equal "/github:o/r@")))
+
+  (it "starts at a tag at point on the remote the branch tracks"
+    (remoto-test-in-clone _dir
+      (remoto-test--git "remote" "add" "origin" "git@github.com:o/r.git")
+      (remoto-test--git "remote" "add" "upstream" "git@github.com:u/r.git")
+      (remoto-test--git "update-ref" "refs/remotes/upstream/main" "HEAD")
+      (remoto-test--git "branch" "--quiet" "--set-upstream-to=upstream/main")
+      (expect (remoto-test--from-refs '(nil "v1.0" nil)) :to-equal "/github:u/r@v1.0:/")))
+
+  (it "starts at @ of the remote at point, or of the tracked one with nothing at point"
+    (remoto-test-in-clone _dir
+      (remoto-test--git "remote" "add" "origin" "git@github.com:o/r.git")
+      (remoto-test--git "remote" "add" "upstream" "git@github.com:u/r.git")
+      (remoto-test--git "update-ref" "refs/remotes/origin/main" "HEAD")
+      (remoto-test--git "branch" "--quiet" "--set-upstream-to=origin/main")
+      (spy-on 'completing-read)
+      (expect (remoto-test--from-refs '(nil nil "upstream")) :to-equal "/github:u/r@")
+      (expect (remoto-test--from-refs nil) :to-equal "/github:o/r@")
+      (expect 'completing-read :not :to-have-been-called)))
+
+  (it "asks for the remote with a prefix argument, offering the one at point"
+    (remoto-test-in-clone _dir
+      (remoto-test--git "remote" "add" "origin" "git@github.com:o/r.git")
+      (remoto-test--git "remote" "add" "upstream" "git@github.com:u/r.git")
+      (remoto-test--git "update-ref" "refs/remotes/upstream/feature/x" "HEAD")
+      (spy-on 'completing-read :and-return-value "origin")
+      (expect (remoto-test--from-refs '("feature/x" nil "upstream") '(4))
+              :to-equal "/github:o/r@")
+      (expect (nth 6 (spy-calls-args-for 'completing-read 0)) :to-equal "upstream"))))
+
+(describe "remoto--magit-ref-at-point"
+  (it "is nil without magit"
+    (cl-letf (((symbol-function 'magit-section-value-if) nil)
+              ((symbol-function 'magit-remote-at-point) nil))
+      (expect (remoto--magit-ref-at-point) :to-be nil)))
+
+  (it "names a remote branch without its remote, a local branch and a tag as they are"
+    (dolist (case '(((branch . "upstream/feature/x") ("upstream") ("feature/x" nil "upstream"))
+                    ((branch . "topic") nil ("topic" nil nil))
+                    ((tag . "v1.0") nil (nil "v1.0" nil))
+                    (nil ("origin") (nil nil "origin"))))
+      (pcase-let ((`(,section ,remote ,expected) case))
+        (cl-letf (((symbol-function 'magit-section-value-if)
+                   (lambda (type) (and (eq type (car section)) (cdr section))))
+                  ((symbol-function 'magit-remote-at-point)
+                   (lambda () (car remote))))
+          (expect (remoto--magit-ref-at-point) :to-equal expected))))))
 
 ;;; The bootstrap handler of the autoloads
 

@@ -4494,51 +4494,220 @@ REMOTE-BRANCH is nil once its remote-tracking branch is gone."
     (assoc (completing-read (format-prompt "Remote" default) remotes nil t nil nil default)
            remotes)))
 
+(defun remoto--served-remotes ()
+  "Return (NAME . ROOT) for each remote on a forge remoto serves.
+ROOT is the root `remoto-path' of its repository.  Signal a `user-error'
+when the repository has no remote, or none on such a forge."
+  (let ((remotes (or (remoto--git-remotes)
+                     (user-error "Remoto: this repository has no remote"))))
+    (or (seq-keep (lambda (remote)
+                    (when-let* ((root (remoto--remote-repo (cdr remote))))
+                      (cons (car remote) root)))
+                  remotes)
+        (user-error "Remoto: no remote is on a forge remoto serves: %s"
+                    (mapconcat (lambda (remote) (concat (car remote) " " (cdr remote)))
+                               remotes ", ")))))
+
+(defun remoto--forge-remote (pick upstream)
+  "Return (NAME . ROOT) of the remote that UPSTREAM, (REMOTE BRANCH), names.
+Else it is the only remote.  PICK, or several remotes and none named,
+asks, offering the named remote, else origin, else the first."
+  (let* ((served (remoto--served-remotes))
+         (named (assoc (car upstream) served)))
+    (if (or pick (and (not named) (cdr served)))
+        (remoto--read-remote served (car (or named (assoc "origin" served)
+                                             (car served))))
+      (or named (car served)))))
+
+(defun remoto--head ()
+  "Return (BRANCH UPSTREAM): HEAD's branch, nil when detached, and what it tracks."
+  (let ((branch (remoto--git "symbolic-ref" "--quiet" "--short" "HEAD")))
+    (list branch (and branch (remoto--git-upstream branch)))))
+
+(defun remoto--remote-has-head (remote)
+  "Return non-nil when HEAD is on a remote-tracking branch of REMOTE."
+  (when-let* ((ref (remoto--git "for-each-ref" "--count=1" "--contains=HEAD"
+                                "--format=%(refname)" (concat "refs/remotes/" remote))))
+    (not (string-empty-p ref))))
+
+(defun remoto--remote-ref (remote branch upstream)
+  "Return the ref on REMOTE for BRANCH, which tracks UPSTREAM, or nil.
+It is UPSTREAM's branch on its own remote, else BRANCH where REMOTE has
+it, else, for a detached HEAD, a nil BRANCH, HEAD's commit where REMOTE
+has that.  Nil is the default branch."
+  (cond ((equal remote (car upstream)) (nth 1 upstream))
+        ((and branch (remoto--git "show-ref" "--verify" "--quiet"
+                                  (format "refs/remotes/%s/%s" remote branch)))
+         branch)
+        ((and (null branch) (remoto--remote-has-head remote))
+         (remoto--git "rev-parse" "HEAD"))))
+
+(defun remoto--root-at (root ref)
+  "Return the root of the repository of ROOT at REF, a new `remoto-path'."
+  (remoto-path-create :forge (remoto-path-forge root) :owner (remoto-path-owner root)
+                      :repo (remoto-path-repo root) :ref ref :level 'tree :path "/"))
+
+(defun remoto--remote-tree (pick branch upstream)
+  "Return the root of the forge tree of BRANCH, which tracks UPSTREAM.
+PICK asks for the remote, see `remoto--forge-remote'; the ref is the one
+`remoto--remote-ref' gives."
+  (pcase-let ((`(,remote . ,root) (remoto--forge-remote pick upstream)))
+    (remoto--root-at root (remoto--remote-ref remote branch upstream))))
+
 (defun remoto--forge-directory (pick)
   "Return the remoto directory of `default-directory', a directory of a clone.
-The remote is the one the branch tracks; PICK, or several remotes and
-none tracked, asks for it.  The ref is the tracked branch, else the
-branch's own name when the remote has it, else the default branch."
-  (let* ((prefix (or (remoto--git "rev-parse" "--show-prefix")
-                     (user-error "Remoto: %s is not in a git repository"
-                                 (abbreviate-file-name default-directory))))
-         (remotes (or (remoto--git-remotes)
-                      (user-error "Remoto: this repository has no remote")))
-         (served (or (seq-keep (lambda (remote)
-                                 (when-let* ((root (remoto--remote-repo (cdr remote))))
-                                   (cons (car remote) root)))
-                               remotes)
-                     (user-error "Remoto: no remote is on a forge remoto serves: %s"
-                                 (mapconcat (lambda (remote) (concat (car remote) " " (cdr remote)))
-                                            remotes ", "))))
-         (branch (remoto--git "symbolic-ref" "--quiet" "--short" "HEAD"))
-         (upstream (and branch (remoto--git-upstream branch)))
-         (tracked (assoc (car upstream) served))
-         (remote (if (or pick (and (not tracked) (cdr served)))
-                     (remoto--read-remote served (car (or tracked (assoc "origin" served)
-                                                          (car served))))
-                   (or tracked (car served))))
-         (root (cdr remote)))
-    (setf (remoto-path-ref root)
-          (cond ((eq remote tracked) (nth 1 upstream))
-                ((and branch (remoto--git "show-ref" "--verify" "--quiet"
-                                          (format "refs/remotes/%s/%s" (car remote) branch)))
-                 branch)))
-    (concat (remoto--tree-prefix root) "/" prefix)))
+It is in the tree `remoto--remote-tree' gives for HEAD; PICK asks for the
+remote."
+  (let ((prefix (or (remoto--git "rev-parse" "--show-prefix")
+                    (user-error "Remoto: %s is not in a git repository"
+                                (abbreviate-file-name default-directory)))))
+    (thread-first (apply #'remoto--remote-tree pick (remoto--head))
+                  remoto--canonical-path
+                  (concat prefix))))
 
-;;;###autoload
-(defun remoto-project-find-file (&optional pick)
-  "Find a file in the forge copy of this clone, starting from this directory.
-The prompt is on the remote the branch tracks, at that branch when the
-remote has it, else at its default branch.  PICK, a prefix argument, or
-several remotes and none tracked, asks for the remote."
-  (interactive "P")
-  (let ((default-directory (if (string-match-p remoto--handler-regexp default-directory)
-                               default-directory
-                             (remoto--forge-directory pick)))
+(defun remoto--buffer-text ()
+  "Return the text of the whole buffer, narrowing aside, without properties."
+  (save-restriction
+    (widen)
+    (buffer-substring-no-properties (point-min) (point-max))))
+
+(defun remoto--region-lines ()
+  "Return (FIRST . LAST), the lines of the active region, or (LINE) of point.
+Lines count from the start of the buffer.  A region that ends at the
+start of a line, as a linewise one does, leaves that line out."
+  (if (use-region-p)
+      (let ((start (region-beginning))
+            (end (region-end)))
+        (cons (line-number-at-pos start t)
+              (line-number-at-pos (if (eq (char-before end) ?\n) (max start (1- end)) end)
+                                  t)))
+    (list (line-number-at-pos nil t))))
+
+(defun remoto--hunk-ranges (line)
+  "Return (OLD-FIRST OLD-AFTER NEW-FIRST NEW-AFTER) of hunk header LINE, or nil.
+The hunk turns the old lines from OLD-FIRST up to OLD-AFTER into the new
+ones from NEW-FIRST up to NEW-AFTER.  A side whose count is 0 has an
+empty range after the line its header names."
+  (when (string-match (rx bos "@@ -" (group (+ digit)) (? "," (group (+ digit)))
+                          " +" (group (+ digit)) (? "," (group (+ digit))) " @@")
+                      line)
+    (seq-mapcat (lambda (group)
+                  (let ((first (string-to-number (match-string group line)))
+                        (count (string-to-number (or (match-string (1+ group) line) "1"))))
+                    (if (zerop count)
+                        (list (1+ first) (1+ first))
+                      (list first (+ first count)))))
+                '(1 3))))
+
+(defun remoto--diff-hunks (old new)
+  "Return the line ranges of each hunk from OLD to NEW, see `remoto--hunk-ranges'.
+OLD and NEW are strings, which git compares with no lines of context.
+Nil when they are equal, or when git fails."
+  (unless (string= old new)
+    (let ((default-directory temporary-file-directory)
+          (coding-system-for-write 'utf-8-emacs-unix)
+          (files (list (make-temp-file "remoto-old") (make-temp-file "remoto-new"))))
+      (unwind-protect
+          (with-temp-buffer
+            (write-region old nil (car files) nil 'silent)
+            (write-region new nil (cadr files) nil 'silent)
+            (when (eq 1 (process-file "git" nil t nil "diff" "--no-index" "--no-color"
+                                      "--no-ext-diff" "-U0" "--" (car files) (cadr files)))
+              (seq-keep #'remoto--hunk-ranges (split-string (buffer-string) "\n" t))))
+        (mapc #'delete-file files)))))
+
+(defun remoto--map-line (line hunks)
+  "Return the line of the new text that LINE of the old one becomes, by HUNKS.
+A line after a hunk moves by what the hunk added; a line in it keeps its
+place among the new lines, as far as they go, and a deleted one goes to
+the line after.  See `remoto--hunk-ranges'."
+  (pcase (car (last (seq-take-while (lambda (hunk) (<= (car hunk) line)) hunks)))
+    ('nil line)
+    (`(,old-first ,old-after ,new-first ,new-after)
+     (if (< line old-after)
+         (max new-first (min (+ new-first (- line old-first)) (1- new-after)))
+       (+ line (- new-after old-after))))))
+
+(defun remoto--visit-forge-file (pick)
+  "Visit the forge copy of this buffer's file; PICK asks for the remote.
+Point goes to the same line and column, and an active region marks the
+same lines.  Lines map through a diff of this buffer against the copy."
+  (let ((name (let ((default-directory (file-name-directory buffer-file-name)))
+                (concat (remoto--forge-directory pick)
+                        (file-name-nondirectory buffer-file-name))))
+        (lines (remoto--region-lines))
+        (column (current-column))
+        (text (remoto--buffer-text)))
+    (remoto--ensure-global-mode)
+    (unless (file-exists-p name)
+      (user-error "Remoto: %s does not exist" name))
+    (deactivate-mark)
+    (find-file name)
+    (let* ((hunks (remoto--diff-hunks text (remoto--buffer-text)))
+           (first (remoto--map-line (car lines) hunks)))
+      (goto-char (point-min))
+      (forward-line (1- first))
+      (if-let* ((last (cdr lines)))
+          (progn
+            (push-mark (point) t t)
+            (forward-line (- (remoto--map-line last hunks) first))
+            (end-of-line)
+            ;; Inserting the file set this, and the command loop would
+            ;; drop the region.
+            (setq deactivate-mark nil))
+        (move-to-column column)))))
+
+(defun remoto--magit-ref-at-point ()
+  "Return (BRANCH TAG REMOTE) of the section at point in a magit-refs buffer.
+REMOTE names the remote of a remote's section and of the branches under
+it, whose BRANCH then comes without the remote's name."
+  (when (and (fboundp 'magit-section-value-if) (fboundp 'magit-remote-at-point))
+    (let ((branch (magit-section-value-if 'branch))
+          (remote (magit-remote-at-point)))
+      (list (if (and branch remote)
+                (string-remove-prefix (concat remote "/") branch)
+              branch)
+            (magit-section-value-if 'tag)
+            remote))))
+
+(defun remoto--forge-refs-directory (pick)
+  "Return the directory of `find-file' in magit-refs: the tree of the ref at point.
+With no ref at point, or one the remote lacks, it is the remote's @,
+where its branches and tags complete.  PICK asks for the remote."
+  (pcase-let* ((`(,branch ,tag ,remote) (remoto--magit-ref-at-point))
+               (root (cond ((and branch remote)
+                            (remoto--remote-tree pick branch (list remote branch)))
+                           (branch
+                            (remoto--remote-tree pick branch (remoto--git-upstream branch)))
+                           (t (remoto--root-at
+                               (cdr (remoto--forge-remote
+                                     pick (if remote (list remote) (nth 1 (remoto--head)))))
+                               tag)))))
+    (if (remoto-path-ref root)
+        (remoto--canonical-path root)
+      (remoto--unparse (remoto--path-at (remoto-path-forge root) 'refs
+                                        (remoto-path-owner root) (remoto-path-repo root))))))
+
+(defun remoto--find-file-in (directory)
+  "Call the command on \\[find-file] with DIRECTORY as `default-directory'."
+  (let ((default-directory directory)
         (command (key-binding (kbd "C-x C-f"))))
     (remoto--ensure-global-mode)
     (call-interactively (if (commandp command) command #'find-file))))
+
+;;;###autoload
+(defun remoto-project-find-file (&optional pick)
+  "Open the forge copy of the file, directory or ref this buffer is on.
+A file opens at the same lines.  Else \\[find-file] starts there: at the
+ref at point in magit-refs, in this directory elsewhere.  PICK, a prefix
+argument, or several remotes and none tracked, asks for the remote."
+  (interactive "P")
+  (cond ((string-match-p remoto--handler-regexp default-directory)
+         (remoto--find-file-in default-directory))
+        (buffer-file-name (remoto--visit-forge-file pick))
+        ((derived-mode-p 'magit-refs-mode)
+         (remoto--find-file-in (remoto--forge-refs-directory pick)))
+        (t (remoto--find-file-in (remoto--forge-directory pick)))))
 
 ;;;; Global mode
 
