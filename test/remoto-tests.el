@@ -1860,10 +1860,22 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
       (remoto--maybe-enable-mode)
       (expect remoto-mode :to-be nil)))
 
-  (it "leaves remoto-mode-map empty (no reserved C-c LETTER bindings)"
+  (it "binds no key in remoto-mode-map (no reserved C-c LETTER bindings)"
     (expect (keymapp remoto-mode-map) :to-be-truthy)
-    (expect remoto-mode-map :to-equal (make-sparse-keymap))
+    (let ((events nil))
+      (map-keymap (lambda (event _) (push event events)) remoto-mode-map)
+      (expect events :to-equal '(remap)))
     (expect (lookup-key remoto-mode-map (kbd "C-c")) :to-be nil))
+
+  (it "remaps the Dired commands that go up a level while it is on"
+    (with-temp-buffer
+      (remoto-mode 1)
+      (expect (command-remapping 'dired-up-directory) :to-be 'remoto-dired-up-directory)
+      (expect (command-remapping 'dired-jump) :to-be 'remoto-dired-jump)
+      (expect (command-remapping 'dired-jump-other-window)
+              :to-be 'remoto-dired-jump-other-window)
+      (remoto-mode -1)
+      (expect (command-remapping 'dired-up-directory) :to-be nil)))
 
   (it "groups the url commands in remoto-command-map"
     (expect (keymapp remoto-command-map) :to-be-truthy)
@@ -6288,6 +6300,206 @@ Buffers BODY creates are killed afterwards."
       (let ((root (remoto-forge-entries remoto--github (remoto--parse "/github:"))))
         (expect (mapcar #'car (car root)) :to-equal '("me" "acme" "quiet"))
         (expect (cdr root) :to-be nil)))))
+
+;;; Going up a level
+
+(defun remoto-test--up-api (forge endpoint)
+  "Answer ENDPOINT as `remoto-test--with-big-owner' does, plus big/b050 itself.
+b050 is on the second page of big's listing, which the specs hand over."
+  (if (equal endpoint "repos/big/b050")
+      (remoto-test--repo-item "b050" "2026-01-01T00:00:00Z" :desc "Older")
+    (remoto-test--with-big-owner forge endpoint)))
+
+(defun remoto-test--in-dired (dir)
+  "Return the Dired buffer of DIR, current in the selected window."
+  (switch-to-buffer (dired-noselect dir)))
+
+(describe "going up from a remoto Dired"
+  (it "goes from a repository root to the owner listing, on the repository"
+    (remoto-test-with-listings
+      (with-current-buffer (remoto-test--in-dired "/github:me/zeta@main:/")
+        (remoto-dired-up-directory)
+        (expect dired-directory :to-equal "/github:me/")
+        (expect (dired-get-filename 'verbatim t) :to-equal "zeta"))))
+
+  (it "goes from a Dired of refs to the owner listing, on the repository"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--ref-api)
+      (with-current-buffer (switch-to-buffer (find-file-noselect "/gh:acme/tool@"))
+        (remoto-dired-up-directory)
+        (expect dired-directory :to-equal "/github:acme/")
+        (expect (dired-get-filename 'verbatim t) :to-equal "tool"))))
+
+  (it "lands on the repository's line whatever the letter case of the path"
+    (remoto-test-with-listings
+      (with-current-buffer (remoto-test--in-dired "/github:me/ZETA@main:/")
+        (remoto-dired-up-directory)
+        (expect (dired-get-filename 'verbatim t) :to-equal "zeta")
+        (expect (remoto-test--dired-names) :to-equal '("." ".." "alpha" "mid" "zeta")))))
+
+  (it "lands on a repository whose page is still loading, then keeps one line of it"
+    (remoto-test-with-listings
+      (let ((pending nil))
+        (spy-on 'remoto--api :and-call-fake #'remoto-test--up-api)
+        (spy-on 'remoto--api-async :and-call-fake
+                (lambda (_forge _endpoint callback &optional _errback)
+                  (setq pending (append pending (list callback)))))
+        ;; The short form asks for the default branch, and that answer
+        ;; describes the repository.
+        (with-current-buffer (remoto-test--in-dired "/github:big/b050/")
+          (expect dired-directory :to-equal "/github:big/b050@main:/")
+          (remoto-dired-up-directory)
+          (expect dired-directory :to-equal "/github:big/")
+          (expect (dired-get-filename 'verbatim t) :to-equal "b050")
+          (expect (buffer-string) :to-match " b050 +Older$")
+          (funcall (pop pending) (remoto-test--repo-items 100 "b"))
+          (funcall (pop pending) (remoto-test--repo-items 5 "c"))
+          (expect pending :to-be nil)
+          (expect (buffer-string) :to-match " c004$")
+          (expect (dired-get-filename 'verbatim t) :to-equal "b050")
+          (expect (how-many " b050$" (point-min) (point-max)) :to-equal 1)))))
+
+  (it "asks nothing for a repository remoto never saw, and adds no line"
+    (remoto-test-with-listings
+      (spy-on 'remoto--api :and-call-fake #'remoto-test--up-api)
+      (spy-on 'remoto--api-async)
+      (with-current-buffer (remoto-test--in-dired "/github:big/b050@main:/")
+        (remoto-dired-up-directory)
+        (expect dired-directory :to-equal "/github:big/")
+        (expect (buffer-string) :not :to-match " b050"))
+      (expect (remoto-test--asked-p "\\`repos/big/b050\\'") :to-be nil)))
+
+  (it "keeps the line of a repository past remoto-listing-cap"
+    (remoto-test-with-listings
+      (let ((remoto-listing-cap 150)
+            (pending nil))
+        (spy-on 'remoto--api :and-call-fake #'remoto-test--up-api)
+        (spy-on 'remoto--api-async :and-call-fake
+                (lambda (_forge _endpoint callback &optional _errback)
+                  (push callback pending)))
+        (remoto--remember-repo "/github:" "big/z999"
+                               (remoto-test--repo-item "z999" "2010-01-01T00:00:00Z"))
+        (with-current-buffer (remoto-test--in-dired "/github:big/z999@main:/")
+          (remoto-dired-up-directory)
+          (funcall (pop pending) (remoto-test--repo-items 100 "b"))
+          (expect pending :to-be nil)
+          (expect (buffer-string) :to-match "the 150 most recently pushed")
+          (expect (dired-get-filename 'verbatim t) :to-equal "z999")))))
+
+  (it "climbs from the token's account and its organizations to /github:, on their lines"
+    (remoto-test-with-listings
+      (spy-on 'remoto--find-file-in)
+      (dolist (owner '("me" "acme"))
+        (with-current-buffer (remoto-test--in-dired (format "/github:%s/" owner))
+          (remoto-dired-up-directory)
+          (expect dired-directory :to-equal "/github:")
+          (expect (dired-get-filename 'verbatim t) :to-equal owner)))
+      (expect 'remoto--find-file-in :not :to-have-been-called)))
+
+  (it "opens a file prompt at /github: above an account it does not list, and stays"
+    (remoto-test-with-listings
+      (spy-on 'remoto--find-file-in)
+      (with-current-buffer (remoto-test--in-dired "/github:torvalds/")
+        (remoto-dired-up-directory)
+        (expect dired-directory :to-equal "/github:torvalds/")
+        (remoto-dired-up-directory t))
+      (expect (spy-calls-all-args 'remoto--find-file-in)
+              :to-equal '(("/github:" nil) ("/github:" t))))
+    (remoto-test-with-listings
+      (let ((remoto--logins (remoto-test--logins :user nil :failed t)))
+        (spy-on 'remoto--find-file-in)
+        (with-current-buffer (remoto-test--in-dired "/github:torvalds/")
+          (remoto-dired-up-directory))
+        (expect 'remoto--find-file-in :to-have-been-called-with "/github:" nil))))
+
+  (it "leaves a directory inside a tree and /github: to Dired's own command"
+    (remoto-test-with-listings
+      (with-current-buffer (remoto-test--in-dired "/github:testowner/testrepo@main:/src/")
+        (remoto-dired-up-directory)
+        (expect dired-directory :to-equal "/github:testowner/testrepo@main:/")
+        (expect (dired-get-filename 'verbatim t) :to-equal "src"))
+      (with-current-buffer (remoto-test--in-dired "/github:")
+        (remoto-dired-up-directory)
+        (expect dired-directory :to-equal "/github:"))))
+
+  (it "decides by the level of the directory, on every forge"
+    (remoto-test-with-listings
+      (spy-on 'dired--find-possibly-alternative-file)
+      (spy-on 'dired-goto-file :and-return-value t)
+      (spy-on 'remoto--find-file-in)
+      (dolist (case '(("/github:o/r@main:/" . "/github:o/")
+                      ("/github:o/r:/" . "/github:o/")
+                      ("/github:o/r@" . "/github:o/")
+                      ("/codeberg:o/r@main:/" . "/codeberg:o/")
+                      ("/github:o/r@main:/src/")
+                      ("/github:o/r/")
+                      ("/github:me/")
+                      ("/github:")))
+        (spy-calls-reset 'dired--find-possibly-alternative-file)
+        (spy-on 'dired-current-directory :and-return-value (car case))
+        (with-temp-buffer
+          (setq major-mode 'dired-mode)
+          (expect (list (car case) (remoto--dired-up nil))
+                  :to-equal (list (car case) (and (cdr case) t))))
+        (if (cdr case)
+            (expect 'dired--find-possibly-alternative-file
+                    :to-have-been-called-with (cdr case))
+          (expect 'dired--find-possibly-alternative-file :not :to-have-been-called)))
+      (expect 'remoto--find-file-in :not :to-have-been-called)))
+
+  (it "jumps up the same way, and leaves a file name or a file buffer to dired-jump"
+    (remoto-test-with-listings
+      (with-current-buffer (remoto-test--in-dired "/github:me/zeta@main:/")
+        (remoto-dired-jump)
+        (expect dired-directory :to-equal "/github:me/")
+        (expect (dired-get-filename 'verbatim t) :to-equal "zeta"))
+      (spy-on 'dired-jump)
+      (with-current-buffer (remoto-test--in-dired "/github:me/zeta@main:/")
+        (remoto-dired-jump nil "/github:me/zeta@main:/README.md"))
+      (with-temp-buffer
+        (remoto-dired-jump))
+      (expect (spy-calls-all-args 'dired-jump)
+              :to-equal '((nil "/github:me/zeta@main:/README.md") (nil nil)))))
+
+  (it "jumps up in another window"
+    (remoto-test-with-listings
+      (spy-on 'dired-other-window)
+      (with-current-buffer (remoto-test--in-dired "/github:me/zeta@main:/")
+        (remoto-dired-jump-other-window))
+      (expect 'dired-other-window :to-have-been-called-with "/github:me/"))))
+
+(describe "remoto--find-file-in"
+  (it "runs the command on C-x 4 f for another window"
+    (let* ((found nil)
+           (command (lambda () (interactive) (setq found default-directory)))
+           (overriding-local-map (define-keymap "C-x C-f" #'ignore "C-x 4 f" command)))
+      (remoto--find-file-in "/github:" t)
+      (expect found :to-equal "/github:"))))
+
+(describe "remoto--add-listing-page"
+  (it "lets a page's own entry replace a name already there, whatever its case"
+    (let ((listing (remoto--listing-create
+                    :entries (list '("a" (note . "a")) '("Older" (note . "added"))))))
+      (remoto--add-listing-page listing (list '("b" (note . "b")) '("older" (note . "page")))
+                                nil)
+      (expect (remoto--listing-entries listing)
+              :to-equal '(("a" (note . "a")) ("b" (note . "b")) ("older" (note . "page")))))))
+
+(describe "the default ref of a forge with GitHub's API"
+  (it "remembers the repository's Dired line from the same answer"
+    (remoto-test-with-cache
+      (spy-on 'remoto--api :and-return-value
+              (remoto-test--repo-item "r" "2026-10-01T00:00:00Z" :desc "Hello" :branch "dev"))
+      (expect (remoto-forge-default-ref remoto--github "o" "r") :to-equal "dev")
+      (expect (alist-get 'note (remoto--entry-for "/github:o/r")) :to-equal "Hello")
+      (expect (remoto-forge-default-ref remoto--codeberg "o" "r") :to-equal "dev")
+      (expect (alist-get 'note (remoto--entry-for "/codeberg:o/r")) :to-equal "Hello")))
+
+  (it "remembers nothing from an empty answer"
+    (remoto-test-with-cache
+      (spy-on 'remoto--api)
+      (expect (remoto-forge-default-ref remoto--github "o" "r") :to-be nil)
+      (expect (remoto--entry-for "/github:o/r") :to-be nil))))
 
 (cl-defstruct (remoto-test-paged (:include remoto-forge)
                                  (:constructor remoto-test-paged-create)

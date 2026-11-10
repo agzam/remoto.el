@@ -738,8 +738,12 @@ a TTL of 0 keeps it for good."
 
 (cl-defmethod remoto-forge-default-ref ((forge remoto-github) owner repo)
   "GitHub's `default-ref' for OWNER and REPO on FORGE.
-See `remoto-forge-default-ref'."
-  (alist-get 'default_branch (remoto--api forge (format "repos/%s/%s" owner repo))))
+See `remoto-forge-default-ref'.  The answer is the whole repository, so
+its Dired line is remembered too, for the owner listing to land on."
+  (let ((item (remoto--api forge (format "repos/%s/%s" owner repo))))
+    (when item
+      (remoto--remember-repo (remoto--prefix forge) (format "%s/%s" owner repo) item))
+    (alist-get 'default_branch item)))
 
 (cl-defmethod remoto-forge-tree ((forge remoto-github) owner repo ref)
   "GitHub's `tree' for OWNER, REPO and REF on FORGE, see `remoto-forge-tree'."

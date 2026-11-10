@@ -344,6 +344,11 @@ takes that token's own account, which its root listing surely holds.")
       ("dired ^ in an owner listing" nil ,@(remoto-e2e--in "/gh:agzam/" "^"))
       ("dired ^ at a repository root" nil
        ,@(remoto-e2e--in "/gh:agzam/remoto.el/" "^"))
+      ("dired C-x C-j at a repository root" nil
+       ,@(remoto-e2e--in "/gh:agzam/remoto.el/" (kbd "C-x C-j")))
+      ("dired ^ in a Dired of refs" nil ,@(remoto-e2e--in "/gh:agzam/remoto.el@" "^"))
+      ("dired ^ in the listing of an organization of the token" nil
+       ,@(remoto-e2e--in (concat "/gh:" remoto-e2e--root-account "/") "^"))
       ("dired g in an owner listing" nil ,@(remoto-e2e--in "/gh:agzam/" "g"))
       ("dired s in an owner listing" nil ,@(remoto-e2e--in "/gh:agzam/" "s"))
       ("dired ( in an owner listing" nil ,@(remoto-e2e--in "/gh:agzam/" "("))

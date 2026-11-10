@@ -175,7 +175,17 @@
                          :dired)
               :to-equal "/github:someone/")
       (expect (member "someone" (assoc "dired RET on an account line" (remoto-e2e--dired-cases)))
-              :to-be-truthy))))
+              :to-be-truthy)))
+
+  (it "climbs from the token's own listing to /github:, where the replay opens a prompt"
+    (let ((dired (lambda ()
+                   (plist-get (remoto-keys--expected-state "vanilla" "dired ^ in an owner listing")
+                              :dired))))
+      (expect (funcall dired) :to-equal "/github:agzam/")
+      (let ((remoto-keys--github-login "agzam"))
+        (expect (funcall dired) :to-equal "/github:"))
+      (let ((remoto-keys--github-login "someone"))
+        (expect (funcall dired) :to-equal "/github:agzam/")))))
 
 (describe "remoto-e2e--codeberg-cases"
   (it "opens each Codeberg name with the profile's commands, ex lines ending in RET"

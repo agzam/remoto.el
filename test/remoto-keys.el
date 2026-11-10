@@ -662,8 +662,8 @@ no landing ends in no Dired and no file, so it has no landing to check.")
 (defun remoto-keys--expected-state (profile label)
   "Return the replay's expected state of the case LABEL under PROFILE, or nil.
 A profile without golden files takes vanilla's, and evil's for ex cases;
-ido's own landings come from `remoto-keys--ido-landings'.  RET on an
-account line opens `remoto-e2e--root-account'."
+ido's own landings come from `remoto-keys--ido-landings'.  The landings
+that depend on whose token it is follow `remoto-keys--github-login'."
   (let ((reference (cond ((member profile remoto-e2e-profiles) profile)
                          ((string-prefix-p "ex " label) "evil")
                          (t "vanilla"))))
@@ -679,6 +679,12 @@ account line opens `remoto-e2e--root-account'."
             ((and state (equal label "dired RET on an account line"))
              (plist-put (copy-sequence state) :dired
                         (format "/github:%s/" remoto-e2e--root-account)))
+            ;; The replay's token is another account, whose ^ opens a file
+            ;; prompt; ^ in the listing of the token's own account opens /github:.
+            ((and state (equal label "dired ^ in an owner listing")
+                  (equal remoto-keys--github-login
+                         (plist-get remoto-e2e--github-targets :account)))
+             (plist-put (copy-sequence state) :dired "/github:"))
             (t state)))))
 
 (defun remoto-keys--landing (state)
