@@ -1919,8 +1919,10 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
                (let ((filtered (seq-filter (lambda (u) (string-prefix-p file u))
                                            result)))
                  ;; Pre-fetch repos for the top match so the cache is
-                 ;; warm by the time the user types "/"
-                 (when-let* ((top (car filtered)))
+                 ;; warm by the time the user types "/"; a name with a
+                 ;; slash is a repository a source lists at its root.
+                 (when-let* ((top (car filtered))
+                             ((not (string-search "/" top))))
                    (remoto-forge-complete forge (remoto--path-at forge 'owner top)
                                           nil nil))
                  (mapcar candidate filtered))))))
@@ -4394,9 +4396,13 @@ Provides group-function and affixation-function for @ and # modes."
                                 candidates)))))
        `((category . remoto-repo)
          (affixation-function . ,affix-fn))))
-    ;; Root mode: /github: - user/org type
+    ;; Root mode: /github: - user/org type.  A source's root candidate may
+    ;; name its group; an account names none, and UIs show no header then.
     ('root
-     (let ((affix-fn (lambda (candidates)
+     (let ((group-fn (lambda (candidate transform)
+                       (if transform candidate
+                         (remoto--get-prop candidate 'remoto-group))))
+           (affix-fn (lambda (candidates)
                        (remoto--affixate
                         (mapcar (lambda (c)
                                   (let* ((acct-type (or (remoto--get-prop c 'remoto-acct-type) ""))
@@ -4408,6 +4414,7 @@ Provides group-function and affixation-function for @ and # modes."
                                     (list c "" suffix)))
                                 candidates)))))
        `((category . remoto-owner)
+         (group-function . ,group-fn)
          (affixation-function . ,affix-fn))))))
 
 (defun remoto--read-file-name-internal-a (orig string pred action)

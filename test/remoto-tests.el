@@ -4034,6 +4034,12 @@ Turn `global-remoto-mode' back to its state before BODY."
       (error "Asked for the ref %s" ref)
     '(("a.txt" (type . "blob")) ("lib" (type . "tree")))))
 
+(cl-defmethod remoto-forge-complete ((_forge remoto-test-refless) path _query _wait)
+  "At the root, two repositories of two owners, each in a group, as gists are."
+  (when (eq (remoto-path-level path) 'root)
+    (list (propertize "o/r1" 'remoto-group "Mine")
+          (propertize "x/r2" 'remoto-group "Starred"))))
+
 (describe "a source without refs"
   :var ((rl (remoto-test-refless-create :name 'rl :prefixes '("rl") :host "rl.example")))
 
@@ -4055,6 +4061,25 @@ Turn `global-remoto-mode' back to its state before BODY."
       (let ((names (remoto--handle-file-name-all-completions "" "/rl:o/r/")))
         (expect (mapcar #'substring-no-properties names) :to-equal '("a.txt" "lib/"))
         (expect (get-text-property 0 'remoto-target (car names)) :to-equal "/rl:o/r:/a.txt"))))
+
+  (it "completes the repositories its root lists, in their groups, and prefetches no owner"
+    (let ((remoto--forges (copy-alist remoto--forges))
+          (remoto--handler-regexp remoto--handler-regexp)
+          (file-name-handler-alist (copy-alist file-name-handler-alist))
+          (remoto--default-branch-cache (make-hash-table :test 'equal)))
+      (remoto-register-forge rl)
+      (spy-on 'remoto-forge-complete :and-call-through)
+      (let ((all (remoto--handle-file-name-all-completions "" "/rl:"))
+            (typed (remoto--handle-file-name-all-completions "o" "/rl:"))
+            (group (alist-get 'group-function (remoto--completion-metadata "/rl:"))))
+        (expect (mapcar #'substring-no-properties all) :to-equal '("o/r1/" "x/r2/"))
+        (expect (get-text-property 0 'remoto-target (car all)) :to-equal "/rl:o/r1")
+        (expect (mapcar (lambda (candidate) (funcall group candidate nil)) all)
+                :to-equal '("Mine" "Starred"))
+        (expect (mapcar #'substring-no-properties typed) :to-equal '("o/r1/"))
+        (expect (seq-remove (lambda (args) (eq (remoto-path-level (nth 1 args)) 'root))
+                            (spy-calls-all-args 'remoto-forge-complete))
+                :to-be nil))))
 
   (it "answers no permalink, and the permalink command refuses"
     (let ((remoto--forges (copy-alist remoto--forges))
@@ -8164,6 +8189,14 @@ Returns the full path after completion, or INPUT if no completion."
       (let ((result (funcall affix-fn (list user org))))
         (expect (string-match-p "User" (nth 2 (car result))) :to-be-truthy)
         (expect (string-match-p "Organization" (nth 2 (cadr result))) :to-be-truthy))))
+
+  (it "groups root candidates by their remoto-group, and an account without one in none"
+    (let ((group-fn (alist-get 'group-function (remoto--completion-metadata "/github:"))))
+      (expect (funcall group-fn (propertize "agzam/" 'remoto-acct-type "User") nil)
+              :to-be nil)
+      (expect (funcall group-fn (concat (propertize "o/0a1b" 'remoto-group "Starred") "/") nil)
+              :to-equal "Starred")
+      (expect (funcall group-fn "x/" t) :to-equal "x/")))
 
   (it "uses remoto category to avoid marginalia override"
     (let* ((directory "/github:testowner/"))

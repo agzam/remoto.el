@@ -489,7 +489,8 @@ calling it more than once is harmless."
   (add-to-list 'embark-transformer-alist '(remoto-file . remoto--embark-transform))
   (add-to-list 'embark-transformer-alist '(remoto-branch . remoto--embark-transform-ref))
   (add-to-list 'embark-transformer-alist '(remoto-issue . remoto--embark-transform-ref))
-  (add-to-list 'embark-transformer-alist '(remoto-owner . remoto--embark-transform-ref))
+  ;; A root lists accounts, or a source's repositories, such as gists.
+  (add-to-list 'embark-transformer-alist '(remoto-owner . remoto--embark-transform))
   (add-to-list 'embark-transformer-alist '(remoto . remoto--embark-transform))
   (add-to-list 'embark-transformer-alist '(remoto-browse . remoto--embark-browse-transform))
   (define-key embark-url-map "R" #'remoto-embark-open-in-remoto))
