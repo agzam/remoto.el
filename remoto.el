@@ -2500,7 +2500,7 @@ a note in PLIST starts 4 columns past them, where Dired hides link targets."
          (size (or (alist-get 'size plist) 0)))
     (concat (or (alist-get 'perms plist)
                 (remoto--mode-to-string (alist-get 'mode plist) dir?))
-            "  1 github github "
+            (format " %2d github github " (or (alist-get 'links plist) 1))
             (string-pad (if human (remoto--human-size size human) (number-to-string size))
                         (or (car widths) 8) nil t)
             " " (remoto--ls-time (alist-get 'time plist)) " "

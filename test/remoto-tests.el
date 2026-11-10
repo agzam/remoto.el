@@ -1054,6 +1054,14 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
                    (time . ,(encode-time (iso8601-parse "2020-06-15T12:00:00Z")))))
             :to-equal "drwx------  1 github github     2048 Jun 15  2020 r\n"))
 
+  (it "takes the link count from the entry, 1 without one, right-aligned"
+    (expect (remoto--format-dired-entry "g" '((type . "tree") (links . 14)))
+            :to-match "\\`drwxr-xr-x 14 github github ")
+    (expect (remoto--format-dired-entry "g" '((type . "blob") (links . 300)))
+            :to-match "\\`-rw-r--r-- 300 github github ")
+    (expect (remoto--format-dired-entry "g" '((type . "tree")))
+            :to-match "\\`drwxr-xr-x  1 github github "))
+
   (it "shows the hour of a date within six months, as ls does"
     (expect (remoto--format-dired-entry
              "r" `((type . "tree") (time . ,(time-subtract nil 3600))))
