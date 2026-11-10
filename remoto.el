@@ -237,7 +237,8 @@ A unibyte string; the caller decodes it."
 (cl-defgeneric remoto-forge-resolve-ref (forge _owner _repo _ref)
   "Return the exact ref that REF names in OWNER/REPO on FORGE, for a permalink.
 A commit SHA on a forge: the link keeps naming the same tree when REF
-moves on."
+moves on.  A source without refs gets a nil REF, and answers what pins
+its tree, such as a gist's revision, or signals as by default."
   (remoto--unsupported forge 'resolve-ref))
 
 (cl-defgeneric remoto-forge-refs (forge _owner _repo)
@@ -3188,21 +3189,25 @@ See `remoto-forge-url'."
 
 (defun remoto--context-permalink (ctx)
   "Return the URL of the context plist CTX pinned to a commit, or nil.
-A source whose default ref is nil has no refs to pin."
+A source without refs is asked to pin its tree with a nil ref, as a gist
+pins a revision; one that cannot has no permalink."
   (let* ((forge (remoto--forge-named (plist-get ctx :forge)))
          (owner (plist-get ctx :owner))
          (repo (plist-get ctx :repo))
          (ref (remoto-path-ref
                (remoto--resolve-ref
                 (remoto-path-create :forge forge :owner owner :repo repo
-                                    :ref (plist-get ctx :ref) :path "/")))))
-    (when ref
-      (remoto-forge-url
-       forge (plist-get ctx :kind)
-       (plist-put (copy-sequence ctx) :ref
-                  (or (remoto-forge-resolve-ref forge owner repo ref)
-                      (user-error "Remoto: could not resolve commit SHA for %s@%s"
-                                  (remoto--repo-name owner repo) ref)))))))
+                                    :ref (plist-get ctx :ref) :path "/"))))
+         (pinned (if ref
+                     (or (remoto-forge-resolve-ref forge owner repo ref)
+                         (user-error "Remoto: could not resolve commit SHA for %s@%s"
+                                     (remoto--repo-name owner repo) ref))
+                   (condition-case nil
+                       (remoto-forge-resolve-ref forge owner repo nil)
+                     (remoto-unsupported nil)))))
+    (when pinned
+      (remoto-forge-url forge (plist-get ctx :kind)
+                        (plist-put (copy-sequence ctx) :ref pinned)))))
 
 (defun remoto--url-path (input)
   "Return the `remoto-path' that the URL, remote or shorthand INPUT names.

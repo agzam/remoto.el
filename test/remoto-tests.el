@@ -4040,6 +4040,15 @@ Turn `global-remoto-mode' back to its state before BODY."
     (list (propertize "o/r1" 'remoto-group "Mine")
           (propertize "x/r2" 'remoto-group "Starred"))))
 
+(cl-defstruct (remoto-test-pinned (:include remoto-test-refless)
+                                  (:constructor remoto-test-pinned-create)
+                                  (:copier nil))
+  "A source without refs that pins its tree to a revision, as a gist does.")
+
+(cl-defmethod remoto-forge-resolve-ref ((_forge remoto-test-pinned) _owner _repo ref)
+  "The revision rev1, asked for at no REF."
+  (if ref (error "Asked for the ref %s" ref) "rev1"))
+
 (describe "a source without refs"
   :var ((rl (remoto-test-refless-create :name 'rl :prefixes '("rl") :host "rl.example")))
 
@@ -4081,7 +4090,7 @@ Turn `global-remoto-mode' back to its state before BODY."
                             (spy-calls-all-args 'remoto-forge-complete))
                 :to-be nil))))
 
-  (it "answers no permalink, and the permalink command refuses"
+  (it "answers no permalink when it pins nothing, and the permalink command refuses"
     (let ((remoto--forges (copy-alist remoto--forges))
           (remoto--handler-regexp remoto--handler-regexp)
           (file-name-handler-alist (copy-alist file-name-handler-alist))
@@ -4090,13 +4099,28 @@ Turn `global-remoto-mode' back to its state before BODY."
            (cons (cons 'rl (alist-get 'github remoto-forge-url-templates))
                  remoto-forge-url-templates))
           (ctx '(:forge rl :owner "o" :repo "r" :ref nil :path "a.txt" :kind blob)))
-      (spy-on 'remoto-forge-resolve-ref)
+      (spy-on 'remoto-forge-resolve-ref :and-call-through)
       (spy-on 'remoto--buffer-file-context :and-return-value ctx)
       (remoto-register-forge rl)
       (expect (remoto--context-permalink ctx) :to-be nil)
       (expect (condition-case err (remoto-copy-permalink) (user-error (cadr err)))
               :to-equal "Remoto: rl has no permalink URL")
-      (expect 'remoto-forge-resolve-ref :not :to-have-been-called))))
+      (expect (seq-uniq (mapcar #'cdr (spy-calls-all-args 'remoto-forge-resolve-ref)))
+              :to-equal '(("o" "r" nil)))))
+
+  (it "pins a permalink to what the source answers for no ref, as a gist's revision"
+    (let ((remoto--forges (copy-alist remoto--forges))
+          (remoto--handler-regexp remoto--handler-regexp)
+          (file-name-handler-alist (copy-alist file-name-handler-alist))
+          (remoto--default-branch-cache (make-hash-table :test 'equal))
+          (remoto-forge-url-templates
+           (cons (cons 'pin (alist-get 'github remoto-forge-url-templates))
+                 remoto-forge-url-templates)))
+      (remoto-register-forge (remoto-test-pinned-create
+                              :name 'pin :prefixes '("pin") :host "pin.example"))
+      (expect (remoto--context-permalink
+               '(:forge pin :owner "o" :repo "r" :ref nil :path "a.txt" :kind blob))
+              :to-equal "https://github.com/o/r/blob/rev1/a.txt"))))
 
 (cl-defstruct (remoto-test-hosted (:include remoto-forge)
                                    (:constructor remoto-test-hosted-create)
