@@ -576,9 +576,11 @@
   "/users/agzam/repos?sort=pushed&per_page=100&page=1"
   "async /users/agzam/repos?sort=pushed&per_page=100&page=2"))
 
-("dired ^ in an owner listing" :mode dired-mode :dired "/github:"
- :names ("." ".." "emacs-mirror" "remoto-e2e") :count 4 :point
- "emacs-mirror" :messages
+("dired ^ in an owner listing" :mode dired-mode :dired
+ "/github:agzam/" :names
+ ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
+ :count 145 :point ".doom.d" :minibuffer "/github:" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
   "Remoto: listed all 143 repositories of agzam")
  :requests
@@ -587,12 +589,53 @@
   "async /users/agzam/repos?sort=pushed&per_page=100&page=2"))
 
 ("dired ^ at a repository root" :mode dired-mode :dired
- "/github:agzam/remoto.el@main:/" :names
- ("." ".." ".github" ".gitignore" "LICENSE" "Makefile" "README.org"
-  "SPEC.md" "changelog.org" "plan.md")
- :count 14 :point ".github" :requests
+ "/github:agzam/" :names
+ ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
+ :count 145 :point "remoto.el" :messages
+ ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
+  "Remoto: listed all 143 repositories of agzam")
+ :requests
  ("/repos/agzam/remoto.el"
-  "/repos/agzam/remoto.el/git/trees/main?recursive=1"))
+  "/repos/agzam/remoto.el/git/trees/main?recursive=1"
+  "/user/orgs?per_page=100&page=1"
+  "/users/agzam/repos?sort=pushed&per_page=100&page=1"
+  "async /users/agzam/repos?sort=pushed&per_page=100&page=2"))
+
+("dired C-x C-j at a repository root" :mode dired-mode :dired
+ "/github:agzam/" :names
+ ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
+ :count 145 :point "remoto.el" :messages
+ ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
+  "Remoto: listed all 143 repositories of agzam")
+ :requests
+ ("/repos/agzam/remoto.el"
+  "/repos/agzam/remoto.el/git/trees/main?recursive=1"
+  "/user/orgs?per_page=100&page=1"
+  "/users/agzam/repos?sort=pushed&per_page=100&page=1"
+  "async /users/agzam/repos?sort=pushed&per_page=100&page=2"))
+
+("dired ^ in a Dired of refs" :mode dired-mode :dired "/github:agzam/"
+ :names
+ ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
+  ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
+ :count 145 :point "remoto.el" :messages
+ ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
+  "Remoto: listed all 143 repositories of agzam")
+ :requests
+ ("/repos/agzam/remoto.el/branches?per_page=100&page=1"
+  "/repos/agzam/remoto.el/tags?per_page=100&page=1"
+  "/user/orgs?per_page=100&page=1"
+  "/users/agzam/repos?sort=pushed&per_page=100&page=1"
+  "async /users/agzam/repos?sort=pushed&per_page=100&page=2"))
+
+("dired ^ in the listing of an organization of the token" :mode
+ dired-mode :dired "/github:" :names
+ ("." ".." "emacs-mirror" "remoto-e2e") :count 4 :point "emacs-mirror"
+ :requests
+ ("/user/orgs?per_page=100&page=1"
+  "/orgs/emacs-mirror/repos?sort=pushed&per_page=100&page=1"))
 
 ("dired g in an owner listing" :mode dired-mode :dired
  "/github:agzam/" :names

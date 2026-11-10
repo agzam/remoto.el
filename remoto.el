@@ -595,6 +595,9 @@ Two forges may host an OWNER/REPO each, so the prefix is part of the key."
 
 (declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
 (declare-function dired-goto-file "dired" (file))
+(declare-function dired-current-directory "dired")
+(declare-function dired-up-directory "dired")
+(declare-function dired--find-possibly-alternative-file "dired")
 
 (defgroup remoto nil
   "Browse the repositories of GitHub, Codeberg and other forges without cloning."
@@ -3596,8 +3599,12 @@ DIR is what `remoto--listing-dir' returns."
 
 (defun remoto--add-listing-page (listing entries next)
   "Add ENTRIES, one page, to LISTING, up to `remoto-listing-cap'.
-NEXT is the continuation of the page after, nil after the last."
-  (let ((all (append (remoto--listing-entries listing) entries)))
+NEXT is the continuation of the page after, nil after the last.  A name
+already there, such as the line that `remoto-dired-up-directory' adds,
+gives way to the page's own."
+  (let ((all (append (seq-remove (lambda (entry) (assoc-string (car entry) entries t))
+                                 (remoto--listing-entries listing))
+                     entries)))
     (setf (remoto--listing-entries listing) (seq-take all remoto-listing-cap)
           (remoto--listing-state listing)
           (cond ((< remoto-listing-cap (length all)) 'capped)
@@ -3651,6 +3658,97 @@ after %d; M-x remoto-refresh retries" owner count))
                                 (car dired-directory)
                               dired-directory)))
         (revert-buffer)))))
+
+;;;; Going up a level
+
+;; A tree root is its own `file-name-directory', which completion right after
+;; @REF: needs, so Dired's commands stay there.  `remoto-mode-map' remaps them
+;; to the commands below.
+
+(defun remoto--listing-line (line)
+  "Return LINE, a bare /PREFIX:OWNER/REPO, as the cached listing above spells it.
+Letter case does not count, as on the forges.  A listing that lacks the
+line, its page still loading or past the cap, gets the entry remoto
+remembered of it; without one, return nil, as asking would cost a request."
+  (when-let* ((dir (remoto--handle-file-name-directory line))
+              (listing (gethash dir remoto--listing-cache))
+              (name (remoto--handle-file-name-nondirectory line)))
+    (if-let* ((listed (assoc-string name (remoto--listing-entries listing) t)))
+        (concat dir (car listed))
+      (when-let* ((entry (remoto--entry-for line)))
+        (setf (remoto--listing-entries listing)
+              (append (remoto--listing-entries listing) (list (cons name entry))))
+        line))))
+
+(defun remoto--dired-up-to-owner (parsed other-window)
+  "Open the owner listing above PARSED, a tree root or refs, on its repository.
+OTHER-WINDOW shows the listing in another window."
+  (let* ((line (remoto--repo-id (remoto-path-forge parsed)
+                                (remoto-path-owner parsed) (remoto-path-repo parsed)))
+         (up (remoto--handle-file-name-directory line)))
+    (if other-window
+        (dired-other-window up)
+      (dired--find-possibly-alternative-file up))
+    (unless (dired-goto-file line)
+      (when-let* ((listed (remoto--listing-line line)))
+        (unless (dired-goto-file listed)
+          (revert-buffer)
+          (dired-goto-file listed))))))
+
+(defun remoto--root-lists-p (parsed)
+  "Return non-nil when the root listing has a line for the owner of PARSED.
+It holds the token's account and its organizations.  Asking costs no
+request: any listing with a token knows the account, and the listing of
+an account other than the token's reads the root listing."
+  (let ((owner (remoto-path-owner parsed))
+        (user (remoto--login-user (remoto--forge-login (remoto-path-forge parsed))))
+        (root (gethash (remoto--path-prefix parsed) remoto--listing-cache)))
+    (or (and user (string-equal-ignore-case owner user))
+        (and root (assoc-string owner (remoto--listing-entries root) t)))))
+
+(defun remoto--dired-up (other-window)
+  "Go up from this remoto Dired where Dired's commands cannot; non-nil if so.
+A tree root and a Dired of refs go to the owner listing, on the
+repository; an account the root listing lacks opens a file prompt at the
+root.  OTHER-WINDOW shows the result in another window."
+  (when-let* (((eq major-mode 'dired-mode))
+              (dir (dired-current-directory))
+              (parsed (remoto--parse dir))
+              ((string-empty-p (remoto-path-query parsed))))
+    (pcase (remoto-path-level parsed)
+      ((or 'refs (and 'tree (guard (and (not (remoto-path-short parsed))
+                                        (equal (remoto-path-path parsed) "/")))))
+       (remoto--dired-up-to-owner parsed other-window)
+       t)
+      ((and 'owner
+            (guard (equal (file-name-directory (directory-file-name dir))
+                          (remoto--path-prefix parsed)))
+            (guard (not (remoto--root-lists-p parsed))))
+       (remoto--find-file-in (remoto--path-prefix parsed) other-window)
+       t))))
+
+(defun remoto-dired-up-directory (&optional other-window)
+  "Run Dired on the level above, as `dired-up-directory' does.
+Above a tree root or a Dired of refs is the owner listing, on the
+repository; above an account the root listing lacks, a file prompt at
+the root.  OTHER-WINDOW, the prefix argument, uses another window."
+  (interactive "P" dired-mode)
+  (unless (remoto--dired-up other-window)
+    (dired-up-directory other-window)))
+
+(defun remoto-dired-jump (&optional other-window file-name)
+  "Run `dired-jump', going up in Dired as `remoto-dired-up-directory' does.
+OTHER-WINDOW and FILE-NAME are as in `dired-jump'."
+  (interactive (list nil (and current-prefix-arg
+                              (read-file-name "Jump to Dired file: "))))
+  (unless (and (null file-name) (remoto--dired-up other-window))
+    (dired-jump other-window file-name)))
+
+(defun remoto-dired-jump-other-window (&optional file-name)
+  "Like `remoto-dired-jump', but in another window; FILE-NAME as there."
+  (interactive (list (and current-prefix-arg
+                          (read-file-name "Jump to Dired file: "))))
+  (remoto-dired-jump t file-name))
 
 ;;;; Matches of a name that names nothing
 
@@ -4133,10 +4231,16 @@ Bind it as a unit under a prefix of your choice, e.g.:
     (keymap-set remoto-mode-map \"C-c g\" remoto-command-map))")
 (defalias 'remoto-command-map remoto-command-map)
 
-(defvar remoto-mode-map (make-sparse-keymap)
+(defvar remoto-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [remap dired-up-directory] #'remoto-dired-up-directory)
+    (define-key map [remap dired-jump] #'remoto-dired-jump)
+    (define-key map [remap dired-jump-other-window] #'remoto-dired-jump-other-window)
+    map)
   "Keymap for `remoto-mode'.
-Empty by default.  Populate it in your configuration, commonly by
-binding the variable `remoto-command-map' to a prefix key.")
+It binds no key: it remaps the Dired commands that go up a level to
+remoto's, which know the levels above a repository.  Bind the variable
+`remoto-command-map' to a prefix key in it for the URL commands.")
 
 ;;;###autoload
 (define-minor-mode remoto-mode
@@ -4148,9 +4252,10 @@ file buffers and in Dired, and adapt to the forge behind the path:
 GitHub, Codeberg, or a server of `remoto-forgejo-instances'.
 
 While `global-remoto-mode' is on, `remoto-mode' is enabled automatically
-when visiting a remoto path.  Its keymap is empty by default; the
-commands are grouped in the variable `remoto-command-map', which you can
-bind to a prefix of your choosing."
+when visiting a remoto path.  Its keymap binds no key: it remaps the
+Dired commands that go up a level, so that they climb above a
+repository.  The URL commands are grouped in the variable
+`remoto-command-map', which you can bind to a prefix of your choosing."
   :lighter " Remoto"
   :keymap remoto-mode-map)
 
@@ -4688,12 +4793,15 @@ where its branches and tags complete.  PICK asks for the remote."
       (remoto--unparse (remoto--path-at (remoto-path-forge root) 'refs
                                         (remoto-path-owner root) (remoto-path-repo root))))))
 
-(defun remoto--find-file-in (directory)
-  "Call the command on \\[find-file] with DIRECTORY as `default-directory'."
+(defun remoto--find-file-in (directory &optional other-window)
+  "Call the command on \\[find-file] with DIRECTORY as `default-directory'.
+OTHER-WINDOW calls the one on \\[find-file-other-window] instead."
   (let ((default-directory directory)
-        (command (key-binding (kbd "C-x C-f"))))
+        (command (key-binding (kbd (if other-window "C-x 4 f" "C-x C-f")))))
     (remoto--ensure-global-mode)
-    (call-interactively (if (commandp command) command #'find-file))))
+    (call-interactively (cond ((commandp command) command)
+                              (other-window #'find-file-other-window)
+                              (t #'find-file)))))
 
 ;;;###autoload
 (defun remoto-project-find-file (&optional pick)
