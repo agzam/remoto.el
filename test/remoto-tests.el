@@ -993,6 +993,25 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
 
 ;;; Dired listing format
 
+(describe "remoto--shown-name"
+  (it "answers a name with no display of its own as it is"
+    (let ((name "kitty-theme.sh"))
+      (expect (remoto--shown-name name) :to-be name)))
+
+  (it "drops a run displayed as nothing, and shows a label for the run it displays"
+    (expect (remoto--shown-name (concat (propertize "agzam/0a1b/" 'display "") "kitty.sh"))
+            :to-equal "kitty.sh")
+    (expect (remoto--shown-name (concat "tpope/" (propertize "0a1b/" 'display "") "vimrc"))
+            :to-equal "tpope/vimrc")
+    (expect (remoto--shown-name (propertize "0a1b" 'display "a.sh, b.md"))
+            :to-equal "a.sh, b.md"))
+
+  (it "shows a label once for its whole run, as redisplay does"
+    (let ((label "a.sh, b.md"))
+      (expect (remoto--shown-name (concat (propertize "0a" 'display label 'face 'bold)
+                                          (propertize "1b" 'display label)))
+              :to-equal "a.sh, b.md"))))
+
 (describe "remoto--format-dired-entry"
   (it "formats a file entry"
     (let ((line (remoto--format-dired-entry
@@ -1086,7 +1105,25 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
       (expect (remoto--format-dired-entry "a" (cdr (car entries)) nil widths)
               :to-match (concat " a" (make-string 43 ?\s) "N1\n"))
       (expect (remoto--format-dired-entry long (cdr (cadr entries)) nil widths)
-              :to-match (concat " " long "    N2\n")))))
+              :to-match (concat " " long "    N2\n"))))
+
+  (it "keeps the display of a name, and lines the notes up by what the names show"
+    (let* ((one (concat (propertize "agzam/0a1b/" 'display "") "kitty.sh"))
+           (many (propertize "2c3d" 'display "a.sh, b.md, c.el"))
+           (entries `((,one (type . "blob") (note . "N1"))
+                      (,many (type . "tree") (note . "N2"))))
+           (widths (remoto--listing-widths entries nil))
+           (line (remoto--format-dired-entry one (cdr (car entries)) nil widths))
+           (beg (text-property-any 0 (length line) 'dired-filename t line))
+           (end (next-single-property-change beg 'dired-filename line)))
+      (expect (cdr widths) :to-equal 16)
+      (expect (substring-no-properties line beg end) :to-equal "agzam/0a1b/kitty.sh")
+      (expect (get-text-property beg 'display line) :to-equal "")
+      (expect (remoto--shown-name (substring line beg))
+              :to-equal "kitty.sh            N1\n")
+      (expect (remoto--shown-name
+               (remoto--format-dired-entry many (cdr (cadr entries)) nil widths))
+              :to-match " a\\.sh, b\\.md, c\\.el    N2\n\\'"))))
 
 (describe "remoto--ls-switch-p"
   (it "finds a short option in a group of them, or its long form"
@@ -1201,7 +1238,32 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
                        ("-alSr" "src" "#notes" "-flag" "big" ".." ".")
                        ("-alt" "." ".." "#notes" "-flag" "big" "src")))
         (expect (cons switches (mapcar #'car (remoto--sort-entries entries switches)))
-                :to-equal (cons switches names))))))
+                :to-equal (cons switches names)))))
+
+  (it "sorts by the names the lines show, not by the text they hide"
+    ;; By the whole names the order would be aa/, mm, zz/.
+    (let ((entries `((,(concat (propertize "zz/" 'display "") "b.el")
+                      (type . "blob") (size . 1))
+                     (,(concat (propertize "aa/" 'display "") "c.txt")
+                      (type . "blob") (size . 1))
+                     (,(propertize "mm" 'display "a.sh, d.md")
+                      (type . "tree") (size . 1)))))
+      (pcase-dolist (`(,switches . ,names)
+                     '(("-al" "a.sh, d.md" "b.el" "c.txt")
+                       ("-alr" "c.txt" "b.el" "a.sh, d.md")
+                       ("-alS" "a.sh, d.md" "b.el" "c.txt")
+                       ("-alX" "b.el" "a.sh, d.md" "c.txt")
+                       ("-al --sort=width" "b.el" "c.txt" "a.sh, d.md")))
+        (expect (cons switches (mapcar #'remoto--entry-shown
+                                       (remoto--sort-entries entries switches)))
+                :to-equal (cons switches names)))
+      (require 'ls-lisp)
+      (let ((ls-lisp-use-insert-directory-program nil)
+            (ls-lisp-dirs-first nil)
+            (ls-lisp-ignore-case nil)
+            (ls-lisp-use-string-collate nil))
+        (expect (mapcar #'remoto--entry-shown (remoto--sort-entries entries "-al"))
+                :to-equal '("a.sh, d.md" "b.el" "c.txt"))))))
 
 (describe "remoto--name-lessp-function"
   (it "orders names by bytes in the C locale, or without a locale"
@@ -1307,7 +1369,16 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
       (expect (mapcar #'car (remoto--shown-entries entries "-l --hide=*.o"))
               :to-equal '("a.c" "a.c~" "README"))
       (expect (mapcar #'car (remoto--shown-entries entries "-la --hide=*.o"))
-              :to-equal (mapcar #'car entries)))))
+              :to-equal (mapcar #'car entries))))
+
+  (it "judges a name by what its line shows"
+    (let ((entries (list (list (concat (propertize "0a1b/" 'display "") ".vimrc"))
+                         (list (concat (propertize ".2c3d/" 'display "") "init.el"))
+                         (list (concat (propertize "4e5f/" 'display "") "notes~")))))
+      (expect (mapcar #'remoto--entry-shown (remoto--shown-entries entries "-l"))
+              :to-equal '("init.el" "notes~"))
+      (expect (mapcar #'remoto--entry-shown (remoto--shown-entries entries "-alB -I *.el"))
+              :to-equal '(".vimrc")))))
 
 (describe "remoto--human-size"
   (it "prints a size as gls -h does"
@@ -6025,6 +6096,31 @@ Buffers BODY creates are killed afterwards."
   (if (string-prefix-p "users/big/repos" endpoint)
       (remoto-test--repo-items 100 "a")
     (remoto-test--listing-api forge endpoint)))
+
+(describe "a listing whose names display other text"
+  (it "orders, reads and marks each line by its whole name, under hide-details too"
+    (remoto-test-with-listings
+      (puthash "/github:me/"
+               (remoto--listing-create
+                :entries `((,(concat (propertize "0a1b/" 'display "") "kitty.sh")
+                            (type . "blob") (size . 10) (note . "Kitty"))
+                           (,(propertize "2c3d" 'display "a.sh, b.md")
+                            (type . "tree") (size . 20) (note . "Two"))))
+               remoto--listing-cache)
+      (with-current-buffer (dired-noselect "/github:me/")
+        (dired-hide-details-mode 1)
+        (goto-char (point-min))
+        (search-forward "2c3d")
+        (dired-move-to-filename)
+        (expect (dired-get-filename 'verbatim t) :to-equal "2c3d")
+        (expect (get-text-property (point) 'display) :to-equal "a.sh, b.md")
+        (expect (get-text-property (point) 'invisible) :to-be nil)
+        (dired-mark 1)
+        (dired-move-to-filename)
+        (expect (dired-get-filename 'verbatim t) :to-equal "0a1b/kitty.sh")
+        (expect (get-text-property (point) 'display) :to-equal "")
+        (dired-mark 1)
+        (expect (dired-get-marked-files t) :to-equal '("2c3d" "0a1b/kitty.sh"))))))
 
 (describe "Dired listing of /github:"
   (it "lists the account of the token and its organizations"

@@ -2469,11 +2469,31 @@ A forge's description may span lines; a Dired line or an annotation cannot."
       (mapconcat #'identity (split-string text "[\n\r\f\v]+" t "[ \t]+") " ")
     text))
 
+(defun remoto--shown-name (name)
+  "Return the text of NAME on its Dired line.
+A run of NAME whose `display' property is a string shows that string, so
+a source hides part of a name with \"\" or shows a label in its place."
+  (if (not (text-property-not-all 0 (length name) 'display nil name))
+      name
+    (named-let shown ((pos 0) (parts nil))
+      (if (= pos (length name))
+          (apply #'concat (reverse parts))
+        (let ((next (next-single-property-change pos 'display name (length name)))
+              (display (get-text-property pos 'display name)))
+          (shown next (cons (if (stringp display)
+                                display
+                              (substring-no-properties name pos next))
+                            parts)))))))
+
+(defun remoto--entry-shown (entry)
+  "Return the text of the name of ENTRY, (NAME . ATTRIBUTES), on its Dired line."
+  (remoto--shown-name (car entry)))
+
 (defun remoto--format-dired-entry (name plist &optional classify widths human)
   "Format a single Dired line for NAME with PLIST attributes.
 CLASSIFY appends the ls -F indicator; HUMAN, 1024 or 1000, sizes as -h or
---si do.  WIDTHS line up a listing's sizes and names; a note in PLIST
-starts 4 columns past the names, where Dired hides link targets."
+--si do.  WIDTHS line up sizes and shown names, see `remoto--shown-name';
+a note in PLIST starts 4 columns past them, where Dired hides link targets."
   (let* ((dir? (equal "tree" (alist-get 'type plist)))
          (indicator (remoto--ls-indicator plist classify))
          (note (and (alist-get 'note plist) (remoto--one-line (alist-get 'note plist))))
@@ -2486,11 +2506,13 @@ starts 4 columns past the names, where Dired hides link targets."
             " " (remoto--ls-time (alist-get 'time plist)) " "
             ;; Dired reads exactly the name by this property, whatever
             ;; the switches; a name with a note after it needs it as well.
+            ;; A label is a `display' of the name, not text after it: Dired
+            ;; hides what follows a name by 4 columns under hide-details.
             (propertize name 'dired-filename t)
             indicator
             (and note (not (string-empty-p note))
                  (concat (make-string (max 4 (- (+ 4 (or (cdr widths) 0))
-                                                (string-width name)
+                                                (string-width (remoto--shown-name name))
                                                 (length indicator)))
                                       ?\s)
                          note))
@@ -2507,7 +2529,7 @@ sizes.  The name column stops at 40, so one long name moves only its note."
                                              (number-to-string size)))))
                                entries))
         (min 40 (apply #'max 0 (mapcar (lambda (entry)
-                                         (+ (string-width (car entry))
+                                         (+ (string-width (remoto--entry-shown entry))
                                             (length (remoto--ls-indicator
                                                      (cdr entry) classify))))
                                        entries)))))
@@ -2646,7 +2668,8 @@ attributes made of theirs, and reads the options as its
                        (let* ((dot (remoto--dot-entry-p entry))
                               (time (if dot most-positive-fixnum
                                       (or (alist-get 'time (cdr entry)) 0))))
-                         (list (car entry) (equal "tree" (alist-get 'type (cdr entry)))
+                         (list (remoto--entry-shown entry)
+                               (equal "tree" (alist-get 'type (cdr entry)))
                                1 0 0 time time time
                                (if dot most-positive-fixnum
                                  (or (alist-get 'size (cdr entry)) 0))
@@ -2657,8 +2680,8 @@ attributes made of theirs, and reads the options as its
 (defun remoto--sort-entries (entries switches)
   "Return ENTRIES, each (NAME . ATTRIBUTES), in the order ls gives them.
 SWITCHES are the ls options, read as GNU ls reads them, or as ls-lisp
-does when it lists local directories.  remoto knows no size or time of
-the entries . and .., so they lead under -S and -t."
+does when it lists local directories.  Names count as their lines show
+them; remoto knows no size or time of . and .., so they lead under -S and -t."
   (let* ((options (remoto--ls-options switches))
          (sort (plist-get options :sort)))
     (cond
@@ -2668,6 +2691,8 @@ the entries . and .., so they lead under -S and -t."
       (let* ((name< (if (eq sort 'version)
                         #'remoto--version-lessp
                       (remoto--name-lessp-function)))
+             (entry< (lambda (a b)
+                       (funcall name< (remoto--entry-shown a) (remoto--entry-shown b))))
              (lessp
               (pcase sort
                 ((or 'size 'time)
@@ -2679,23 +2704,23 @@ the entries . and .., so they lead under -S and -t."
                      (let ((key-a (if (remoto--dot-entry-p a) 1.0e+INF (funcall key a)))
                            (key-b (if (remoto--dot-entry-p b) 1.0e+INF (funcall key b))))
                        (if (= key-a key-b)
-                           (funcall name< (car a) (car b))
+                           (funcall entry< a b)
                          (< key-b key-a))))))
                 ('width
                  (lambda (a b)
-                   (let ((width-a (string-width (car a)))
-                         (width-b (string-width (car b))))
+                   (let ((width-a (string-width (remoto--entry-shown a)))
+                         (width-b (string-width (remoto--entry-shown b))))
                      (if (= width-a width-b)
-                         (funcall name< (car a) (car b))
+                         (funcall entry< a b)
                        (< width-a width-b)))))
                 ('extension
                  (lambda (a b)
-                   (let ((ext-a (remoto--extension (car a)))
-                         (ext-b (remoto--extension (car b))))
+                   (let ((ext-a (remoto--extension (remoto--entry-shown a)))
+                         (ext-b (remoto--extension (remoto--entry-shown b))))
                      (cond ((funcall name< ext-a ext-b) t)
                            ((funcall name< ext-b ext-a) nil)
-                           (t (funcall name< (car a) (car b)))))))
-                (_ (lambda (a b) (funcall name< (car a) (car b))))))
+                           (t (funcall entry< a b))))))
+                (_ entry<)))
              (sorted (sort (copy-sequence entries) lessp))
              (ordered (if (plist-get options :reverse) (reverse sorted) sorted)))
         (if (plist-get options :group)
@@ -2714,7 +2739,7 @@ A dot that starts NAME matches only a dot that starts PATTERN, as ls has it."
        (or (not (string-prefix-p "." name)) (string-prefix-p "." pattern))))
 
 (defun remoto--shown-entries (entries switches)
-  "Return the ENTRIES of a listing that ls would list.
+  "Return the ENTRIES of a listing that ls would list, by their shown names.
 SWITCHES are the ls options: dot names need -a, or -A, which leaves
 out only . and ..; -B leaves out backups, -I and --hide what their
 patterns match.  ls-lisp reads only -a, -A and -B."
@@ -2724,8 +2749,9 @@ patterns match.  ls-lisp reads only -a, -A and -B."
                       (or (if (memq ?A chars)
                               (remoto--dot-entry-p entry)
                             (and (not (memq ?a chars))
-                                 (string-prefix-p "." (car entry))))
-                          (and (memq ?B chars) (string-suffix-p "~" (car entry)))))
+                                 (string-prefix-p "." (remoto--entry-shown entry))))
+                          (and (memq ?B chars)
+                               (string-suffix-p "~" (remoto--entry-shown entry)))))
                     entries))
     (let* ((options (remoto--ls-options switches))
            (show (plist-get options :show))
@@ -2733,13 +2759,14 @@ patterns match.  ls-lisp reads only -a, -A and -B."
                              (and (plist-get options :backups) '("*~" ".*~"))
                              (and (not show) (plist-get options :hide)))))
       (seq-remove (lambda (entry)
-                    (or (pcase show
-                          ('all nil)
-                          ('almost (remoto--dot-entry-p entry))
-                          (_ (string-prefix-p "." (car entry))))
-                        (seq-some (lambda (pattern)
-                                    (remoto--ls-pattern-p pattern (car entry)))
-                                  patterns)))
+                    (let ((name (remoto--entry-shown entry)))
+                      (or (pcase show
+                            ('all nil)
+                            ('almost (remoto--dot-entry-p entry))
+                            (_ (string-prefix-p "." name)))
+                          (seq-some (lambda (pattern)
+                                      (remoto--ls-pattern-p pattern name))
+                                    patterns))))
                   entries))))
 
 (defun remoto--insert-listing (dir switches)
