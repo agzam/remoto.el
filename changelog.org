@@ -16,6 +16,7 @@ Changes to the project, following Keep a Changelog conventions.
 - ~remoto-browse~ opens more GitHub input: ~/gh:~ and canonical paths, owner and root URLs, ~github.com/OWNER/REPO~
 
 ** Changed
+- ~M-x remoto-login~ asks GitHub for the ~gist~ scope too, which secret gists need
 - copy and browse commands refuse a URL kind a forge lacks with one message: "Remoto: TITLE has no KIND URL"
 - TRAMP leaves remoto prefixes alone while ~global-remoto-mode~ is on
 - for source authors: the forge contract is 18 methods, described in SPEC.md

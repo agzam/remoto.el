@@ -3255,7 +3255,7 @@ using unauthenticated access until M-x remoto-reset-auth")
       (spy-on 'remoto--store-token :and-return-value "/tmp/a.gpg")
       (expect (remoto-login remoto--github) :to-equal "alice")
       (expect 'browse-url :to-have-been-called-with
-              "https://github.com/settings/tokens/new?scopes=repo,read:org&description=remoto")
+              "https://github.com/settings/tokens/new?scopes=repo,read:org,gist&description=remoto")
       (expect 'read-passwd :to-have-been-called-with "GitHub token: ")
       (expect (plist-get (cddr (spy-calls-args-for 'ghub-get 0)) :auth) :to-equal "ghp_new")
       (expect 'remoto--store-token :to-have-been-called-with remoto--github "alice" "ghp_new")
@@ -3319,10 +3319,10 @@ using unauthenticated access until M-x remoto-reset-auth")
       (expect (remoto-login remoto--github) :to-equal "alice")
       (expect 'message :to-have-been-called-with
               "Remoto: make a %s token at %s" "GitHub"
-              "https://github.com/settings/tokens/new?scopes=repo,read:org&description=remoto")
+              "https://github.com/settings/tokens/new?scopes=repo,read:org,gist&description=remoto")
       (expect 'read-passwd :to-have-been-called-with
               (concat "GitHub token, from https://github.com/settings/tokens/new"
-                      "?scopes=repo,read:org&description=remoto: "))))
+                      "?scopes=repo,read:org,gist&description=remoto: "))))
 
   (it "says that the forge gave no answer when the check of the token got none"
     (let ((remoto--logins (remoto-test--logins)))
@@ -12792,6 +12792,13 @@ Buffers BODY creates are killed afterwards."
       (with-temp-buffer
         (insert-file-contents "/gist:me/0a1b:/kitty.sh"))
       (expect (remoto-test--api-calls "") :to-equal '("gists/0a1b")))))
+
+(describe "the token page that remoto-login opens"
+  (it "ticks the gist scope, which secret gists need, for GitHub and its gists alike"
+    (dolist (forge (list remoto--github remoto--gist))
+      (expect (remoto--token-url forge)
+              :to-equal (concat "https://github.com/settings/tokens/new"
+                                "?scopes=repo,read:org,gist&description=remoto")))))
 
 (provide 'remoto-tests)
 

@@ -1150,7 +1150,7 @@ then shows the forges and the warnings."
   "The question a command meets when GitHub refuses the token.")
 
 (defconst remoto-keys--token-page
-  "\\`https://github\\.com/settings/tokens/new\\?scopes=repo,read:org&description=remoto\\'"
+  "\\`https://github\\.com/settings/tokens/new\\?scopes=repo,read:org,gist&description=remoto\\'"
   "GitHub's page for a new classic token, its scopes ticked.")
 
 (defun remoto-keys--open (profile name)
@@ -1312,7 +1312,7 @@ The ones that spend GitHub's requests without a token run only by name."
                                             (lambda (&rest _) (error "No usable browser found"))))
        (case "M-x remoto-login" ,(kbd "M-x") "remoto-login" ,(kbd "RET") ,(kbd "RET"))
        (check "the prompt names the token page" (remoto-keys-prompt)
-              "\\`GitHub token, from https://github\\.com/settings/tokens/new\\?scopes=repo,read:org&description=remoto: \\'")
+              "\\`GitHub token, from https://github\\.com/settings/tokens/new\\?scopes=repo,read:org,gist&description=remoto: \\'")
        (step "paste the token" token ,(kbd "RET"))
        ,(remoto-keys--logged-in "GitHub")
        ,stored)

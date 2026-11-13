@@ -1220,8 +1220,8 @@ on the next request" (or host "every host")))
 (cl-defgeneric remoto--token-url (_forge)
   "Return the address of the page for a new token of FORGE, filled in.
 GitHub's classic page, with its scopes ticked: a fine-grained token lists
-no organizations."
-  "https://github.com/settings/tokens/new?scopes=repo,read:org&description=remoto")
+no organizations, and secret gists need `gist'."
+  "https://github.com/settings/tokens/new?scopes=repo,read:org,gist&description=remoto")
 
 (cl-defgeneric remoto--token-prompt (forge)
   "Return the prompt for a token of FORGE."
