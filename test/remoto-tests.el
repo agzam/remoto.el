@@ -3767,7 +3767,7 @@ using unauthenticated access until M-x remoto-reset-auth")
 
   (it "names the prefixes of the built-in forges in the spelling of the cookies"
     (expect remoto--handler-regexp
-            :to-equal "\\`/\\(?:github\\|gh\\|codeberg\\|cb\\):"))
+            :to-equal "\\`/\\(?:github\\|gh\\|codeberg\\|cb\\|gist\\):"))
 
   (it "kills the buffers of a forge it unregisters, under any of its prefixes"
     (let ((remoto--forges (copy-alist remoto--forges))
@@ -11592,8 +11592,8 @@ every source older than an existing output file, so it must not exist."
                                             (and (eq (car-safe f) 'add-to-list)
                                                  (equal (nth 1 f) ''file-name-handler-alist)))
                                           forms))))
-        ;; One cookie per forge file, GitHub's and Forgejo's.
-        (expect (length entries) :to-equal 2)
+        ;; One cookie per forge file: GitHub's, Forgejo's and the gists'.
+        (expect (length entries) :to-equal 3)
         (dolist (entry entries)
           (expect (cdr entry) :to-be 'remoto-autoload-file-name-handler))
         (dolist (prefix (mapcar #'car remoto--forges))
@@ -11859,7 +11859,7 @@ with what the same call does once the mode is on."
           (dir (file-name-as-directory (make-temp-file "remoto-upgrade" t))))
       (unwind-protect
           (progn
-            (dolist (file '("remoto.el" "remoto-github.el" "remoto-forgejo.el"))
+            (dolist (file '("remoto.el" "remoto-github.el" "remoto-forgejo.el" "remoto-gist.el"))
               (copy-file (expand-file-name file source) dir))
             (let ((result (remoto-test--fresh-session
                            nil
@@ -11869,10 +11869,14 @@ with what the same call does once the mode is on."
                               (load ,(expand-file-name "remoto.el" dir) nil t)
                               (list :github (symbol-file 'remoto--fetch-branches)
                                     :forgejo (symbol-file 'remoto-forgejo-register)
-                                    :codeberg (and (assoc "codeberg" remoto--forges) t))))))
+                                    :gist (symbol-file 'remoto-gist--get)
+                                    :codeberg (and (assoc "codeberg" remoto--forges) t)
+                                    :gists (and (assoc "gist" remoto--forges) t))))))
               (expect (file-name-directory (or (plist-get result :github) "")) :to-equal dir)
               (expect (file-name-directory (or (plist-get result :forgejo) "")) :to-equal dir)
-              (expect (plist-get result :codeberg) :to-be t)))
+              (expect (file-name-directory (or (plist-get result :gist) "")) :to-equal dir)
+              (expect (plist-get result :codeberg) :to-be t)
+              (expect (plist-get result :gists) :to-be t)))
         (delete-directory dir t))))
 
   (it "loads the core beside remoto-forgejo.el and makes the forges anew when an upgrade reloads it"
@@ -11884,27 +11888,33 @@ with what the same call does once the mode is on."
       (unwind-protect
           (progn
             (dolist (dir (list old new))
-              (dolist (file '("remoto.el" "remoto-github.el" "remoto-forgejo.el"))
+              (dolist (file '("remoto.el" "remoto-github.el" "remoto-forgejo.el" "remoto-gist.el"))
                 (copy-file (expand-file-name file source) dir)))
             (let ((result (remoto-test--fresh-session
                            nil
                            `(progn
                               (load ,(expand-file-name "remoto.el" old) nil t)
                               (let ((github remoto--github)
-                                    (codeberg remoto--codeberg))
+                                    (codeberg remoto--codeberg)
+                                    (gist remoto--gist))
                                 (load ,(expand-file-name "remoto-github.el" new) nil t)
                                 (load ,(expand-file-name "remoto-forgejo.el" new) nil t)
+                                (load ,(expand-file-name "remoto-gist.el" new) nil t)
                                 (list :core (symbol-file 'remoto-register-forge)
                                       :github (eq github remoto--github)
                                       :codeberg (eq codeberg remoto--codeberg)
+                                      :gist (eq gist remoto--gist)
                                       :registry (list (eq remoto--github
                                                           (cdr (assoc "gh" remoto--forges)))
                                                       (eq remoto--codeberg
-                                                          (cdr (assoc "cb" remoto--forges))))))))))
+                                                          (cdr (assoc "cb" remoto--forges)))
+                                                      (eq remoto--gist
+                                                          (cdr (assoc "gist" remoto--forges))))))))))
               (expect (file-name-directory (or (plist-get result :core) "")) :to-equal new)
               (expect (plist-get result :github) :to-be nil)
               (expect (plist-get result :codeberg) :to-be nil)
-              (expect (plist-get result :registry) :to-equal '(t t))))
+              (expect (plist-get result :gist) :to-be nil)
+              (expect (plist-get result :registry) :to-equal '(t t t))))
         (delete-directory old t)
         (delete-directory new t)))))
 
@@ -12437,6 +12447,134 @@ The fixtures come from test/record-codeberg-fixtures.el.")
 
 (describe "the Codeberg forge, against the level table"
   (remoto-test--conformance remoto-test--codeberg-kit))
+
+(defun remoto-test--gist (id owner description public &rest names)
+  "Return the gist ID of OWNER as a list endpoint answers it, with the files NAMES."
+  `((id . ,id) (owner (login . ,owner)) (description . ,description) (public . ,public)
+    (updated_at . "2026-01-02T03:04:05Z")
+    (files ,@(mapcar (lambda (name) `(,(intern name) (filename . ,name) (size . 10)))
+                     names))))
+
+(defun remoto-test--gist-texts (item root group)
+  "Return the label and the annotation of the gist ITEM in completion.
+ROOT and GROUP are those of `remoto-gist--entry'."
+  (let-alist (cdr (remoto-gist--entry item root group))
+    (list .gist-label .gist-annotation)))
+
+(defun remoto-test--cache-gists ()
+  "Cache the listings of /gist: and /gist:me/, as their pages make them.
+The root lists two gists of me and a starred one, /gist:me/ lists two."
+  (let ((root (remoto--path-at remoto--gist 'root))
+        (owner (remoto--path-at remoto--gist 'owner "me"))
+        (kitty (remoto-test--gist "0a1b" "me" "Kitty themes" t "kitty.sh"))
+        (bare (remoto-test--gist "0c2d" "me" nil t "vimium.json"))
+        (helpers (remoto-test--gist "0c5d" "me" "Helpers" t "a.sh" "b.md"))
+        (starred (remoto-test--gist "0e6f" "nikku" "Gif utility" t "capture.md")))
+    (puthash "/gist:"
+             (remoto--listing-create
+              :entries (append (car (remoto-gist--page remoto--gist root "gists" 1
+                                                       (list kitty bare)))
+                               (car (remoto-gist--page remoto--gist root "gists/starred" 1
+                                                       (list starred)))))
+             remoto--listing-cache)
+    (puthash "/gist:me/"
+             (remoto--listing-create
+              :entries (car (remoto-gist--page remoto--gist owner "users/me/gists" 1
+                                               (list kitty helpers))))
+             remoto--listing-cache)))
+
+(defmacro remoto-test-with-gists (&rest body)
+  "Run BODY as the token of me, with the listings of /gist: and /gist:me/ cached."
+  (declare (indent 0))
+  `(let ((remoto--listing-cache (make-hash-table :test 'equal))
+         (remoto--entry-cache (make-hash-table :test 'equal))
+         (remoto--logins (remoto-test--logins :user "me")))
+     (remoto-test--cache-gists)
+     ,@body))
+
+(describe "gist candidates"
+  (it "lead with the description, and the name of the Dired line follows"
+    (expect (remoto-test--gist-texts
+             (remoto-test--gist "0a1b" "me" "Kitty themes" t "kitty.sh") nil nil)
+            :to-equal '("Kitty themes" "kitty.sh"))
+    (expect (remoto-test--gist-texts
+             (remoto-test--gist "0c5d" "me" "Helpers" t "a.sh" "b.md") nil nil)
+            :to-equal '("Helpers" "a.sh, b.md"))
+    (expect (remoto-test--gist-texts
+             (remoto-test--gist "0e3f" "me" " Talk\r\n notes " nil "talk.md") nil nil)
+            :to-equal '("Talk notes" "secret  talk.md")))
+
+  (it "lead with the name of the Dired line when the gist has no description"
+    (expect (remoto-test--gist-texts
+             (remoto-test--gist "0c2d" "me" nil t "vimium.json") nil nil)
+            :to-equal '("vimium.json" ""))
+    (expect (remoto-test--gist-texts
+             (remoto-test--gist "0a4b" "me" "  " nil "x.txt" "y.txt") nil nil)
+            :to-equal '("x.txt, y.txt" "secret")))
+
+  (it "name the owner of a starred gist at the root, and not the token's own"
+    (expect (remoto-test--gist-texts
+             (remoto-test--gist "0e6f" "nikku" "Gif utility" t "capture.md") t "Starred")
+            :to-equal '("Gif utility" "nikku/capture.md"))
+    (expect (remoto-test--gist-texts
+             (remoto-test--gist "0a7b" "nikku" "" t "a.sh") t "Starred")
+            :to-equal '("nikku/a.sh" ""))
+    (expect (remoto-test--gist-texts
+             (remoto-test--gist "0a1b" "me" "Kitty themes" t "kitty.sh") t "Your gists")
+            :to-equal '("Kitty themes" "kitty.sh")))
+
+  (it "show their labels at the root, in their groups and in the order listed"
+    (remoto-test-with-gists
+      (let* ((candidates (remoto--handle-file-name-all-completions "" "/gist:"))
+             (meta (remoto--completion-metadata "/gist:"))
+             (triples (funcall (alist-get 'affixation-function meta) candidates)))
+        (expect (mapcar #'substring-no-properties candidates)
+                :to-equal '("me/0a1b/" "me/0c2d/" "nikku/0e6f/"))
+        (expect (mapcar (lambda (triple) (get-text-property 0 'display (car triple))) triples)
+                :to-equal '("Kitty themes" "vimium.json" "Gif utility"))
+        (expect (mapcar (lambda (triple) (substring-no-properties (car triple))) triples)
+                :to-equal '("me/0a1b/" "me/0c2d/" "nikku/0e6f/"))
+        (expect (mapcar (lambda (triple) (substring-no-properties (nth 2 triple))) triples)
+                :to-equal '(" kitty.sh" "" " nikku/capture.md"))
+        (expect (mapcar (lambda (triple)
+                          (funcall (alist-get 'group-function meta) (car triple) nil))
+                        triples)
+                :to-equal '("Your gists" "Your gists" "Starred"))
+        (expect (alist-get 'display-sort-function meta) :to-be #'identity)
+        (expect (alist-get 'cycle-sort-function meta) :to-be #'identity))))
+
+  (it "show their labels at an owner, in the order listed"
+    (remoto-test-with-gists
+      (let* ((candidates (remoto--handle-file-name-all-completions "" "/gist:me/"))
+             (meta (remoto--completion-metadata "/gist:me/"))
+             (triples (funcall (alist-get 'affixation-function meta) candidates)))
+        (expect (mapcar #'substring-no-properties candidates) :to-equal '("0a1b/" "0c5d/"))
+        (expect (get-text-property 0 'remoto-target (car candidates))
+                :to-equal "/gist:me/0a1b:/")
+        (expect (mapcar (lambda (triple) (get-text-property 0 'display (car triple))) triples)
+                :to-equal '("Kitty themes" "Helpers"))
+        (expect (mapcar (lambda (triple) (substring-no-properties (nth 2 triple))) triples)
+                :to-equal '(" kitty.sh" " a.sh, b.md"))
+        (expect (alist-get 'display-sort-function meta) :to-be #'identity))))
+
+  (it "match the regexps of a style by id, description or file name"
+    (remoto-test-with-gists
+      (let ((completion-ignore-case t))
+        (pcase-dolist (`(,regexp ,directory . ,names)
+                       '(("helpers" "/gist:me/" "0c5d/")
+                         ("kitty\\.sh" "/gist:me/" "0a1b/")
+                         ("0c5" "/gist:me/" "0c5d/")
+                         ("gif" "/gist:" "nikku/0e6f/")
+                         ("capture" "/gist:" "nikku/0e6f/")
+                         ("vimium" "/gist:" "me/0c2d/")))
+          (let ((completion-regexp-list (list regexp)))
+            (expect (mapcar #'substring-no-properties
+                            (remoto--handle-file-name-all-completions "" directory))
+                    :to-equal names))))))
+
+  (it "keep the order GitHub lists them in, as no repository of GitHub does"
+    (expect (remoto--keeps-order-p remoto--gist) :to-be t)
+    (expect (remoto--keeps-order-p remoto--github) :to-be nil)))
 
 (provide 'remoto-tests)
 

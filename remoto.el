@@ -2868,17 +2868,19 @@ line, as with ls-lisp.  /github: and /github:OWNER/ list accounts and repos."
       (when-let* ((parsed (remoto--parse-path filename))
                   (entry (remoto--tree-entry parsed)))
         (if full-directory-p
-            (progn
-              (insert "total 0\n")
-              (dolist (child (remoto--sort-entries
+            (let* ((children (remoto--sort-entries
                               (remoto--shown-entries
                                (append (list (cons "." remoto--dir-entry)
                                              (cons ".." remoto--dir-entry))
                                        (remoto--tree-children parsed))
                                switches)
                               switches))
+                   ;; A source may note its files, as a gist notes their language.
+                   (widths (remoto--listing-widths children classify human)))
+              (insert "total 0\n")
+              (dolist (child children)
                 (insert (remoto--format-dired-entry
-                         (car child) (cdr child) classify nil human))))
+                         (car child) (cdr child) classify widths human))))
           (insert "  " (remoto--format-dired-entry
                         (file-name-nondirectory
                          (directory-file-name (remoto-path-path parsed)))
@@ -5029,7 +5031,7 @@ TRAMP; `file-remote-p' of a canonical name is answered without loading."
               (name (car args))
               ((stringp name))
               ((null (nth 1 args)))
-              ((string-match-p "\\`/\\(?:github\\|codeberg\\):" name)))
+              ((string-match-p "\\`/\\(?:github\\|codeberg\\|gist\\):" name)))
         (and (memq (nth 2 args) '(nil never))
              (save-match-data
                (if (string-match
@@ -5396,5 +5398,7 @@ remoto was loaded some other way and the mode never turned on."
          (expand-file-name "remoto-github" (file-name-directory (macroexp-file-name))))
 (require 'remoto-forgejo
          (expand-file-name "remoto-forgejo" (file-name-directory (macroexp-file-name))))
+(require 'remoto-gist
+         (expand-file-name "remoto-gist" (file-name-directory (macroexp-file-name))))
 
 ;;; remoto.el ends here
