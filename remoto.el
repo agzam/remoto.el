@@ -4131,11 +4131,28 @@ every Dired command calls, so each buffer gets a canonical directory."
                args))
     (apply orig-fn dir-or-list args)))
 
+(cl-defgeneric remoto--root-file (_forge _owner _repo _ref)
+  "Return the file that a visit of the root of OWNER/REPO at REF on FORGE opens.
+Nil visits the root as a directory, in Dired.  A gist of one file answers
+that file; Dired still lists the root."
+  nil)
+
+(defun remoto--visited-name (name)
+  "Return the name that a visit of NAME opens: NAME, or the file of its root.
+The root of a tree opens at the file its forge answers, see
+`remoto--root-file'; any other NAME stays as it is."
+  (if-let* ((parsed (remoto--parse-path name))
+            ((equal "/" (remoto-path-path parsed)))
+            (file (remoto--root-file (remoto-path-forge parsed) (remoto-path-owner parsed)
+                                     (remoto-path-repo parsed) (remoto-path-ref parsed))))
+      (concat (remoto--tree-prefix parsed) "/" file)
+    name))
+
 (defun remoto--find-file-around-a (orig-fn filename &rest args)
   "Rewrite GitHub URLs to canonical remoto paths for `find-file'.
 Intercepts #NUM patterns to display issues instead of file operations.
 Call ORIG-FN with FILENAME and ARGS after any rewrite.  A name that names
-nothing opens a Dired of the names that match it."
+nothing opens a Dired of its matches; a root opens at its `remoto--root-file'."
   (setq filename (remoto--normalize-shorthand filename))
   ;; A pull request or issue web URL is the topic, not the repository root
   ;; its canonical name would be.
@@ -4151,7 +4168,7 @@ nothing opens a Dired of the names that match it."
       (let ((target (remoto--name-or-matches filename)))
         (if (consp target)
             (dired-noselect target)
-          (apply orig-fn target args))))))
+          (apply orig-fn (remoto--visited-name target) args))))))
 
 ;;;; Eager auth warm-up
 
@@ -5310,17 +5327,24 @@ Turn on `global-remoto-mode' when it is off: the buffers need it."
   (let ((remoto--may-ask t))
     (remoto--browse-input input)))
 
+(defun remoto--browse-open (name)
+  "Open NAME: a directory in Dired, a file in its buffer.
+A root opens at its `remoto--root-file', as `find-file' opens it."
+  (let* ((visited (remoto--visited-name name))
+         (parsed (remoto--parse-path visited)))
+    (if (and parsed (equal "tree" (alist-get 'type (remoto--tree-entry parsed))))
+        (dired visited)
+      (find-file visited))))
+
 (defun remoto--browse-tree (parsed)
   "Open the tree PARSED names, in Dired or as a file.
 A PARSED without a ref opens on the default ref."
-  (let* ((resolved (remoto--or-private
-                    (remoto-path-forge parsed) (remoto-path-owner parsed)
-                    (remoto-path-repo parsed)
-                    (lambda () (remoto--resolve-ref parsed))))
-         (canonical (remoto--canonical-path resolved)))
-    (if (equal "tree" (alist-get 'type (remoto--tree-entry resolved)))
-        (dired canonical)
-      (find-file canonical))))
+  (thread-last
+    (remoto--or-private (remoto-path-forge parsed) (remoto-path-owner parsed)
+                        (remoto-path-repo parsed)
+                        (lambda () (remoto--resolve-ref parsed)))
+    remoto--canonical-path
+    remoto--browse-open))
 
 (defun remoto--browse-topic (forge owner repo key)
   "Open the topic KEY of OWNER/REPO on FORGE."
@@ -5346,13 +5370,9 @@ A canonical path opens as it is; OWNER/REPO opens on its default ref."
      ((and (eq mode 'issues) (remoto--topic-key-p forge query))
       (remoto--browse-topic forge owner repo query))
      ((eq mode 'files)
-      (let* ((short (concat (remoto--repo-id forge owner repo) "/" query))
-             (path (remoto--or-private
-                    forge owner repo (lambda () (remoto--maybe-rewrite short))))
-             (parsed (remoto--parse-path path)))
-        (if (and parsed (equal "tree" (alist-get 'type (remoto--tree-entry parsed))))
-            (dired path)
-          (find-file path))))
+      (let ((short (concat (remoto--repo-id forge owner repo) "/" query)))
+        (remoto--browse-open
+         (remoto--or-private forge owner repo (lambda () (remoto--maybe-rewrite short))))))
      ((string-match remoto--shorthand-regexp name)
       (remoto--browse-tree
        (remoto-path-create :forge forge :owner (match-string 1 name)

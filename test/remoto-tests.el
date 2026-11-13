@@ -12461,15 +12461,20 @@ ROOT and GROUP are those of `remoto-gist--entry'."
   (let-alist (cdr (remoto-gist--entry item root group))
     (list .gist-label .gist-annotation)))
 
+(defun remoto-test--gists ()
+  "Return the gists of the specs: kitty, bare and helpers of me, starred of nikku.
+Helpers holds two files, the others one."
+  (list (remoto-test--gist "0a1b" "me" "Kitty themes" t "kitty.sh")
+        (remoto-test--gist "0c2d" "me" nil t "vimium.json")
+        (remoto-test--gist "0c5d" "me" "Helpers" t "a.sh" "b.md")
+        (remoto-test--gist "0e6f" "nikku" "Gif utility" t "capture.md")))
+
 (defun remoto-test--cache-gists ()
   "Cache the listings of /gist: and /gist:me/, as their pages make them.
 The root lists two gists of me and a starred one, /gist:me/ lists two."
-  (let ((root (remoto--path-at remoto--gist 'root))
-        (owner (remoto--path-at remoto--gist 'owner "me"))
-        (kitty (remoto-test--gist "0a1b" "me" "Kitty themes" t "kitty.sh"))
-        (bare (remoto-test--gist "0c2d" "me" nil t "vimium.json"))
-        (helpers (remoto-test--gist "0c5d" "me" "Helpers" t "a.sh" "b.md"))
-        (starred (remoto-test--gist "0e6f" "nikku" "Gif utility" t "capture.md")))
+  (pcase-let ((root (remoto--path-at remoto--gist 'root))
+              (owner (remoto--path-at remoto--gist 'owner "me"))
+              (`(,kitty ,bare ,helpers ,starred) (remoto-test--gists)))
     (puthash "/gist:"
              (remoto--listing-create
               :entries (append (car (remoto-gist--page remoto--gist root "gists" 1
@@ -12575,6 +12580,124 @@ The root lists two gists of me and a starred one, /gist:me/ lists two."
   (it "keep the order GitHub lists them in, as no repository of GitHub does"
     (expect (remoto--keeps-order-p remoto--gist) :to-be t)
     (expect (remoto--keeps-order-p remoto--github) :to-be nil)))
+
+(defun remoto-test--gist-api (_forge endpoint)
+  "Answer ENDPOINT, a gists/ID, as GitHub does: each file with its content.
+The gists are those of `remoto-test--gists', and a secret one of me that
+no listing holds, whose id has the shape of GitHub's."
+  (if-let* ((id (string-remove-prefix "gists/" endpoint))
+            (item (seq-find (lambda (item) (equal id (alist-get 'id item)))
+                            (cons (remoto-test--gist "0123456789abcdef0123" "me" "Unlisted"
+                                                     nil "notes.md")
+                                  (remoto-test--gists)))))
+      (cons `(files ,@(mapcar (lambda (file) (append file '((content . "echo hi\n"))))
+                              (alist-get 'files item)))
+            item)
+    (user-error "%s%s" remoto--not-found endpoint)))
+
+(defmacro remoto-test-with-gist-answers (&rest body)
+  "Run BODY as `remoto-test-with-gists' does, with gists/ID answered.
+Buffers BODY creates are killed afterwards."
+  (declare (indent 0))
+  (let ((before (make-symbol "before")))
+    `(remoto-test-with-cache
+       (remoto-test-with-gists
+         (let ((remoto-gist--gists (make-hash-table :test 'equal))
+               (dired-listing-switches "-al")
+               (,before (buffer-list)))
+           (spy-on 'remoto--api :and-call-fake #'remoto-test--gist-api)
+           (spy-on 'remoto--api-async)
+           (unwind-protect (progn ,@body)
+             (dolist (buffer (buffer-list))
+               (unless (memq buffer ,before) (kill-buffer buffer)))))))))
+
+(defun remoto-test--gist-direds ()
+  "Return the directories of the Dired buffers of a gist, its files listed."
+  (thread-last
+    (buffer-list)
+    (seq-keep (lambda (buffer)
+                (let ((dir (buffer-local-value 'dired-directory buffer)))
+                  (if (consp dir) (car dir) dir))))
+    (seq-filter (lambda (dir) (string-match-p "\\`/gist:[^/]+/[^/]+" dir)))))
+
+(describe "a gist of one file"
+  (it "opens at its file from its candidate at the root and at an owner"
+    (remoto-test-with-gist-answers
+      (expect (mapcar (lambda (candidate)
+                        (thread-last (substring-no-properties candidate)
+                                     (concat "/gist:")
+                                     find-file-noselect
+                                     buffer-file-name))
+                      (remoto--handle-file-name-all-completions "" "/gist:"))
+              :to-equal '("/gist:me/0a1b:/kitty.sh" "/gist:me/0c2d:/vimium.json"
+                          "/gist:nikku/0e6f:/capture.md"))
+      (with-current-buffer (thread-last (remoto--handle-file-name-all-completions "" "/gist:me/")
+                                        car
+                                        substring-no-properties
+                                        (concat "/gist:me/")
+                                        find-file-noselect)
+        (expect buffer-file-name :to-equal "/gist:me/0a1b:/kitty.sh")
+        (expect (buffer-string) :to-equal "echo hi\n"))
+      (expect (remoto-test--gist-direds) :to-be nil)
+      (expect (remoto-test--api-calls "")
+              :to-equal '("gists/0a1b" "gists/0c2d" "gists/0e6f"))))
+
+  (it "opens at its file from find-file of its names and of its URLs"
+    (remoto-test-with-gist-answers
+      (dolist (name '("/gist:me/0a1b" "/gist:me/0a1b/" "/gist:me/0a1b:/" "/gist:me/0a1b:"
+                      "https://gist.github.com/me/0a1b" "https://gist.github.com/0a1b.git"))
+        (expect (buffer-file-name (find-file-noselect name))
+                :to-equal "/gist:me/0a1b:/kitty.sh"))
+      (expect (buffer-file-name (find-file-noselect "gist.github.com/0123456789abcdef0123"))
+              :to-equal "/gist:me/0123456789abcdef0123:/notes.md")
+      (expect (remoto-test--gist-direds) :to-be nil)))
+
+  (it "opens at its file from remoto-browse and Embark's R"
+    (remoto-test-with-gist-answers
+      (dolist (input '("/gist:me/0a1b" "/gist:me/0a1b/" "/gist:me/0a1b:/"
+                       "https://gist.github.com/me/0a1b"))
+        (remoto-browse input)
+        (expect buffer-file-name :to-equal "/gist:me/0a1b:/kitty.sh"))
+      (remoto-embark-open-in-remoto "https://gist.github.com/me/0a1b")
+      (expect buffer-file-name :to-equal "/gist:me/0a1b:/kitty.sh")
+      (expect (remoto-test--gist-direds) :to-be nil)))
+
+  (it "names its file as the root file, as a gist of several files or a repository does not"
+    (remoto-test-with-gist-answers
+      (expect (remoto--root-file remoto--gist "me" "0a1b" nil) :to-equal "kitty.sh")
+      (expect (remoto--root-file remoto--gist "me" "0c5d" nil) :to-be nil)
+      (expect (remoto--root-file remoto--github "me" "zeta" "main") :to-be nil)
+      (expect (remoto--root-file remoto--codeberg "me" "zeta" "main") :to-be nil)))
+
+  (it "still shows its Dired to C-x d, C-x C-j and ^"
+    (remoto-test-with-gist-answers
+      (dolist (name '("/gist:me/0a1b" "/gist:me/0a1b/" "/gist:me/0a1b:/"))
+        (with-current-buffer (dired-noselect name)
+          (expect dired-directory :to-equal "/gist:me/0a1b:/")
+          (expect (remoto-test--dired-names) :to-equal '("." ".." "kitty.sh"))))
+      (with-current-buffer (switch-to-buffer (find-file-noselect "/gist:me/0a1b:/kitty.sh"))
+        (remoto-dired-jump)
+        (expect dired-directory :to-equal "/gist:me/0a1b:/")
+        (expect (dired-get-filename 'verbatim t) :to-equal "kitty.sh")
+        (remoto-dired-up-directory)
+        (expect dired-directory :to-equal "/gist:me/")
+        (expect (dired-get-filename 'verbatim t) :to-equal "0a1b/kitty.sh"))))
+
+  (it "leaves a gist of several files to its Dired"
+    (remoto-test-with-gist-answers
+      (expect (buffer-local-value 'dired-directory (find-file-noselect "/gist:me/0c5d/"))
+              :to-equal "/gist:me/0c5d:/")
+      (remoto-browse "https://gist.github.com/me/0c5d")
+      (expect dired-directory :to-equal "/gist:me/0c5d:/")
+      (expect (remoto-test--dired-names) :to-equal '("." ".." "a.sh" "b.md"))))
+
+  (it "leaves a repository of one file to its Dired"
+    (remoto-test-with-listings
+      (expect (buffer-local-value 'dired-directory (find-file-noselect "/github:me/zeta@main:/"))
+              :to-equal "/github:me/zeta@main:/")
+      (remoto-browse "/github:me/zeta@main:/")
+      (expect dired-directory :to-equal "/github:me/zeta@main:/")
+      (expect (remoto-test--dired-names) :to-equal '("." ".." "README.md")))))
 
 (provide 'remoto-tests)
 

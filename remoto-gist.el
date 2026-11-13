@@ -118,6 +118,12 @@ The language of a file is its note."
                      `((note . ,language))))
                table))))
 
+(cl-defmethod remoto--root-file ((forge remoto-gist) owner id _ref)
+  "The one file of the gist ID of OWNER on FORGE, nil for a gist of more.
+A gist of one file opens at it, as its line in a listing does."
+  (pcase (remoto-gist--files (remoto-gist--get forge owner id))
+    (`((,name . ,_)) name)))
+
 (cl-defmethod remoto-forge-content ((forge remoto-gist) owner id _ref path)
   "The bytes of the file PATH of the gist ID of OWNER on FORGE.
 The answer of a gist holds each file up to 1MB; a larger one comes
