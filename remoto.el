@@ -547,6 +547,15 @@ Returns nil if FILENAME does not match the canonical format."
               ((not (remoto-path-short parsed))))
     parsed))
 
+(defun remoto--canonical-tree (parsed)
+  "Return PARSED, a `remoto-path' in a tree, in its canonical form, or nil.
+A short form gets one when its forge has no refs: with no default ref to
+ask for, it names the file of its canonical form, at no request."
+  (when (and parsed (eq (remoto-path-level parsed) 'tree))
+    (cond ((not (remoto-path-short parsed)) parsed)
+          ((not (remoto--refs-p (remoto-path-forge parsed)))
+           (remoto--parse (remoto--canonical-path parsed))))))
+
 (defun remoto--path-prefix (parsed)
   "Return the canonical prefix of the forge of PARSED, such as /github:."
   (remoto--prefix (remoto-path-forge parsed)))
@@ -1677,9 +1686,10 @@ A bare account or repository name exists once a cached listing holds it."
       ;; recursive tree per ref, because completion asks this of every
       ;; candidate it offers at the @ level.
       ('tree
-       (cond ((remoto-path-short parsed) t)
-             ((string-empty-p (remoto--tree-lookup-key (remoto-path-path parsed))) t)
-             (t (and (remoto--tree-entry parsed) t)))))))
+       (if-let* ((tree (remoto--canonical-tree parsed)))
+           (or (string-empty-p (remoto--tree-lookup-key (remoto-path-path tree)))
+               (and (remoto--tree-entry tree) t))
+         t)))))
 
 (defun remoto--handle-access-file (filename string)
   "Return nil when FILENAME can be read, else signal `file-missing'.
@@ -1709,10 +1719,10 @@ Also returns t for partial paths like /github: and /github:OWNER/."
                  (and (remoto--entry-for filename) t)))
       ('topics nil)
       ('tree
-       (if (remoto-path-short parsed)
-           t
-         (when-let* ((entry (remoto--tree-entry parsed)))
-           (equal "tree" (alist-get 'type entry))))))))
+       (if-let* ((tree (remoto--canonical-tree parsed)))
+           (when-let* ((entry (remoto--tree-entry tree)))
+             (equal "tree" (alist-get 'type entry)))
+         t)))))
 
 (defun remoto--handle-file-accessible-directory-p (filename)
   "Return t if FILENAME is an accessible directory.
@@ -1721,7 +1731,7 @@ Delegates to `file-directory-p' - remote dirs are always readable."
 
 (defun remoto--handle-file-regular-p (filename)
   "Return t if FILENAME is a regular file in the remote repo."
-  (when-let* ((parsed (remoto--parse-path filename))
+  (when-let* ((parsed (remoto--canonical-tree (remoto--parse filename)))
               (entry (remoto--tree-entry parsed)))
     (equal "blob" (alist-get 'type entry))))
 
@@ -1752,7 +1762,7 @@ visits both in one buffer, so each canonical name gets its own number."
 (defun remoto--handle-file-attributes (filename &optional _id-format)
   "Return file attributes for FILENAME.
 Synthesized from tree cache - timestamps are epoch 0."
-  (when-let* ((parsed (remoto--parse-path filename))
+  (when-let* ((parsed (remoto--canonical-tree (remoto--parse filename)))
               (entry (remoto--tree-entry parsed)))
     (let* ((dir? (equal "tree" (alist-get 'type entry)))
            (size (or (alist-get 'size entry) 0))
@@ -2280,7 +2290,7 @@ VISIT, BEG, END, REPLACE as per `insert-file-contents'."
        (if from-find-file
            "remoto is loaded now, run the command again"
          "open it with `find-file'"))))
-  (let ((parsed (remoto--parse-path filename)))
+  (let ((parsed (remoto--canonical-tree (remoto--parse filename))))
     (unless parsed
       (error "Remoto: cannot parse path: %s" filename))
     ;; `find-file-noselect' treats a `file-error' as a nonexistent file and

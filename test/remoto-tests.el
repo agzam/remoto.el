@@ -12497,6 +12497,7 @@ The root lists two gists of me and a starred one, /gist:me/ lists two."
   (declare (indent 0))
   `(let ((remoto--listing-cache (make-hash-table :test 'equal))
          (remoto--entry-cache (make-hash-table :test 'equal))
+         (remoto-gist--listed (make-hash-table :test 'equal))
          (remoto--logins (remoto-test--logins :user "me")))
      (remoto-test--cache-gists)
      ,@body))
@@ -12766,6 +12767,31 @@ Buffers BODY creates are killed afterwards."
                                       (list kitty starred))))
         (expect (mapcar #'substring-no-properties (mapcar #'car (car page)))
                 :to-equal '("nikku/0e6f/capture.md"))))))
+
+(describe "the short name of a gist file"
+  (it "answers as the file it names, as a one-file listing line holds it"
+    (remoto-test-with-gist-answers
+      (expect (file-directory-p "/gist:me/0a1b/kitty.sh") :to-be nil)
+      (expect (file-regular-p "/gist:me/0a1b/kitty.sh") :to-be t)
+      (expect (file-exists-p "/gist:me/0a1b/kitty.sh") :to-be t)
+      (expect (file-exists-p "/gist:me/0a1b/nope.sh") :to-be nil)
+      (expect (file-attribute-size (file-attributes "/gist:me/0a1b/kitty.sh")) :to-equal 10)
+      (with-temp-buffer
+        (insert-file-contents "/gist:me/0a1b/kitty.sh")
+        (expect (buffer-string) :to-equal "echo hi\n"))
+      ;; A repository's short name needs its default branch, so it stays a directory.
+      (expect (file-directory-p "/gh:testowner/testrepo/README.md") :to-be t)))
+
+  (it "answers from the listing for a listed gist, with no request"
+    (remoto-test-with-gist-answers
+      (expect (file-regular-p "/gist:me/0a1b/kitty.sh") :to-be t)
+      (expect (file-directory-p "/gist:me/0c5d") :to-be t)
+      (expect (directory-files "/gist:me/0c5d:/" nil directory-files-no-dot-files-regexp)
+              :to-equal '("a.sh" "b.md"))
+      (expect (remoto-test--api-calls "") :to-be nil)
+      (with-temp-buffer
+        (insert-file-contents "/gist:me/0a1b:/kitty.sh"))
+      (expect (remoto-test--api-calls "") :to-equal '("gists/0a1b")))))
 
 (provide 'remoto-tests)
 

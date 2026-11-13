@@ -59,6 +59,9 @@
 (defvar remoto-gist--gists (make-hash-table :test 'equal)
   "Cache: gist id -> the answer of gists/ID, with every file's content.")
 
+(defvar remoto-gist--listed (make-hash-table :test 'equal)
+  "Cache: gist id -> the gist as a listing page gave it, its files without content.")
+
 (defun remoto-gist--owner (gist)
   "Return the login of the owner of GIST, an answer of the gists API."
   (alist-get 'login (alist-get 'owner gist)))
@@ -75,6 +78,17 @@ none, as on the gist site."
             (and owner (not (string-equal-ignore-case owner (remoto-gist--owner gist)))))
         (user-error "%sthe gist %s of %s" remoto--not-found id owner)
       gist)))
+
+(defun remoto-gist--known (forge owner id)
+  "Return the gist ID of OWNER on FORGE as known, asking only when it is not.
+Its answer of gists/ID comes first, then its item of a listing page, which
+names its files without their content."
+  (if-let* (((not (gethash id remoto-gist--gists)))
+            (item (gethash id remoto-gist--listed))
+            ((or (null owner)
+                 (string-equal-ignore-case owner (or (remoto-gist--owner item) "")))))
+      item
+    (remoto-gist--get forge owner id)))
 
 (defun remoto-gist--files (gist)
   "Return the files of GIST as (NAME . FILE), in the order of its answer."
@@ -111,7 +125,7 @@ The language of a file is its note."
   (let ((table (make-hash-table :test 'equal)))
     (puthash "" remoto--dir-entry table)
     (puthash "/" remoto--dir-entry table)
-    (dolist (file (remoto-gist--files (remoto-gist--get forge owner id)) table)
+    (dolist (file (remoto-gist--files (remoto-gist--known forge owner id)) table)
       (puthash (car file)
                `((type . "blob") (size . ,(or (alist-get 'size (cdr file)) 0))
                  (sha . "") (mode . "100644")
@@ -122,7 +136,7 @@ The language of a file is its note."
 (cl-defmethod remoto--root-file ((forge remoto-gist) owner id _ref)
   "The one file of the gist ID of OWNER on FORGE, nil for a gist of more.
 A gist of one file opens at it, as its line in a listing does."
-  (pcase (remoto-gist--files (remoto-gist--get forge owner id))
+  (pcase (remoto-gist--files (remoto-gist--known forge owner id))
     (`((,name . ,_)) name)))
 
 (cl-defmethod remoto-forge-content ((forge remoto-gist) owner id _ref path)
@@ -141,7 +155,7 @@ a larger one comes truncated, and its raw URL has the rest."
 
 (cl-defmethod remoto-forge-entry-notes ((forge remoto-gist) owner id _ref _dir names)
   "The language of each of NAMES in the gist ID of OWNER on FORGE."
-  (let ((files (remoto-gist--files (remoto-gist--get forge owner id))))
+  (let ((files (remoto-gist--files (remoto-gist--known forge owner id))))
     (seq-keep (lambda (name)
                 (when-let* ((language (alist-get 'language (cdr (assoc name files)))))
                   (cons name language)))
@@ -150,8 +164,10 @@ a larger one comes truncated, and its raw URL has the rest."
 (cl-defmethod remoto-forge-forget ((_forge remoto-gist) &optional _owner id)
   "Drop the cached gist ID, or every cached gist without ID."
   (if id
-      (remhash id remoto-gist--gists)
-    (clrhash remoto-gist--gists)))
+      (progn (remhash id remoto-gist--gists)
+             (remhash id remoto-gist--listed))
+    (clrhash remoto-gist--gists)
+    (clrhash remoto-gist--listed)))
 
 ;;;; Listings
 
@@ -238,6 +254,7 @@ listed before.  A short page ends ENDPOINT; the next endpoint starts."
                 (and user (string-equal-ignore-case user (or (remoto-gist--owner item) "")))))
          (shown (if (equal endpoint "gists/starred") (seq-remove own items) items)))
     (dolist (item items)
+      (puthash (alist-get 'id item) item remoto-gist--listed)
       (remoto--remember (remoto--repo-id forge (remoto-gist--owner item) (alist-get 'id item))
                         (remoto-gist--attributes item t)))
     (cons (mapcar (lambda (item)
