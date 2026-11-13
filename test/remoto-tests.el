@@ -12498,35 +12498,48 @@ The root lists two gists of me and a starred one, /gist:me/ lists two."
      ,@body))
 
 (describe "gist candidates"
-  (it "lead with the description, and the name of the Dired line follows"
+  (it "lead with the description, then secret or public and the name of the Dired line"
     (expect (remoto-test--gist-texts
              (remoto-test--gist "0a1b" "me" "Kitty themes" t "kitty.sh") nil nil)
-            :to-equal '("Kitty themes" "kitty.sh"))
+            :to-equal '("Kitty themes" "public  kitty.sh"))
     (expect (remoto-test--gist-texts
              (remoto-test--gist "0c5d" "me" "Helpers" t "a.sh" "b.md") nil nil)
-            :to-equal '("Helpers" "a.sh, b.md"))
+            :to-equal '("Helpers" "public  a.sh, b.md"))
     (expect (remoto-test--gist-texts
              (remoto-test--gist "0e3f" "me" " Talk\r\n notes " nil "talk.md") nil nil)
             :to-equal '("Talk notes" "secret  talk.md")))
 
-  (it "lead with the name of the Dired line when the gist has no description"
+  (it "lead with the name of the Dired line when the gist has no description, secret or public after it"
     (expect (remoto-test--gist-texts
              (remoto-test--gist "0c2d" "me" nil t "vimium.json") nil nil)
-            :to-equal '("vimium.json" ""))
+            :to-equal '("vimium.json" "public"))
     (expect (remoto-test--gist-texts
              (remoto-test--gist "0a4b" "me" "  " nil "x.txt" "y.txt") nil nil)
             :to-equal '("x.txt, y.txt" "secret")))
 
+  (it "show nf-oct-lock or nf-oct-globe in place of the word with icons"
+    (expect (remoto-gist--texts (remoto-test--gist "0e3f" "me" "Talk notes" nil "talk.md")
+                                "talk.md" t)
+            :to-equal '("Talk notes" . "\uF456 talk.md"))
+    (expect (remoto-gist--texts (remoto-test--gist "0a1b" "me" "Kitty themes" t "kitty.sh")
+                                "kitty.sh" t)
+            :to-equal '("Kitty themes" . "\uF484 kitty.sh"))
+    (expect (remoto-gist--texts (remoto-test--gist "0a4b" "me" nil nil "x.txt") "x.txt" t)
+            :to-equal '("x.txt" . "\uF456"))
+    (expect (remoto-gist--texts (remoto-test--gist "0c2d" "me" nil t "vimium.json")
+                                "vimium.json" t)
+            :to-equal '("vimium.json" . "\uF484")))
+
   (it "name the owner of a starred gist at the root, and not the token's own"
     (expect (remoto-test--gist-texts
              (remoto-test--gist "0e6f" "nikku" "Gif utility" t "capture.md") t "Starred")
-            :to-equal '("Gif utility" "nikku/capture.md"))
+            :to-equal '("Gif utility" "public  nikku/capture.md"))
     (expect (remoto-test--gist-texts
              (remoto-test--gist "0a7b" "nikku" "" t "a.sh") t "Starred")
-            :to-equal '("nikku/a.sh" ""))
+            :to-equal '("nikku/a.sh" "public"))
     (expect (remoto-test--gist-texts
              (remoto-test--gist "0a1b" "me" "Kitty themes" t "kitty.sh") t "Your gists")
-            :to-equal '("Kitty themes" "kitty.sh")))
+            :to-equal '("Kitty themes" "public  kitty.sh")))
 
   (it "show their labels at the root, in their groups and in the order listed"
     (remoto-test-with-gists
@@ -12540,7 +12553,7 @@ The root lists two gists of me and a starred one, /gist:me/ lists two."
         (expect (mapcar (lambda (triple) (substring-no-properties (car triple))) triples)
                 :to-equal '("me/0a1b/" "me/0c2d/" "nikku/0e6f/"))
         (expect (mapcar (lambda (triple) (substring-no-properties (nth 2 triple))) triples)
-                :to-equal '(" kitty.sh" "" " nikku/capture.md"))
+                :to-equal '(" public  kitty.sh" " public" " public  nikku/capture.md"))
         (expect (mapcar (lambda (triple)
                           (funcall (alist-get 'group-function meta) (car triple) nil))
                         triples)
@@ -12559,7 +12572,7 @@ The root lists two gists of me and a starred one, /gist:me/ lists two."
         (expect (mapcar (lambda (triple) (get-text-property 0 'display (car triple))) triples)
                 :to-equal '("Kitty themes" "Helpers"))
         (expect (mapcar (lambda (triple) (substring-no-properties (nth 2 triple))) triples)
-                :to-equal '(" kitty.sh" " a.sh, b.md"))
+                :to-equal '(" public  kitty.sh" " public  a.sh, b.md"))
         (expect (alist-get 'display-sort-function meta) :to-be #'identity))))
 
   (it "match the regexps of a style by id, description or file name"

@@ -168,15 +168,19 @@ The root lists the token's gists, then the ones it starred."
   "Return the label of a gist of the file NAMES: the names, comma-separated."
   (string-join names ", "))
 
-(defun remoto-gist--texts (item shown)
+(defun remoto-gist--texts (item shown icons)
   "Return (LABEL . ANNOTATION) of ITEM, a gist from a list endpoint, in completion.
 Its description leads, and SHOWN, the name its Dired line shows, follows;
-a gist without a description leads with SHOWN.  A secret one says so."
-  (let ((description (string-trim (remoto--one-line (or (alist-get 'description item) ""))))
-        (secret (and (not (eq (alist-get 'public item) t)) "secret")))
+without a description SHOWN leads.  The annotation starts with secret or
+public, or, with ICONS, the Nerd Font glyph nf-oct-lock or nf-oct-globe."
+  (let* ((description (string-trim (remoto--one-line (or (alist-get 'description item) ""))))
+         (public (eq (alist-get 'public item) t))
+         (mark (cond ((not icons) (if public "public" "secret"))
+                     (public "\uF484")
+                     (t "\uF456"))))
     (if (string-empty-p description)
-        (cons shown (or secret ""))
-      (cons description (string-join (delq nil (list secret shown)) "  ")))))
+        (cons shown mark)
+      (cons description (concat mark (if icons " " "  ") shown)))))
 
 (defun remoto-gist--attributes (item folder)
   "Return the Dired attributes of ITEM, a gist from a list endpoint.
@@ -209,7 +213,9 @@ hides the id, and the owner of the token's own gists at the root."
                (name (if (cdr names)
                          (concat head (propertize id 'display (remoto-gist--label names)))
                        (concat head (remoto-gist--hide (concat id "/")) (car names))))
-               (`(,label . ,annotation) (remoto-gist--texts item (remoto--shown-name name))))
+               ;; A user of nerd-icons has the font that draws its glyphs.
+               (`(,label . ,annotation) (remoto-gist--texts item (remoto--shown-name name)
+                                                            (featurep 'nerd-icons))))
     (cons name
           `(,@(remoto-gist--attributes item (cdr names))
             (gist-id . ,id)
