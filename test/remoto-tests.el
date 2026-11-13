@@ -12748,6 +12748,14 @@ Buffers BODY creates are killed afterwards."
         (expect (remoto--unparse (remoto-forge-parse-url remoto--gist url))
                 :to-equal "/gist:me/0a1b:/kitty.sh")))))
 
+(describe "a page of a gist listing"
+  (it "holds 30 gists, which GitHub answers in about a second"
+    (expect (remoto--page-size remoto--gist) :to-equal 30)
+    (expect (remoto--page-size remoto--github) :to-equal 100)
+    (spy-on 'remoto--api :and-return-value nil)
+    (remoto-forge-entries remoto--gist (remoto--parse "/gist:me/"))
+    (expect (remoto-test--api-calls "") :to-equal '("users/me/gists?per_page=30&page=1"))))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:

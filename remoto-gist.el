@@ -244,6 +244,11 @@ name finds it.  A short page ends ENDPOINT; the next endpoint starts."
           (cond ((<= (remoto--page-size forge) (length items)) (cons endpoint (1+ page)))
                 (later (cons later 1))))))
 
+(cl-defmethod remoto--page-size ((_forge remoto-gist))
+  "GitHub takes about 50 ms a gist to list, so a page of 30 comes in 1.4 s.
+One of 100 takes 6 s and more, near the 10 s GitHub allows a request."
+  30)
+
 (defun remoto-gist--user (forge dir)
   "Return the token's account on FORGE, offering a login for DIR without one."
   (or (remoto--get-authenticated-user forge)
