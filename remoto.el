@@ -4367,30 +4367,37 @@ Handles candidates with prefix prepended by completion framework."
 (defvar remoto-annotation-width-step 10
   "Round annotation alignment width up to this step size.")
 
+(defconst remoto--label-max-width 80
+  "Width of the widest label shown; a longer one is cut, with an ellipsis.
+The annotations stand in one column past the widest label shown.")
+
+(defun remoto--shown-label (candidate)
+  "Return the label of CANDIDATE, cut to `remoto--label-max-width', or nil."
+  (when-let* ((label (remoto--get-prop candidate 'remoto-label)))
+    (truncate-string-to-width label remoto--label-max-width nil nil t)))
+
 (defun remoto--shown-candidate (candidate)
   "Return CANDIDATE as it stands on the line of a completion UI.
 A `remoto-label' property is text a source shows in place of a name that
 says nothing to a reader, as a gist's id; the copy keeps the name itself,
 which is what the UI inserts."
-  (if-let* ((label (remoto--get-prop candidate 'remoto-label)))
+  (if-let* ((label (remoto--shown-label candidate)))
       (propertize candidate 'display label 'face nil)
     candidate))
 
 (defun remoto--label-width (candidate)
-  "Return the width of the label of CANDIDATE, or nil without one."
-  (when-let* ((label (remoto--get-prop candidate 'remoto-label)))
+  "Return the width of the cut label of CANDIDATE, or nil without one."
+  (when-let* ((label (remoto--shown-label candidate)))
     (string-width label)))
 
 (defun remoto--affixate (items)
   "Format ITEMS as affixation triples with aligned suffixes.
 ITEMS is a list of (candidate prefix suffix); a candidate shows its label,
-see `remoto--shown-candidate', and one wider than 60 moves only its suffix.
+see `remoto--shown-candidate'.
 Uses display property for alignment (works in any completion UI)."
-  (let* ((cap 60)
-         (max-len (apply #'max 0 (mapcar (lambda (x)
-                                           (if-let* ((width (remoto--label-width (car x))))
-                                               (min cap width)
-                                             (length (car x))))
+  (let* ((max-len (apply #'max 0 (mapcar (lambda (x)
+                                           (or (remoto--label-width (car x))
+                                               (length (car x))))
                                          items)))
          (align-to (* (ceiling (/ (float (+ max-len 4))
                                   remoto-annotation-width-step))
@@ -4398,12 +4405,10 @@ Uses display property for alignment (works in any completion UI)."
     (mapcar (lambda (x)
               (let* ((c (nth 0 x))
                      (prefix (nth 1 x))
-                     (suffix (remoto--one-line (nth 2 x)))
-                     (wide (< cap (or (remoto--label-width c) 0))))
+                     (suffix (remoto--one-line (nth 2 x))))
                 (list (remoto--shown-candidate c) prefix
                       (if (string-empty-p suffix) ""
-                        (concat (and wide "  ")
-                                (propertize " " 'display
+                        (concat (propertize " " 'display
                                             `(space :align-to ,align-to))
                                 (propertize suffix 'face 'remoto-annotation))))))
             items)))

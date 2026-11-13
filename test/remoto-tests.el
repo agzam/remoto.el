@@ -8385,9 +8385,10 @@ Returns the full path after completion, or INPUT if no completion."
         (expect (get-text-property 1 'face (nth 2 (car result)))
                 :to-equal 'remoto-annotation))))
 
-  (it "aligns the annotations by the labels shown, and a long label moves only its own"
-    (let* ((short (propertize "0a1b0a1b0a1b0a1b0a1b/" 'remoto-label "Themes"))
-           (long (propertize "0c2d/" 'remoto-label (make-string 90 ?x)))
+  (it "aligns the annotations by the labels shown, a label past 80 cut with an ellipsis"
+    (let* ((truncate-string-ellipsis "…")
+           (short (propertize "0a1b0a1b0a1b0a1b0a1b/" 'remoto-label "Themes"))
+           (long (propertize "0c2d/" 'remoto-label (concat (make-string 90 ?x) " tail")))
            (column (lambda (triple)
                      (seq-some (lambda (index)
                                  (let ((display (get-text-property index 'display (nth 2 triple))))
@@ -8397,9 +8398,12 @@ Returns the full path after completion, or INPUT if no completion."
            (both (remoto--affixate (list (list short "" "one") (list long "" "two")))))
       ;; The label is 6 wide, the name it stands for 21.
       (expect (funcall column (car alone)) :to-equal 10)
-      (expect (mapcar column both) :to-equal '(70 70))
+      (expect (mapcar column both) :to-equal '(90 90))
+      (expect (get-text-property 0 'display (car (cadr both)))
+              :to-equal (concat (make-string 79 ?x) "…"))
       (expect (substring-no-properties (nth 2 (car both))) :to-equal " one")
-      (expect (substring-no-properties (nth 2 (cadr both))) :to-equal "   two")))
+      (expect (substring-no-properties (nth 2 (cadr both))) :to-equal " two")
+      (expect (remoto--candidate-match-text long) :to-match "tail")))
 
   (it "aligns candidates without a label by their names, as before"
     (let ((result (remoto--affixate '(("short" "" "one") ("a-much-longer-name" "" "two")))))
