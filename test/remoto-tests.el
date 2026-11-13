@@ -12732,6 +12732,14 @@ Buffers BODY creates are killed afterwards."
         (expect (remoto-forge-content remoto--gist "me" "0b1c" nil "notes.md")
                 :to-equal (encode-coding-string "é!" 'utf-8))))))
 
+(describe "the anchor of a gist file"
+  (it "follows the gist page, which runs the name through Rails' parameterize"
+    (expect (mapcar #'remoto-gist--slug
+                    '("kitty-theme.sh" "vimium_c-AG_settings.json" "a b.txt" "Dockerfile"
+                      ".bashrc" "foo..bar.el" "über.md" "--x--.md"))
+            :to-equal '("kitty-theme-sh" "vimium_c-ag_settings-json" "a-b-txt" "dockerfile"
+                        "bashrc" "foo-bar-el" "uber-md" "x-md"))))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:

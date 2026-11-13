@@ -18,6 +18,7 @@
 ;;; Code:
 
 (require 'loadhist)
+(require 'ucs-normalize)
 (require 'url)
 (require 'remoto)
 (require 'remoto-github)
@@ -323,8 +324,17 @@ fetched only with WAIT.  The prefetch, a nil QUERY, asks nothing."
 ;;;; Web URLs
 
 (defun remoto-gist--slug (name)
-  "Return the slug of the file NAME in the anchors of its gist's page."
-  (string-trim (replace-regexp-in-string "[^a-z0-9]+" "-" (downcase name)) "-+" "-+"))
+  "Return the slug of the file NAME in the anchors of its gist's page.
+As Rails' parameterize makes it: accents go, - and _ stay, any other run
+is one -, and the ends lose theirs."
+  (thread-last
+    (ucs-normalize-NFKD-string name)
+    (seq-filter (lambda (char) (< char 128)))
+    concat
+    (replace-regexp-in-string "[^A-Za-z0-9_-]+" "-")
+    (replace-regexp-in-string "--+" "-")
+    (replace-regexp-in-string "\\`-\\|-\\'" "")
+    downcase))
 
 (defun remoto-gist--anchor (name start end)
   "Return the fragment of the file NAME on its gist's page, at lines START to END."
