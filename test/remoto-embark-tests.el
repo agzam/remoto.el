@@ -97,6 +97,10 @@ every source older than an existing output file, so it must not exist."
       (expect kmap :to-equal '(remoto-issue remoto-embark-issue-map))
       (expect fn :to-be 'remoto--embark-transform-ref)))
 
+  (it "registers the owner transformer, which classifies each root candidate anew"
+    (expect (alist-get 'remoto-owner embark-transformer-alist)
+            :to-be 'remoto--embark-transform))
+
   (it "registers the browse-table transformer"
     (let ((fn (alist-get 'remoto-browse embark-transformer-alist)))
       (expect fn :to-be 'remoto--embark-browse-transform))))
@@ -325,7 +329,15 @@ with that property intact and no live minibuffer."
   (it "routes an owner candidate carrying remoto-target to the owner type"
     (let ((cand (propertize "torvalds/" 'remoto-target "/github:torvalds")))
       (expect (remoto--embark-transform 'remoto-repo cand)
-              :to-equal '(remoto-owner . "/github:torvalds")))))
+              :to-equal '(remoto-owner . "/github:torvalds"))))
+
+  (it "routes a root candidate that names a repository, as a gist does, to the repo type"
+    (let ((account (propertize "torvalds/" 'remoto-target "/github:torvalds"))
+          (repository (propertize "o/r/" 'remoto-target "/github:o/r")))
+      (expect (remoto--embark-transform 'remoto-owner account)
+              :to-equal '(remoto-owner . "/github:torvalds"))
+      (expect (remoto--embark-transform 'remoto-owner repository)
+              :to-equal '(remoto-repo . "/github:o/r:/")))))
 
 ;;; Generic copy/browse on every target kind (regression for forge-nil)
 

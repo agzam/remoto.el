@@ -237,7 +237,8 @@ A unibyte string; the caller decodes it."
 (cl-defgeneric remoto-forge-resolve-ref (forge _owner _repo _ref)
   "Return the exact ref that REF names in OWNER/REPO on FORGE, for a permalink.
 A commit SHA on a forge: the link keeps naming the same tree when REF
-moves on."
+moves on.  A source without refs gets a nil REF, and answers what pins
+its tree, such as a gist's revision, or signals as by default."
   (remoto--unsupported forge 'resolve-ref))
 
 (cl-defgeneric remoto-forge-refs (forge _owner _repo)
@@ -418,6 +419,13 @@ delimiters it supports; the others are plain characters in its paths."
   (when-let* ((delimiter (remoto--delimiter-of level)))
     (remoto-delimiter-kind delimiter)))
 
+(defun remoto--refs-p (forge)
+  "Return non-nil when FORGE has refs: it supports a delimiter of kind `ref'."
+  (seq-some (lambda (char)
+              (when-let* ((delimiter (alist-get char remoto--delimiters)))
+                (eq 'ref (remoto-delimiter-kind delimiter))))
+            (remoto-forge-delimiters forge)))
+
 (cl-defstruct (remoto-path (:constructor remoto-path-create)
                            (:copier nil))
   "Parsed components of a remoto path.
@@ -538,6 +546,15 @@ Returns nil if FILENAME does not match the canonical format."
               ((eq (remoto-path-level parsed) 'tree))
               ((not (remoto-path-short parsed))))
     parsed))
+
+(defun remoto--canonical-tree (parsed)
+  "Return PARSED, a `remoto-path' in a tree, in its canonical form, or nil.
+A short form gets one when its forge has no refs: with no default ref to
+ask for, it names the file of its canonical form, at no request."
+  (when (and parsed (eq (remoto-path-level parsed) 'tree))
+    (cond ((not (remoto-path-short parsed)) parsed)
+          ((not (remoto--refs-p (remoto-path-forge parsed)))
+           (remoto--parse (remoto--canonical-path parsed))))))
 
 (defun remoto--path-prefix (parsed)
   "Return the canonical prefix of the forge of PARSED, such as /github:."
@@ -1091,10 +1108,13 @@ the auth-source search; without one, the login reads anonymously until
              'none))))
 
 (defun remoto--account-endpoint-p (endpoint)
-  "Return non-nil when ENDPOINT is of the token's account, user and below.
-Asked without a token, those answer 401, which url.el takes for a cue to
-prompt for a password."
-  (string-match-p (rx bos "user" (or eos (in "/?"))) endpoint))
+  "Return non-nil when ENDPOINT is of the token's account.
+That is user and below, and the token's own gists and starred ones.
+Asked without a token, they answer 401, which url.el takes for a cue to
+prompt for a password, or with the public gists of everyone."
+  (string-match-p (rx bos (or (seq "user" (or eos (in "/?")))
+                              (seq "gists" (? "/starred") (or eos "?"))))
+                  endpoint))
 
 (defun remoto--anonymous-get (forge endpoint)
   "GET ENDPOINT of the API of FORGE without a token.
@@ -1200,8 +1220,8 @@ on the next request" (or host "every host")))
 (cl-defgeneric remoto--token-url (_forge)
   "Return the address of the page for a new token of FORGE, filled in.
 GitHub's classic page, with its scopes ticked: a fine-grained token lists
-no organizations."
-  "https://github.com/settings/tokens/new?scopes=repo,read:org&description=remoto")
+no organizations, and secret gists need `gist'."
+  "https://github.com/settings/tokens/new?scopes=repo,read:org,gist&description=remoto")
 
 (cl-defgeneric remoto--token-prompt (forge)
   "Return the prompt for a token of FORGE."
@@ -1216,9 +1236,15 @@ no organizations."
     (remoto-path-forge parsed)))
 
 (defun remoto--read-forge (prompt)
-  "Read a registered forge with PROMPT, the forge of the current buffer first."
-  (let* ((forges (seq-uniq (mapcar #'cdr remoto--forges)))
-         (default (remoto-forge-title (or (remoto--buffer-forge) remoto--github)))
+  "Read a registered forge with PROMPT, the forge of the current buffer first.
+Forges on one API host share their login, so the first one registered
+stands for them all, as GitHub does for gists."
+  (let* ((same-host (lambda (a b) (equal (remoto--api-host a) (remoto--api-host b))))
+         (forges (seq-uniq (mapcar #'cdr remoto--forges) same-host))
+         (current (or (remoto--buffer-forge) remoto--github))
+         (default (remoto-forge-title
+                   (or (seq-find (lambda (forge) (funcall same-host forge current)) forges)
+                       current)))
          (title (completing-read (format-prompt prompt default)
                                  (mapcar #'remoto-forge-title forges)
                                  nil t nil nil default)))
@@ -1660,9 +1686,10 @@ A bare account or repository name exists once a cached listing holds it."
       ;; recursive tree per ref, because completion asks this of every
       ;; candidate it offers at the @ level.
       ('tree
-       (cond ((remoto-path-short parsed) t)
-             ((string-empty-p (remoto--tree-lookup-key (remoto-path-path parsed))) t)
-             (t (and (remoto--tree-entry parsed) t)))))))
+       (if-let* ((tree (remoto--canonical-tree parsed)))
+           (or (string-empty-p (remoto--tree-lookup-key (remoto-path-path tree)))
+               (and (remoto--tree-entry tree) t))
+         t)))))
 
 (defun remoto--handle-access-file (filename string)
   "Return nil when FILENAME can be read, else signal `file-missing'.
@@ -1692,10 +1719,10 @@ Also returns t for partial paths like /github: and /github:OWNER/."
                  (and (remoto--entry-for filename) t)))
       ('topics nil)
       ('tree
-       (if (remoto-path-short parsed)
-           t
-         (when-let* ((entry (remoto--tree-entry parsed)))
-           (equal "tree" (alist-get 'type entry))))))))
+       (if-let* ((tree (remoto--canonical-tree parsed)))
+           (when-let* ((entry (remoto--tree-entry tree)))
+             (equal "tree" (alist-get 'type entry)))
+         t)))))
 
 (defun remoto--handle-file-accessible-directory-p (filename)
   "Return t if FILENAME is an accessible directory.
@@ -1704,7 +1731,7 @@ Delegates to `file-directory-p' - remote dirs are always readable."
 
 (defun remoto--handle-file-regular-p (filename)
   "Return t if FILENAME is a regular file in the remote repo."
-  (when-let* ((parsed (remoto--parse-path filename))
+  (when-let* ((parsed (remoto--canonical-tree (remoto--parse filename)))
               (entry (remoto--tree-entry parsed)))
     (equal "blob" (alist-get 'type entry))))
 
@@ -1735,7 +1762,7 @@ visits both in one buffer, so each canonical name gets its own number."
 (defun remoto--handle-file-attributes (filename &optional _id-format)
   "Return file attributes for FILENAME.
 Synthesized from tree cache - timestamps are epoch 0."
-  (when-let* ((parsed (remoto--parse-path filename))
+  (when-let* ((parsed (remoto--canonical-tree (remoto--parse filename)))
               (entry (remoto--tree-entry parsed)))
     (let* ((dir? (equal "tree" (alist-get 'type entry)))
            (size (or (alist-get 'size entry) 0))
@@ -1855,17 +1882,18 @@ need the typed text as their API query."
 
 (defun remoto--candidate-match-text (candidate)
   "Text that `completion-regexp-list' is matched against for CANDIDATE.
-The bare number of an issue and the bare name of a repo or account are
-rarely what the user types, so the title or description joins the
-name.  The trailing / or : delimiter stays out, as the built-in file
-name primitives match names without it."
+The key of an issue, the name of a repo or account and the id of a gist
+are rarely what the user types, so the label and the title or description
+join the name.  The trailing / or : stays out, as in the built-in primitives."
   (let ((name (string-trim-right candidate "[/:]"))
-        (extra (or (remoto--get-prop candidate 'remoto-topic-title)
-                   (remoto--get-prop candidate 'remoto-repo-desc)
-                   (remoto--get-prop candidate 'remoto-acct-desc))))
-    (if (and (stringp extra) (not (string-empty-p extra)))
-        (concat name " " extra)
-      name)))
+        (texts (list (remoto--get-prop candidate 'remoto-label)
+                     (or (remoto--get-prop candidate 'remoto-topic-title)
+                         (remoto--get-prop candidate 'remoto-repo-desc)
+                         (remoto--get-prop candidate 'remoto-acct-desc)))))
+    (string-join (cons name (seq-filter (lambda (text)
+                                          (and (stringp text) (not (string-empty-p text))))
+                                        texts))
+                 " ")))
 
 (defun remoto--filter-by-completion-regexps (candidates)
   "Drop the CANDIDATES that `completion-regexp-list' rejects.
@@ -1919,8 +1947,10 @@ An empty FILE does not mean an empty query: see `remoto--minibuffer-query'."
                (let ((filtered (seq-filter (lambda (u) (string-prefix-p file u))
                                            result)))
                  ;; Pre-fetch repos for the top match so the cache is
-                 ;; warm by the time the user types "/"
-                 (when-let* ((top (car filtered)))
+                 ;; warm by the time the user types "/"; a name with a
+                 ;; slash is a repository a source lists at its root.
+                 (when-let* ((top (car filtered))
+                             ((not (string-search "/" top))))
                    (remoto-forge-complete forge (remoto--path-at forge 'owner top)
                                           nil nil))
                  (mapcar candidate filtered))))))
@@ -2260,7 +2290,7 @@ VISIT, BEG, END, REPLACE as per `insert-file-contents'."
        (if from-find-file
            "remoto is loaded now, run the command again"
          "open it with `find-file'"))))
-  (let ((parsed (remoto--parse-path filename)))
+  (let ((parsed (remoto--canonical-tree (remoto--parse filename))))
     (unless parsed
       (error "Remoto: cannot parse path: %s" filename))
     ;; `find-file-noselect' treats a `file-error' as a nonexistent file and
@@ -2469,28 +2499,50 @@ A forge's description may span lines; a Dired line or an annotation cannot."
       (mapconcat #'identity (split-string text "[\n\r\f\v]+" t "[ \t]+") " ")
     text))
 
+(defun remoto--shown-name (name)
+  "Return the text of NAME on its Dired line.
+A run of NAME whose `display' property is a string shows that string, so
+a source hides part of a name with \"\" or shows a label in its place."
+  (if (not (text-property-not-all 0 (length name) 'display nil name))
+      name
+    (named-let shown ((pos 0) (parts nil))
+      (if (= pos (length name))
+          (apply #'concat (reverse parts))
+        (let ((next (next-single-property-change pos 'display name (length name)))
+              (display (get-text-property pos 'display name)))
+          (shown next (cons (if (stringp display)
+                                display
+                              (substring-no-properties name pos next))
+                            parts)))))))
+
+(defun remoto--entry-shown (entry)
+  "Return the text of the name of ENTRY, (NAME . ATTRIBUTES), on its Dired line."
+  (remoto--shown-name (car entry)))
+
 (defun remoto--format-dired-entry (name plist &optional classify widths human)
   "Format a single Dired line for NAME with PLIST attributes.
 CLASSIFY appends the ls -F indicator; HUMAN, 1024 or 1000, sizes as -h or
---si do.  WIDTHS line up a listing's sizes and names; a note in PLIST
-starts 4 columns past the names, where Dired hides link targets."
+--si do.  WIDTHS line up sizes and shown names, see `remoto--shown-name';
+a note in PLIST starts 4 columns past them, where Dired hides link targets."
   (let* ((dir? (equal "tree" (alist-get 'type plist)))
          (indicator (remoto--ls-indicator plist classify))
          (note (and (alist-get 'note plist) (remoto--one-line (alist-get 'note plist))))
          (size (or (alist-get 'size plist) 0)))
     (concat (or (alist-get 'perms plist)
                 (remoto--mode-to-string (alist-get 'mode plist) dir?))
-            "  1 github github "
+            (format " %2d github github " (or (alist-get 'links plist) 1))
             (string-pad (if human (remoto--human-size size human) (number-to-string size))
                         (or (car widths) 8) nil t)
             " " (remoto--ls-time (alist-get 'time plist)) " "
             ;; Dired reads exactly the name by this property, whatever
             ;; the switches; a name with a note after it needs it as well.
+            ;; A label is a `display' of the name, not text after it: Dired
+            ;; hides what follows a name by 4 columns under hide-details.
             (propertize name 'dired-filename t)
             indicator
             (and note (not (string-empty-p note))
                  (concat (make-string (max 4 (- (+ 4 (or (cdr widths) 0))
-                                                (string-width name)
+                                                (string-width (remoto--shown-name name))
                                                 (length indicator)))
                                       ?\s)
                          note))
@@ -2507,7 +2559,7 @@ sizes.  The name column stops at 40, so one long name moves only its note."
                                              (number-to-string size)))))
                                entries))
         (min 40 (apply #'max 0 (mapcar (lambda (entry)
-                                         (+ (string-width (car entry))
+                                         (+ (string-width (remoto--entry-shown entry))
                                             (length (remoto--ls-indicator
                                                      (cdr entry) classify))))
                                        entries)))))
@@ -2646,7 +2698,8 @@ attributes made of theirs, and reads the options as its
                        (let* ((dot (remoto--dot-entry-p entry))
                               (time (if dot most-positive-fixnum
                                       (or (alist-get 'time (cdr entry)) 0))))
-                         (list (car entry) (equal "tree" (alist-get 'type (cdr entry)))
+                         (list (remoto--entry-shown entry)
+                               (equal "tree" (alist-get 'type (cdr entry)))
                                1 0 0 time time time
                                (if dot most-positive-fixnum
                                  (or (alist-get 'size (cdr entry)) 0))
@@ -2657,8 +2710,8 @@ attributes made of theirs, and reads the options as its
 (defun remoto--sort-entries (entries switches)
   "Return ENTRIES, each (NAME . ATTRIBUTES), in the order ls gives them.
 SWITCHES are the ls options, read as GNU ls reads them, or as ls-lisp
-does when it lists local directories.  remoto knows no size or time of
-the entries . and .., so they lead under -S and -t."
+does when it lists local directories.  Names count as their lines show
+them; remoto knows no size or time of . and .., so they lead under -S and -t."
   (let* ((options (remoto--ls-options switches))
          (sort (plist-get options :sort)))
     (cond
@@ -2668,6 +2721,8 @@ the entries . and .., so they lead under -S and -t."
       (let* ((name< (if (eq sort 'version)
                         #'remoto--version-lessp
                       (remoto--name-lessp-function)))
+             (entry< (lambda (a b)
+                       (funcall name< (remoto--entry-shown a) (remoto--entry-shown b))))
              (lessp
               (pcase sort
                 ((or 'size 'time)
@@ -2679,23 +2734,23 @@ the entries . and .., so they lead under -S and -t."
                      (let ((key-a (if (remoto--dot-entry-p a) 1.0e+INF (funcall key a)))
                            (key-b (if (remoto--dot-entry-p b) 1.0e+INF (funcall key b))))
                        (if (= key-a key-b)
-                           (funcall name< (car a) (car b))
+                           (funcall entry< a b)
                          (< key-b key-a))))))
                 ('width
                  (lambda (a b)
-                   (let ((width-a (string-width (car a)))
-                         (width-b (string-width (car b))))
+                   (let ((width-a (string-width (remoto--entry-shown a)))
+                         (width-b (string-width (remoto--entry-shown b))))
                      (if (= width-a width-b)
-                         (funcall name< (car a) (car b))
+                         (funcall entry< a b)
                        (< width-a width-b)))))
                 ('extension
                  (lambda (a b)
-                   (let ((ext-a (remoto--extension (car a)))
-                         (ext-b (remoto--extension (car b))))
+                   (let ((ext-a (remoto--extension (remoto--entry-shown a)))
+                         (ext-b (remoto--extension (remoto--entry-shown b))))
                      (cond ((funcall name< ext-a ext-b) t)
                            ((funcall name< ext-b ext-a) nil)
-                           (t (funcall name< (car a) (car b)))))))
-                (_ (lambda (a b) (funcall name< (car a) (car b))))))
+                           (t (funcall entry< a b))))))
+                (_ entry<)))
              (sorted (sort (copy-sequence entries) lessp))
              (ordered (if (plist-get options :reverse) (reverse sorted) sorted)))
         (if (plist-get options :group)
@@ -2714,7 +2769,7 @@ A dot that starts NAME matches only a dot that starts PATTERN, as ls has it."
        (or (not (string-prefix-p "." name)) (string-prefix-p "." pattern))))
 
 (defun remoto--shown-entries (entries switches)
-  "Return the ENTRIES of a listing that ls would list.
+  "Return the ENTRIES of a listing that ls would list, by their shown names.
 SWITCHES are the ls options: dot names need -a, or -A, which leaves
 out only . and ..; -B leaves out backups, -I and --hide what their
 patterns match.  ls-lisp reads only -a, -A and -B."
@@ -2724,8 +2779,9 @@ patterns match.  ls-lisp reads only -a, -A and -B."
                       (or (if (memq ?A chars)
                               (remoto--dot-entry-p entry)
                             (and (not (memq ?a chars))
-                                 (string-prefix-p "." (car entry))))
-                          (and (memq ?B chars) (string-suffix-p "~" (car entry)))))
+                                 (string-prefix-p "." (remoto--entry-shown entry))))
+                          (and (memq ?B chars)
+                               (string-suffix-p "~" (remoto--entry-shown entry)))))
                     entries))
     (let* ((options (remoto--ls-options switches))
            (show (plist-get options :show))
@@ -2733,13 +2789,14 @@ patterns match.  ls-lisp reads only -a, -A and -B."
                              (and (plist-get options :backups) '("*~" ".*~"))
                              (and (not show) (plist-get options :hide)))))
       (seq-remove (lambda (entry)
-                    (or (pcase show
-                          ('all nil)
-                          ('almost (remoto--dot-entry-p entry))
-                          (_ (string-prefix-p "." (car entry))))
-                        (seq-some (lambda (pattern)
-                                    (remoto--ls-pattern-p pattern (car entry)))
-                                  patterns)))
+                    (let ((name (remoto--entry-shown entry)))
+                      (or (pcase show
+                            ('all nil)
+                            ('almost (remoto--dot-entry-p entry))
+                            (_ (string-prefix-p "." name)))
+                          (seq-some (lambda (pattern)
+                                      (remoto--ls-pattern-p pattern name))
+                                    patterns))))
                   entries))))
 
 (defun remoto--insert-listing (dir switches)
@@ -2821,17 +2878,19 @@ line, as with ls-lisp.  /github: and /github:OWNER/ list accounts and repos."
       (when-let* ((parsed (remoto--parse-path filename))
                   (entry (remoto--tree-entry parsed)))
         (if full-directory-p
-            (progn
-              (insert "total 0\n")
-              (dolist (child (remoto--sort-entries
+            (let* ((children (remoto--sort-entries
                               (remoto--shown-entries
                                (append (list (cons "." remoto--dir-entry)
                                              (cons ".." remoto--dir-entry))
                                        (remoto--tree-children parsed))
                                switches)
                               switches))
+                   ;; A source may note its files, as a gist notes their language.
+                   (widths (remoto--listing-widths children classify human)))
+              (insert "total 0\n")
+              (dolist (child children)
                 (insert (remoto--format-dired-entry
-                         (car child) (cdr child) classify nil human))))
+                         (car child) (cdr child) classify widths human))))
           (insert "  " (remoto--format-dired-entry
                         (file-name-nondirectory
                          (directory-file-name (remoto-path-path parsed)))
@@ -3159,21 +3218,25 @@ See `remoto-forge-url'."
 
 (defun remoto--context-permalink (ctx)
   "Return the URL of the context plist CTX pinned to a commit, or nil.
-A source whose default ref is nil has no refs to pin."
+A source without refs is asked to pin its tree with a nil ref, as a gist
+pins a revision; one that cannot has no permalink."
   (let* ((forge (remoto--forge-named (plist-get ctx :forge)))
          (owner (plist-get ctx :owner))
          (repo (plist-get ctx :repo))
          (ref (remoto-path-ref
                (remoto--resolve-ref
                 (remoto-path-create :forge forge :owner owner :repo repo
-                                    :ref (plist-get ctx :ref) :path "/")))))
-    (when ref
-      (remoto-forge-url
-       forge (plist-get ctx :kind)
-       (plist-put (copy-sequence ctx) :ref
-                  (or (remoto-forge-resolve-ref forge owner repo ref)
-                      (user-error "Remoto: could not resolve commit SHA for %s@%s"
-                                  (remoto--repo-name owner repo) ref)))))))
+                                    :ref (plist-get ctx :ref) :path "/"))))
+         (pinned (if ref
+                     (or (remoto-forge-resolve-ref forge owner repo ref)
+                         (user-error "Remoto: could not resolve commit SHA for %s@%s"
+                                     (remoto--repo-name owner repo) ref))
+                   (condition-case nil
+                       (remoto-forge-resolve-ref forge owner repo nil)
+                     (remoto-unsupported nil)))))
+    (when pinned
+      (remoto-forge-url forge (plist-get ctx :kind)
+                        (plist-put (copy-sequence ctx) :ref pinned)))))
 
 (defun remoto--url-path (input)
   "Return the `remoto-path' that the URL, remote or shorthand INPUT names.
@@ -3667,13 +3730,16 @@ after %d; M-x remoto-refresh retries" owner count))
 
 (defun remoto--listing-line (line)
   "Return LINE, a bare /PREFIX:OWNER/REPO, as the cached listing above spells it.
-Letter case does not count, as on the forges.  A listing that lacks the
-line, its page still loading or past the cap, gets the entry remoto
-remembered of it; without one, return nil, as asking would cost a request."
+Letter case does not count, as on the forges; a line that goes on past
+REPO, as a gist's ID/FILE does, counts.  A listing that lacks the line gets
+the entry remoto remembered of it; without one, nil: asking costs a request."
   (when-let* ((dir (remoto--handle-file-name-directory line))
               (listing (gethash dir remoto--listing-cache))
               (name (remoto--handle-file-name-nondirectory line)))
-    (if-let* ((listed (assoc-string name (remoto--listing-entries listing) t)))
+    (if-let* ((listed (seq-find (lambda (entry)
+                                  (or (string-equal-ignore-case (car entry) name)
+                                      (string-prefix-p (concat name "/") (car entry) t)))
+                                (remoto--listing-entries listing))))
         (concat dir (car listed))
       (when-let* ((entry (remoto--entry-for line)))
         (setf (remoto--listing-entries listing)
@@ -3697,14 +3763,17 @@ OTHER-WINDOW shows the listing in another window."
 
 (defun remoto--root-lists-p (parsed)
   "Return non-nil when the root listing has a line for the owner of PARSED.
-It holds the token's account and its organizations.  Asking costs no
-request: any listing with a token knows the account, and the listing of
-an account other than the token's reads the root listing."
+An account's line counts, and so does a line OWNER/NAME of a repository,
+as gists have.  Asking costs no request: any listing with a token knows
+the account, and GitHub's listing of another account reads the root's."
   (let ((owner (remoto-path-owner parsed))
         (user (remoto--login-user (remoto--forge-login (remoto-path-forge parsed))))
         (root (gethash (remoto--path-prefix parsed) remoto--listing-cache)))
     (or (and user (string-equal-ignore-case owner user))
-        (and root (assoc-string owner (remoto--listing-entries root) t)))))
+        (and root (seq-some (lambda (entry)
+                              (string-equal-ignore-case
+                               owner (car (split-string (car entry) "/"))))
+                            (remoto--listing-entries root))))))
 
 (defun remoto--dired-up (other-window)
   "Go up from this remoto Dired where Dired's commands cannot; non-nil if so.
@@ -4072,11 +4141,28 @@ every Dired command calls, so each buffer gets a canonical directory."
                args))
     (apply orig-fn dir-or-list args)))
 
+(cl-defgeneric remoto--root-file (_forge _owner _repo _ref)
+  "Return the file that a visit of the root of OWNER/REPO at REF on FORGE opens.
+Nil visits the root as a directory, in Dired.  A gist of one file answers
+that file; Dired still lists the root."
+  nil)
+
+(defun remoto--visited-name (name)
+  "Return the name that a visit of NAME opens: NAME, or the file of its root.
+The root of a tree opens at the file its forge answers, see
+`remoto--root-file'; any other NAME stays as it is."
+  (if-let* ((parsed (remoto--parse-path name))
+            ((equal "/" (remoto-path-path parsed)))
+            (file (remoto--root-file (remoto-path-forge parsed) (remoto-path-owner parsed)
+                                     (remoto-path-repo parsed) (remoto-path-ref parsed))))
+      (concat (remoto--tree-prefix parsed) "/" file)
+    name))
+
 (defun remoto--find-file-around-a (orig-fn filename &rest args)
   "Rewrite GitHub URLs to canonical remoto paths for `find-file'.
 Intercepts #NUM patterns to display issues instead of file operations.
 Call ORIG-FN with FILENAME and ARGS after any rewrite.  A name that names
-nothing opens a Dired of the names that match it."
+nothing opens a Dired of its matches; a root opens at its `remoto--root-file'."
   (setq filename (remoto--normalize-shorthand filename))
   ;; A pull request or issue web URL is the topic, not the repository root
   ;; its canonical name would be.
@@ -4092,7 +4178,7 @@ nothing opens a Dired of the names that match it."
       (let ((target (remoto--name-or-matches filename)))
         (if (consp target)
             (dired-noselect target)
-          (apply orig-fn target args))))))
+          (apply orig-fn (remoto--visited-name target) args))))))
 
 ;;;; Eager auth warm-up
 
@@ -4291,11 +4377,38 @@ Handles candidates with prefix prepended by completion framework."
 (defvar remoto-annotation-width-step 10
   "Round annotation alignment width up to this step size.")
 
+(defconst remoto--label-max-width 80
+  "Width of the widest label shown; a longer one is cut, with an ellipsis.
+The annotations stand in one column past the widest label shown.")
+
+(defun remoto--shown-label (candidate)
+  "Return the label of CANDIDATE, cut to `remoto--label-max-width', or nil."
+  (when-let* ((label (remoto--get-prop candidate 'remoto-label)))
+    (truncate-string-to-width label remoto--label-max-width nil nil t)))
+
+(defun remoto--shown-candidate (candidate)
+  "Return CANDIDATE as it stands on the line of a completion UI.
+A `remoto-label' property is text a source shows in place of a name that
+says nothing to a reader, as a gist's id; the copy keeps the name itself,
+which is what the UI inserts."
+  (if-let* ((label (remoto--shown-label candidate)))
+      (propertize candidate 'display label 'face nil)
+    candidate))
+
+(defun remoto--label-width (candidate)
+  "Return the width of the cut label of CANDIDATE, or nil without one."
+  (when-let* ((label (remoto--shown-label candidate)))
+    (string-width label)))
+
 (defun remoto--affixate (items)
   "Format ITEMS as affixation triples with aligned suffixes.
-ITEMS is a list of (candidate prefix suffix).
+ITEMS is a list of (candidate prefix suffix); a candidate shows its label,
+see `remoto--shown-candidate'.
 Uses display property for alignment (works in any completion UI)."
-  (let* ((max-len (apply #'max 0 (mapcar (lambda (x) (length (car x))) items)))
+  (let* ((max-len (apply #'max 0 (mapcar (lambda (x)
+                                           (or (remoto--label-width (car x))
+                                               (length (car x))))
+                                         items)))
          (align-to (* (ceiling (/ (float (+ max-len 4))
                                   remoto-annotation-width-step))
                       remoto-annotation-width-step)))
@@ -4303,12 +4416,25 @@ Uses display property for alignment (works in any completion UI)."
               (let* ((c (nth 0 x))
                      (prefix (nth 1 x))
                      (suffix (remoto--one-line (nth 2 x))))
-                (list c prefix
+                (list (remoto--shown-candidate c) prefix
                       (if (string-empty-p suffix) ""
                         (concat (propertize " " 'display
                                             `(space :align-to ,align-to))
                                 (propertize suffix 'face 'remoto-annotation))))))
             items)))
+
+(cl-defgeneric remoto--keeps-order-p (_forge)
+  "Return non-nil when the candidates of FORGE stay in the order it gives them.
+A UI sorts candidates by their names, and the names of a forge that
+labels them, as a gist's ids, sort by nothing a reader sees."
+  nil)
+
+(defun remoto--order-metadata (directory)
+  "Return the metadata entries that keep the candidates of DIRECTORY in order.
+Nil unless its forge asks for that, see `remoto--keeps-order-p'."
+  (and (remoto--keeps-order-p (remoto-path-forge (remoto--parse directory)))
+       '((display-sort-function . identity)
+         (cycle-sort-function . identity))))
 
 (defun remoto--completion-metadata (directory)
   "Return completion metadata alist for DIRECTORY, or nil.
@@ -4366,21 +4492,28 @@ Provides group-function and affixation-function for @ and # modes."
                                     (list c "" desc)))
                                 candidates)))))
        `((category . remoto-repo)
+         ,@(remoto--order-metadata directory)
          (affixation-function . ,affix-fn))))
-    ;; Root mode: /github: - user/org type
+    ;; Root mode: /github: - user/org type.  A source's root candidate may
+    ;; name its group; an account names none, and UIs show no header then.
     ('root
-     (let ((affix-fn (lambda (candidates)
+     (let ((group-fn (lambda (candidate transform)
+                       (if transform candidate
+                         (remoto--get-prop candidate 'remoto-group))))
+           (affix-fn (lambda (candidates)
                        (remoto--affixate
                         (mapcar (lambda (c)
                                   (let* ((acct-type (or (remoto--get-prop c 'remoto-acct-type) ""))
                                          (desc (or (remoto--get-prop c 'remoto-acct-desc) ""))
                                          (suffix (cond
-                                                  ((not (string-empty-p desc))
-                                                   (format "%s  %s" acct-type desc))
-                                                  (t acct-type))))
+                                                  ((string-empty-p desc) acct-type)
+                                                  ((string-empty-p acct-type) desc)
+                                                  (t (format "%s  %s" acct-type desc)))))
                                     (list c "" suffix)))
                                 candidates)))))
        `((category . remoto-owner)
+         ,@(remoto--order-metadata directory)
+         (group-function . ,group-fn)
          (affixation-function . ,affix-fn))))))
 
 (defun remoto--read-file-name-internal-a (orig string pred action)
@@ -4648,9 +4781,12 @@ has that.  Nil is the default branch."
          (remoto--git "rev-parse" "HEAD"))))
 
 (defun remoto--root-at (root ref)
-  "Return the root of the repository of ROOT at REF, a new `remoto-path'."
-  (remoto-path-create :forge (remoto-path-forge root) :owner (remoto-path-owner root)
-                      :repo (remoto-path-repo root) :ref ref :level 'tree :path "/"))
+  "Return the root of the repository of ROOT at REF, a new `remoto-path'.
+A forge without refs, such as gists, has one tree and takes no REF."
+  (let ((forge (remoto-path-forge root)))
+    (remoto-path-create :forge forge :owner (remoto-path-owner root)
+                        :repo (remoto-path-repo root) :ref (and (remoto--refs-p forge) ref)
+                        :level 'tree :path "/")))
 
 (defun remoto--remote-tree (pick branch upstream)
   "Return the root of the forge tree of BRANCH, which tracks UPSTREAM.
@@ -4927,7 +5063,7 @@ TRAMP; `file-remote-p' of a canonical name is answered without loading."
               (name (car args))
               ((stringp name))
               ((null (nth 1 args)))
-              ((string-match-p "\\`/\\(?:github\\|codeberg\\):" name)))
+              ((string-match-p "\\`/\\(?:github\\|codeberg\\|gist\\):" name)))
         (and (memq (nth 2 args) '(nil never))
              (save-match-data
                (if (string-match
@@ -5079,10 +5215,11 @@ Each candidate follows HEAD and carries the label of its ref."
 
 (defun remoto--browse-file-candidates (forge head owner repo query)
   "Return the / candidates of OWNER/REPO on FORGE for QUERY, after HEAD.
-QUERY is a path from the root of the default ref; its last segment
-filters the entries of its directory."
-  (let ((ref (while-no-input (remoto-forge-default-ref forge owner repo))))
-    (when (stringp ref)
+QUERY is a path from the root of the default ref, or of the one tree of
+a forge without refs; its last segment filters the entries of its directory."
+  (let* ((refs (remoto--refs-p forge))
+         (ref (and refs (while-no-input (remoto-forge-default-ref forge owner repo)))))
+    (when (or (stringp ref) (not refs))
       (let* ((subpath (or (file-name-directory query) ""))
              (file-part (file-name-nondirectory query))
              (children (while-no-input
@@ -5096,7 +5233,8 @@ filters the entries of its directory."
                                                       "/" subpath name)
                                               'remoto-target
                                               (concat (remoto--repo-id forge owner repo)
-                                                      "@" ref ":/" subpath name))))
+                                                      (and ref (concat "@" ref))
+                                                      ":/" subpath name))))
                               children))))
         (if (string-empty-p file-part)
             names
@@ -5204,17 +5342,24 @@ Turn on `global-remoto-mode' when it is off: the buffers need it."
   (let ((remoto--may-ask t))
     (remoto--browse-input input)))
 
+(defun remoto--browse-open (name)
+  "Open NAME: a directory in Dired, a file in its buffer.
+A root opens at its `remoto--root-file', as `find-file' opens it."
+  (let* ((visited (remoto--visited-name name))
+         (parsed (remoto--parse-path visited)))
+    (if (and parsed (equal "tree" (alist-get 'type (remoto--tree-entry parsed))))
+        (dired visited)
+      (find-file visited))))
+
 (defun remoto--browse-tree (parsed)
   "Open the tree PARSED names, in Dired or as a file.
 A PARSED without a ref opens on the default ref."
-  (let* ((resolved (remoto--or-private
-                    (remoto-path-forge parsed) (remoto-path-owner parsed)
-                    (remoto-path-repo parsed)
-                    (lambda () (remoto--resolve-ref parsed))))
-         (canonical (remoto--canonical-path resolved)))
-    (if (equal "tree" (alist-get 'type (remoto--tree-entry resolved)))
-        (dired canonical)
-      (find-file canonical))))
+  (thread-last
+    (remoto--or-private (remoto-path-forge parsed) (remoto-path-owner parsed)
+                        (remoto-path-repo parsed)
+                        (lambda () (remoto--resolve-ref parsed)))
+    remoto--canonical-path
+    remoto--browse-open))
 
 (defun remoto--browse-topic (forge owner repo key)
   "Open the topic KEY of OWNER/REPO on FORGE."
@@ -5240,13 +5385,9 @@ A canonical path opens as it is; OWNER/REPO opens on its default ref."
      ((and (eq mode 'issues) (remoto--topic-key-p forge query))
       (remoto--browse-topic forge owner repo query))
      ((eq mode 'files)
-      (let* ((short (concat (remoto--repo-id forge owner repo) "/" query))
-             (path (remoto--or-private
-                    forge owner repo (lambda () (remoto--maybe-rewrite short))))
-             (parsed (remoto--parse-path path)))
-        (if (and parsed (equal "tree" (alist-get 'type (remoto--tree-entry parsed))))
-            (dired path)
-          (find-file path))))
+      (let ((short (concat (remoto--repo-id forge owner repo) "/" query)))
+        (remoto--browse-open
+         (remoto--or-private forge owner repo (lambda () (remoto--maybe-rewrite short))))))
      ((string-match remoto--shorthand-regexp name)
       (remoto--browse-tree
        (remoto-path-create :forge forge :owner (match-string 1 name)
@@ -5292,5 +5433,7 @@ remoto was loaded some other way and the mode never turned on."
          (expand-file-name "remoto-github" (file-name-directory (macroexp-file-name))))
 (require 'remoto-forgejo
          (expand-file-name "remoto-forgejo" (file-name-directory (macroexp-file-name))))
+(require 'remoto-gist
+         (expand-file-name "remoto-gist" (file-name-directory (macroexp-file-name))))
 
 ;;; remoto.el ends here
