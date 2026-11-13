@@ -4073,6 +4073,15 @@ Turn `global-remoto-mode' back to its state before BODY."
   "The revision rev1, asked for at no REF."
   (if ref (error "Asked for the ref %s" ref) "rev1"))
 
+(cl-defstruct (remoto-test-ordered (:include remoto-test-refless)
+                                   (:constructor remoto-test-ordered-create)
+                                   (:copier nil))
+  "A source whose candidates keep the order it gives them in, as gists do.")
+
+(cl-defmethod remoto--keeps-order-p ((_forge remoto-test-ordered))
+  "Its order stands."
+  t)
+
 (describe "a source without refs"
   :var ((rl (remoto-test-refless-create :name 'rl :prefixes '("rl") :host "rl.example")))
 
@@ -4113,6 +4122,27 @@ Turn `global-remoto-mode' back to its state before BODY."
         (expect (seq-remove (lambda (args) (eq (remoto-path-level (nth 1 args)) 'root))
                             (spy-calls-all-args 'remoto-forge-complete))
                 :to-be nil))))
+
+  (it "keeps the order of its candidates in completion only when it asks for that"
+    (let ((remoto--forges (copy-alist remoto--forges))
+          (remoto--handler-regexp remoto--handler-regexp)
+          (file-name-handler-alist (copy-alist file-name-handler-alist)))
+      (remoto-register-forge rl)
+      (remoto-register-forge
+       (remoto-test-ordered-create :name 'ord :prefixes '("ord") :host "ord.example"))
+      (dolist (directory '("/ord:" "/ord:o/"))
+        (let ((meta (remoto--completion-metadata directory)))
+          (expect (alist-get 'display-sort-function meta) :to-be #'identity)
+          (expect (alist-get 'cycle-sort-function meta) :to-be #'identity)))
+      (dolist (directory '("/rl:" "/rl:o/" "/github:" "/github:o/"))
+        (let ((meta (remoto--completion-metadata directory)))
+          (expect (assq 'display-sort-function meta) :to-be nil)
+          (expect (assq 'cycle-sort-function meta) :to-be nil)))
+      ;; A file prompt gets them through the metadata of `read-file-name-internal'.
+      (expect (completion-metadata-get
+               (completion-metadata "/ord:" #'read-file-name-internal nil)
+               'display-sort-function)
+              :to-be #'identity)))
 
   (it "answers no permalink when it pins nothing, and the permalink command refuses"
     (let ((remoto--forges (copy-alist remoto--forges))
@@ -8263,6 +8293,37 @@ Returns the full path after completion, or INPUT if no completion."
              (nth 2 (car (remoto--affixate '(("sokobelt" "" "Lisp Game Jam\r\n\r\nhttps://itch.io"))))))
             :to-equal " Lisp Game Jam https://itch.io"))
 
+  (it "shows a candidate by its label, over the whole of the name the UI inserts"
+    (let* ((affix-fn (alist-get 'affixation-function (remoto--completion-metadata "/github:o/")))
+           (labeled (concat (propertize "0a1b" 'remoto-label "Kitty themes"
+                                        'remoto-repo-desc "kitty.sh"
+                                        'face 'completions-common-part)
+                            "/"))
+           (plain (propertize "myrepo/" 'remoto-repo-desc "A cool repo"))
+           (result (funcall affix-fn (list labeled plain)))
+           (shown (car (car result))))
+      (expect (substring-no-properties shown) :to-equal "0a1b/")
+      (expect (get-text-property 0 'display shown) :to-equal "Kitty themes")
+      (expect (next-single-property-change 0 'display shown) :to-be nil)
+      (expect (text-property-not-all 0 (length shown) 'face nil shown) :to-be nil)
+      (expect (get-text-property 0 'remoto-repo-desc shown) :to-equal "kitty.sh")
+      (expect (substring-no-properties (nth 2 (car result))) :to-equal " kitty.sh")
+      ;; The candidate the UI holds, and inserts, stays as the table gave it.
+      (expect (get-text-property 0 'display labeled) :to-be nil)
+      (expect (car (cadr result)) :to-be plain)))
+
+  (it "shows the label of a root candidate, in its group"
+    (let* ((meta (remoto--completion-metadata "/github:"))
+           (candidate (concat (propertize "o/0a1b" 'remoto-label "Kitty themes"
+                                          'remoto-group "Starred"
+                                          'remoto-acct-desc "o/kitty.sh")
+                              "/"))
+           (triple (car (funcall (alist-get 'affixation-function meta) (list candidate)))))
+      (expect (get-text-property 0 'display (car triple)) :to-equal "Kitty themes")
+      (expect (substring-no-properties (nth 2 triple)) :to-equal " o/kitty.sh")
+      (expect (funcall (alist-get 'group-function meta) (car triple) nil)
+              :to-equal "Starred")))
+
   (it "provides issue/PR titles at issues level"
     (let* ((meta (remoto--completion-metadata "/github:foo/bar#"))
            (affix-fn (alist-get 'affixation-function meta))
@@ -8322,7 +8383,29 @@ Returns the full path after completion, or INPUT if no completion."
                 :to-be-truthy)
         ;; Suffix text has face applied
         (expect (get-text-property 1 'face (nth 2 (car result)))
-                :to-equal 'remoto-annotation)))))
+                :to-equal 'remoto-annotation))))
+
+  (it "aligns the annotations by the labels shown, and a long label moves only its own"
+    (let* ((short (propertize "0a1b0a1b0a1b0a1b0a1b/" 'remoto-label "Themes"))
+           (long (propertize "0c2d/" 'remoto-label (make-string 90 ?x)))
+           (column (lambda (triple)
+                     (seq-some (lambda (index)
+                                 (let ((display (get-text-property index 'display (nth 2 triple))))
+                                   (and (consp display) (plist-get (cdr display) :align-to))))
+                               (number-sequence 0 (1- (length (nth 2 triple)))))))
+           (alone (remoto--affixate (list (list short "" "one"))))
+           (both (remoto--affixate (list (list short "" "one") (list long "" "two")))))
+      ;; The label is 6 wide, the name it stands for 21.
+      (expect (funcall column (car alone)) :to-equal 10)
+      (expect (mapcar column both) :to-equal '(70 70))
+      (expect (substring-no-properties (nth 2 (car both))) :to-equal " one")
+      (expect (substring-no-properties (nth 2 (cadr both))) :to-equal "   two")))
+
+  (it "aligns candidates without a label by their names, as before"
+    (let ((result (remoto--affixate '(("short" "" "one") ("a-much-longer-name" "" "two")))))
+      (expect (mapcar #'car result) :to-equal '("short" "a-much-longer-name"))
+      (expect (get-text-property 0 'display (nth 2 (car result)))
+              :to-equal '(space :align-to 30)))))
 
 ;;; ---- PR ordering in issue completion ----
 
@@ -10121,6 +10204,17 @@ of `completion-all-completions'; Vertico inserts a candidate as
     (let ((completion-regexp-list '("remoto")))
       (expect (remoto--handle-file-name-all-completions "" "/github:agzam/")
               :to-equal '("remoto.el/"))))
+
+  (it "matches a labeled candidate by its name, its label or its description"
+    (let ((candidates (list (propertize "0a1b/" 'remoto-label "Kitty themes"
+                                        'remoto-repo-desc "themes.sh")
+                            (propertize "0c2d/" 'remoto-label "Notes")))
+          (completion-ignore-case t))
+      (pcase-dolist (`(,regexp . ,names) '(("kitty" "0a1b/") ("\\.sh" "0a1b/") ("0c" "0c2d/")
+                                           ("notes" "0c2d/") ("0" "0a1b/" "0c2d/")
+                                           ("absent")))
+        (let ((completion-regexp-list (list regexp)))
+          (expect (remoto--filter-by-completion-regexps candidates) :to-equal names)))))
 
   (it "matches accounts by login or description"
     (let ((remoto--logins (remoto-test--logins :user "me")))

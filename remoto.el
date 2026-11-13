@@ -1872,17 +1872,18 @@ need the typed text as their API query."
 
 (defun remoto--candidate-match-text (candidate)
   "Text that `completion-regexp-list' is matched against for CANDIDATE.
-The bare number of an issue and the bare name of a repo or account are
-rarely what the user types, so the title or description joins the
-name.  The trailing / or : delimiter stays out, as the built-in file
-name primitives match names without it."
+The key of an issue, the name of a repo or account and the id of a gist
+are rarely what the user types, so the label and the title or description
+join the name.  The trailing / or : stays out, as in the built-in primitives."
   (let ((name (string-trim-right candidate "[/:]"))
-        (extra (or (remoto--get-prop candidate 'remoto-topic-title)
-                   (remoto--get-prop candidate 'remoto-repo-desc)
-                   (remoto--get-prop candidate 'remoto-acct-desc))))
-    (if (and (stringp extra) (not (string-empty-p extra)))
-        (concat name " " extra)
-      name)))
+        (texts (list (remoto--get-prop candidate 'remoto-label)
+                     (or (remoto--get-prop candidate 'remoto-topic-title)
+                         (remoto--get-prop candidate 'remoto-repo-desc)
+                         (remoto--get-prop candidate 'remoto-acct-desc)))))
+    (string-join (cons name (seq-filter (lambda (text)
+                                          (and (stringp text) (not (string-empty-p text))))
+                                        texts))
+                 " ")))
 
 (defun remoto--filter-by-completion-regexps (candidates)
   "Drop the CANDIDATES that `completion-regexp-list' rejects.
@@ -4347,24 +4348,59 @@ Handles candidates with prefix prepended by completion framework."
 (defvar remoto-annotation-width-step 10
   "Round annotation alignment width up to this step size.")
 
+(defun remoto--shown-candidate (candidate)
+  "Return CANDIDATE as it stands on the line of a completion UI.
+A `remoto-label' property is text a source shows in place of a name that
+says nothing to a reader, as a gist's id; the copy keeps the name itself,
+which is what the UI inserts."
+  (if-let* ((label (remoto--get-prop candidate 'remoto-label)))
+      (propertize candidate 'display label 'face nil)
+    candidate))
+
+(defun remoto--label-width (candidate)
+  "Return the width of the label of CANDIDATE, or nil without one."
+  (when-let* ((label (remoto--get-prop candidate 'remoto-label)))
+    (string-width label)))
+
 (defun remoto--affixate (items)
   "Format ITEMS as affixation triples with aligned suffixes.
-ITEMS is a list of (candidate prefix suffix).
+ITEMS is a list of (candidate prefix suffix); a candidate shows its label,
+see `remoto--shown-candidate', and one wider than 60 moves only its suffix.
 Uses display property for alignment (works in any completion UI)."
-  (let* ((max-len (apply #'max 0 (mapcar (lambda (x) (length (car x))) items)))
+  (let* ((cap 60)
+         (max-len (apply #'max 0 (mapcar (lambda (x)
+                                           (if-let* ((width (remoto--label-width (car x))))
+                                               (min cap width)
+                                             (length (car x))))
+                                         items)))
          (align-to (* (ceiling (/ (float (+ max-len 4))
                                   remoto-annotation-width-step))
                       remoto-annotation-width-step)))
     (mapcar (lambda (x)
               (let* ((c (nth 0 x))
                      (prefix (nth 1 x))
-                     (suffix (remoto--one-line (nth 2 x))))
-                (list c prefix
+                     (suffix (remoto--one-line (nth 2 x)))
+                     (wide (< cap (or (remoto--label-width c) 0))))
+                (list (remoto--shown-candidate c) prefix
                       (if (string-empty-p suffix) ""
-                        (concat (propertize " " 'display
+                        (concat (and wide "  ")
+                                (propertize " " 'display
                                             `(space :align-to ,align-to))
                                 (propertize suffix 'face 'remoto-annotation))))))
             items)))
+
+(cl-defgeneric remoto--keeps-order-p (_forge)
+  "Return non-nil when the candidates of FORGE stay in the order it gives them.
+A UI sorts candidates by their names, and the names of a forge that
+labels them, as a gist's ids, sort by nothing a reader sees."
+  nil)
+
+(defun remoto--order-metadata (directory)
+  "Return the metadata entries that keep the candidates of DIRECTORY in order.
+Nil unless its forge asks for that, see `remoto--keeps-order-p'."
+  (and (remoto--keeps-order-p (remoto-path-forge (remoto--parse directory)))
+       '((display-sort-function . identity)
+         (cycle-sort-function . identity))))
 
 (defun remoto--completion-metadata (directory)
   "Return completion metadata alist for DIRECTORY, or nil.
@@ -4422,6 +4458,7 @@ Provides group-function and affixation-function for @ and # modes."
                                     (list c "" desc)))
                                 candidates)))))
        `((category . remoto-repo)
+         ,@(remoto--order-metadata directory)
          (affixation-function . ,affix-fn))))
     ;; Root mode: /github: - user/org type.  A source's root candidate may
     ;; name its group; an account names none, and UIs show no header then.
@@ -4435,12 +4472,13 @@ Provides group-function and affixation-function for @ and # modes."
                                   (let* ((acct-type (or (remoto--get-prop c 'remoto-acct-type) ""))
                                          (desc (or (remoto--get-prop c 'remoto-acct-desc) ""))
                                          (suffix (cond
-                                                  ((not (string-empty-p desc))
-                                                   (format "%s  %s" acct-type desc))
-                                                  (t acct-type))))
+                                                  ((string-empty-p desc) acct-type)
+                                                  ((string-empty-p acct-type) desc)
+                                                  (t (format "%s  %s" acct-type desc)))))
                                     (list c "" suffix)))
                                 candidates)))))
        `((category . remoto-owner)
+         ,@(remoto--order-metadata directory)
          (group-function . ,group-fn)
          (affixation-function . ,affix-fn))))))
 
