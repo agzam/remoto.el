@@ -400,14 +400,14 @@ and the root stands for the gist."
 
 (cl-defmethod remoto-forge-parse-url ((forge remoto-gist) input)
   "The path that INPUT, a gist URL or clone URL, names on FORGE, or nil.
-The web pages of gist.github.com, the raw files of
-gist.githubusercontent.com and the clone URLs; a revision in a URL is
-left out, as a gist opens at its latest."
+The web pages of gist.github.com, the raw files of either host and the
+clone URLs; a revision in a URL is left out, as a gist opens at its
+latest."
   (let ((input (string-trim input))
         (scheme '(? (or "https://" "http://"))))
     (cond
      ((string-match (rx-to-string
-                     `(seq bos ,scheme "gist.githubusercontent.com/"
+                     `(seq bos ,scheme (or "gist.githubusercontent.com/" "gist.github.com/")
                            (group (+ (not "/"))) "/" (group (+ (not "/"))) "/raw/"
                            (? (= 40 hex) "/") (group (+ (not (in "?#"))))
                            (? (in "?#") (* nonl)) eos))

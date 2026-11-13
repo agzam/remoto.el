@@ -12740,6 +12740,14 @@ Buffers BODY creates are killed afterwards."
             :to-equal '("kitty-theme-sh" "vimium_c-ag_settings-json" "a-b-txt" "dockerfile"
                         "bashrc" "foo-bar-el" "uber-md" "x-md"))))
 
+(describe "the link of a gist's Raw button"
+  (it "opens the file, with and without a revision"
+    (let ((remoto--url-ref-lookup nil))
+      (dolist (url '("https://gist.github.com/me/0a1b/raw/kitty.sh"
+                     "https://gist.github.com/me/0a1b/raw/0123456789012345678901234567890123456789/kitty.sh"))
+        (expect (remoto--unparse (remoto-forge-parse-url remoto--gist url))
+                :to-equal "/gist:me/0a1b:/kitty.sh")))))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:
