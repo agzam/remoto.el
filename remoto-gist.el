@@ -126,12 +126,13 @@ A gist of one file opens at it, as its line in a listing does."
 
 (cl-defmethod remoto-forge-content ((forge remoto-gist) owner id _ref path)
   "The bytes of the file PATH of the gist ID of OWNER on FORGE.
-The answer of a gist holds each file up to 1MB; a larger one comes
-truncated, and its raw URL has the rest."
-  (let ((file (remoto-gist--file forge owner id path)))
-    (if (eq (alist-get 'truncated file) t)
-        (remoto-gist--raw (alist-get 'raw_url file))
-      (encode-coding-string (or (alist-get 'content file) "") 'utf-8 t))))
+The answer of a gist holds each file up to 1MB, a binary one in base64;
+a larger one comes truncated, and its raw URL has the rest."
+  (let* ((file (remoto-gist--file forge owner id path))
+         (content (or (alist-get 'content file) "")))
+    (cond ((eq (alist-get 'truncated file) t) (remoto-gist--raw (alist-get 'raw_url file)))
+          ((equal "base64" (alist-get 'encoding file)) (base64-decode-string content))
+          (t (encode-coding-string content 'utf-8 t)))))
 
 (cl-defmethod remoto-forge-resolve-ref ((forge remoto-gist) owner id _ref)
   "The latest revision of the gist ID of OWNER on FORGE, for a permalink."

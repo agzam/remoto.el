@@ -12716,6 +12716,22 @@ Buffers BODY creates are killed afterwards."
       (expect dired-directory :to-equal "/github:me/zeta@main:/")
       (expect (remoto-test--dired-names) :to-equal '("." ".." "README.md")))))
 
+(describe "a binary file of a gist"
+  (it "reads as its bytes, which the answer gives in base64"
+    (remoto-test-with-gist-answers
+      (let ((bytes (unibyte-string #xff #xd8 #xff #xe0 0 #x80)))
+        (puthash "0b1c" `((id . "0b1c") (owner (login . "me"))
+                          (files (shark.jpg (filename . "shark.jpg") (size . 6)
+                                            (encoding . "base64")
+                                            (content . ,(base64-encode-string bytes)))
+                                 (notes.md (filename . "notes.md") (size . 3)
+                                           (encoding . "utf-8") (content . "é!"))))
+                 remoto-gist--gists)
+        (expect (remoto-forge-content remoto--gist "me" "0b1c" nil "shark.jpg")
+                :to-equal bytes)
+        (expect (remoto-forge-content remoto--gist "me" "0b1c" nil "notes.md")
+                :to-equal (encode-coding-string "é!" 'utf-8))))))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:
