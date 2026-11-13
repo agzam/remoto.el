@@ -228,10 +228,15 @@ hides the id, and the owner of the token's own gists at the root."
 
 (defun remoto-gist--page (forge path endpoint page items)
   "Return (ENTRIES . NEXT) of ITEMS, PAGE of ENDPOINT, for the listing at PATH.
-Each gist is remembered as /gist:OWNER/ID on FORGE, so a Dired of its
-name finds it.  A short page ends ENDPOINT; the next endpoint starts."
-  (let ((root (eq (remoto-path-level path) 'root))
-        (later (cadr (member endpoint (remoto-gist--endpoints path)))))
+Each gist is remembered as /gist:OWNER/ID on FORGE, so a Dired of its name
+finds it.  The token's own gists among the starred ones stay under its own,
+listed before.  A short page ends ENDPOINT; the next endpoint starts."
+  (let* ((root (eq (remoto-path-level path) 'root))
+         (later (cadr (member endpoint (remoto-gist--endpoints path))))
+         (user (remoto--login-user (remoto--forge-login forge)))
+         (own (lambda (item)
+                (and user (string-equal-ignore-case user (or (remoto-gist--owner item) "")))))
+         (shown (if (equal endpoint "gists/starred") (seq-remove own items) items)))
     (dolist (item items)
       (remoto--remember (remoto--repo-id forge (remoto-gist--owner item) (alist-get 'id item))
                         (remoto-gist--attributes item t)))
@@ -240,7 +245,7 @@ name finds it.  A short page ends ENDPOINT; the next endpoint starts."
                                         (and root (if (equal endpoint "gists")
                                                       "Your gists"
                                                     "Starred"))))
-                  items)
+                  shown)
           (cond ((<= (remoto--page-size forge) (length items)) (cons endpoint (1+ page)))
                 (later (cons later 1))))))
 

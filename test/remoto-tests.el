@@ -12756,6 +12756,17 @@ Buffers BODY creates are killed afterwards."
     (remoto-forge-entries remoto--gist (remoto--parse "/gist:me/"))
     (expect (remoto-test--api-calls "") :to-equal '("users/me/gists?per_page=30&page=1"))))
 
+(describe "a starred gist of the token's own account"
+  (it "stays under Your gists"
+    (remoto-test-with-gists
+      (let* ((root (remoto--path-at remoto--gist 'root))
+             (kitty (car (remoto-test--gists)))
+             (starred (car (last (remoto-test--gists))))
+             (page (remoto-gist--page remoto--gist root "gists/starred" 1
+                                      (list kitty starred))))
+        (expect (mapcar #'substring-no-properties (mapcar #'car (car page)))
+                :to-equal '("nikku/0e6f/capture.md"))))))
+
 (provide 'remoto-tests)
 
 ;; Local Variables:
