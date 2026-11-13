@@ -112,6 +112,31 @@ Other Forgejo or Gitea servers get a prefix each through ~remoto-forgejo-instanc
 Auth works as on Codeberg: ~M-x remoto-login~ names each server by its host, and a row of your own goes under ~HOST~.
 
 #+HTML: </details>
+#+HTML: <details><summary>
+** Gists
+#+HTML: </summary>
+
+*** Auth
+
+Public gists need no setup. ~/gist:~ itself, which lists your gists and the ones you starred, needs your GitHub token: the same ~machine github.com~ row, or ~M-x remoto-login~. Your secret gists also need the ~gist~ scope on that token.
+
+*** Usage Examples
+
+#+begin_example
+C-x C-f /gist: TAB                      -> your gists, then the ones you starred
+C-x C-f /gist:agzam/ TAB                -> the gists of an account, by description
+C-x C-f /gist:agzam/197a63b37ce827bb95761069ffc85b3c RET -> a gist of one file opens at its file
+C-x d   /gist:agzam/1b484c2fcb109d19e2964da7282442b7 RET -> the files of a gist
+C-x C-f https://gist.github.com/agzam/197a63b37ce827bb95761069ffc85b3c RET
+#+end_example
+
+A gist's files are at ~/gist:OWNER/ID:/FILE~. Dired and completion keep the id out of sight: a gist shows its description and its file names, and a candidate says whether the gist is secret or public - an octicon when [[https://github.com/rainstormstudio/nerd-icons.el][nerd-icons]] is loaded.
+
+~M-x remoto-browse~ takes a gist's page URL, raw URL and clone URLs. The copy and browse commands give a gist's page, raw, revisions and clone URLs, and a permalink at its latest revision.
+
+A gist opens at its latest revision; revisions, comments and search stay on the website.
+
+#+HTML: </details>
 
 ** Features
 
@@ -176,7 +201,7 @@ Each target type has its own keymap of actions. Run ~embark-act~ on a target to 
 3. File contents are fetched on demand when you actually open a file.
 4. Content is cached by SHA, so re-opening the same file is instant.
 5. Requests go through ~ghub~, with a token from auth-source when one is set up (see Auth under each forge).
-6. The core asks a forge for its data through a small set of generic functions; GitHub answers them in ~remoto-github.el~, and ~remoto-forgejo.el~ reuses those answers for Forgejo and Gitea servers, Codeberg among them. Support for other forges - gists, GitLab - builds on that.
+6. The core asks a forge for its data through a small set of generic functions; GitHub answers them in ~remoto-github.el~, and ~remoto-forgejo.el~ reuses those answers for Forgejo and Gitea servers, Codeberg among them; ~remoto-gist.el~ answers them for gists. Support for other forges, such as GitLab, builds on that.
 
 ** FAQ
 *** Why this isn't a [[https://www.gnu.org/software/emacs/manual/html_node/tramp/][TRAMP]] backend?

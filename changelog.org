@@ -6,6 +6,11 @@ Changes to the project, following Keep a Changelog conventions.
 * [Unreleased]
 
 ** Added
+- adds GitHub gists - ~/gist:~
+- ~/gist:~ lists your gists and the ones you starred, ~/gist:OWNER/~ the gists of an account, ~/gist:OWNER/ID:/~ the files of a gist
+- a gist shows its description and its file names in Dired and completion, the id out of sight; a candidate says whether it is secret or public
+- a gist of one file opens at its file
+- ~remoto-browse~, the copy and browse commands, Embark and project.el work on gists
 - ~remoto-browse~ opens names and URLs of every registered forge, ~/cb:~ input included
 - adds ~remoto-default-forge~ - the forge a bare ~OWNER/REPO~ in ~remoto-browse~ names, ~github~ by default
 - ~remoto-browse~ opens more GitHub input: ~/gh:~ and canonical paths, owner and root URLs, ~github.com/OWNER/REPO~
