@@ -1448,6 +1448,257 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
       (expect (make-directory "/github:me/newrepo") :to-throw 'user-error)
       (expect (make-directory "/github:me/zeta") :not :to-throw))))
 
+;;; Writes
+
+(defvar remoto-test--writes nil
+  "The writes the forge /writer: got, the latest first.")
+
+(cl-defstruct (remoto-test-writer (:include remoto-forge)
+                                  (:constructor remoto-test-writer-create)
+                                  (:copier nil))
+  "A source without refs whose account me may write its own repositories.")
+
+(cl-defmethod remoto-forge-default-ref ((_forge remoto-test-writer) _owner _repo)
+  "No refs."
+  nil)
+
+(cl-defmethod remoto--api-host ((_forge remoto-test-writer))
+  "The host its login is kept under."
+  "writer.example")
+
+(cl-defmethod remoto-forge-tree ((_forge remoto-test-writer) _owner _repo _ref)
+  "One flat tree of two files."
+  (let ((table (make-hash-table :test 'equal)))
+    (puthash "" remoto--dir-entry table)
+    (puthash "/" remoto--dir-entry table)
+    (dolist (name '("a.txt" "b.txt") table)
+      (puthash name '((type . "blob") (size . 3) (sha . "") (mode . "100644")) table))))
+
+(cl-defmethod remoto-forge-content ((_forge remoto-test-writer) _owner _repo _ref _path)
+  "Each file holds one line."
+  "hi\n")
+
+(cl-defmethod remoto--forge-writable-p ((_forge remoto-test-writer) owner _repo _ref _path)
+  "The repositories of me are writable."
+  (equal owner "me"))
+
+(cl-defmethod remoto--forge-write ((_forge remoto-test-writer) owner repo ref path bytes)
+  "Record the write of BYTES to PATH of OWNER/REPO at REF."
+  (push (list 'write owner repo ref path bytes) remoto-test--writes)
+  nil)
+
+(cl-defmethod remoto--forge-delete ((_forge remoto-test-writer) owner repo ref path)
+  "Record the deletion of PATH of OWNER/REPO at REF."
+  (push (list 'delete owner repo ref path) remoto-test--writes)
+  nil)
+
+(cl-defmethod remoto--forge-rename ((_forge remoto-test-writer) owner repo ref path newpath)
+  "Record the rename of PATH of OWNER/REPO at REF to NEWPATH."
+  (push (list 'rename owner repo ref path newpath) remoto-test--writes)
+  nil)
+
+(cl-defmethod remoto--forge-delete-repo ((_forge remoto-test-writer) owner repo)
+  "Record the deletion of OWNER/REPO."
+  (push (list 'delete-repo owner repo) remoto-test--writes)
+  nil)
+
+(defmacro remoto-test-with-writer (&rest body)
+  "Run BODY with the forge /writer: registered, its writes in `remoto-test--writes'."
+  (declare (indent 0))
+  `(let ((remoto--forges (copy-alist remoto--forges))
+         (remoto--handler-regexp remoto--handler-regexp)
+         (file-name-handler-alist (copy-alist file-name-handler-alist))
+         (remoto-test--writes nil))
+     (remoto-test-with-cache
+       (remoto-register-forge (remoto-test-writer-create :name 'writer :prefixes '("writer")
+                                                         :host "writer.example"))
+       ,@body)))
+
+(describe "the writes of the forge contract"
+  :var ((fake (remoto-forge-create :name 'fake :prefixes '("fake") :delimiters '(?@))))
+
+  (it "refuse every write with the read-only message by default"
+    (dolist (call (list (lambda () (remoto--forge-write fake "o" "r" nil "a" "x"))
+                        (lambda () (remoto--forge-delete fake "o" "r" nil "a"))
+                        (lambda () (remoto--forge-rename fake "o" "r" nil "a" "b"))
+                        (lambda () (remoto--forge-create-repo fake "o" '(("a" . "x")) "" nil))
+                        (lambda () (remoto--forge-delete-repo fake "o" "r"))))
+      (expect (condition-case err (funcall call) (user-error (cadr err)))
+              :to-equal "Remoto: repository is read-only")))
+
+  (it "let the user write nothing by default, on every forge that comes with remoto"
+    (dolist (forge (list fake remoto--github remoto--codeberg remoto--gist))
+      (expect (remoto--forge-writable-p forge "me" "r" nil "a") :to-be nil)
+      (expect (remoto--forge-writable-p forge "me" "r" nil "") :to-be nil))))
+
+(describe "writes through the file handler"
+  (it "refuse in a repository of GitHub, of Codeberg and in a gist, as before"
+    (remoto-test-with-gist-answers
+      (puthash "/codeberg:o/r@main" (gethash "/github:testowner/testrepo@main" remoto--tree-cache)
+               remoto--tree-cache)
+      (dolist (name '("/github:testowner/testrepo@main:/README.md"
+                      "/codeberg:o/r@main:/README.md"
+                      "/gist:me/0a1b:/kitty.sh"))
+        (dolist (call (list (lambda () (write-region "x" nil name))
+                            (lambda () (delete-file name))
+                            (lambda () (rename-file name (concat name ".bak")))
+                            (lambda () (set-file-modes name #o600))
+                            (lambda () (set-file-times name))
+                            (lambda () (delete-directory (file-name-directory name) t))))
+          (expect (condition-case err (funcall call) (user-error (cadr err)))
+                  :to-equal "Remoto: repository is read-only")))))
+
+  (it "hand a writable forge the bytes of a string, a region or a buffer"
+    (remoto-test-with-writer
+      (let ((coding-system-for-write 'utf-8-unix))
+        (write-region "héllo\n" nil "/writer:me/r:/a.txt")
+        (expect last-coding-system-used :to-be 'utf-8-unix)
+        (with-temp-buffer
+          (insert "one\ntwo\n")
+          (write-region 5 (point-max) "/writer:me/r:/b.txt")
+          (write-region nil nil "/writer:me/r:/c.txt")))
+      (expect (reverse remoto-test--writes)
+              :to-equal `((write "me" "r" nil "a.txt" ,(encode-coding-string "héllo\n" 'utf-8))
+                          (write "me" "r" nil "b.txt" "two\n")
+                          (write "me" "r" nil "c.txt" "one\ntwo\n")))
+      (expect (seq-some (lambda (write) (multibyte-string-p (nth 5 write))) remoto-test--writes)
+              :to-be nil)))
+
+  (it "append to what the file holds, and keep an existing file under excl"
+    (remoto-test-with-writer
+      (let ((coding-system-for-write 'utf-8-unix))
+        (write-region "more\n" nil "/writer:me/r:/a.txt" t)
+        (expect (write-region "x" nil "/writer:me/r:/b.txt" nil nil nil 'excl)
+                :to-throw 'file-already-exists))
+      (expect remoto-test--writes :to-equal '((write "me" "r" nil "a.txt" "hi\nmore\n")))))
+
+  (it "hand a writable forge the file to delete, the names of a rename, the repository"
+    (remoto-test-with-writer
+      (delete-file "/writer:me/r:/a.txt")
+      (rename-file "/writer:me/r:/a.txt" "/writer:me/r:/c.txt")
+      (rename-file "/writer:me/r:/a.txt" "/writer:me/r:/b.txt" t)
+      (delete-directory "/writer:me/r:/" t)
+      (expect (reverse remoto-test--writes)
+              :to-equal '((delete "me" "r" nil "a.txt")
+                          (rename "me" "r" nil "a.txt" "c.txt")
+                          (rename "me" "r" nil "a.txt" "b.txt")
+                          (delete-repo "me" "r")))))
+
+  (it "keep a rename off a name the repository holds, unless told to overwrite it"
+    (remoto-test-with-writer
+      (spy-on 'yes-or-no-p :and-return-value nil)
+      (expect (rename-file "/writer:me/r:/a.txt" "/writer:me/r:/b.txt")
+              :to-throw 'file-already-exists)
+      (expect 'yes-or-no-p :not :to-have-been-called)
+      (expect (rename-file "/writer:me/r:/a.txt" "/writer:me/r:/b.txt" 1)
+              :to-throw 'file-already-exists)
+      (expect 'yes-or-no-p :to-have-been-called-with
+              "File /writer:me/r:/b.txt already exists; rename to it anyway? ")
+      (expect remoto-test--writes :to-be nil)))
+
+  (it "refuse a rename between repositories, to or from a local name, or of another's file"
+    (remoto-test-with-writer
+      (dolist (names '(("/writer:me/r:/a.txt" "/writer:me/s:/a.txt")
+                       ("/writer:me/r:/a.txt" "/tmp/remoto-test-a.txt")
+                       ("/tmp/remoto-test-a.txt" "/writer:me/r:/c.txt")
+                       ("/writer:other/r:/a.txt" "/writer:other/r:/c.txt")))
+        (expect (condition-case err (apply #'rename-file names) (user-error (cadr err)))
+                :to-equal "Remoto: repository is read-only"))
+      (expect remoto-test--writes :to-be nil)))
+
+  (it "delete a repository only when told to delete what it holds"
+    (remoto-test-with-writer
+      (expect (delete-directory "/writer:me/r:/") :to-throw 'file-error)
+      (expect (condition-case err (delete-directory "/writer:other/r:/" t)
+                (user-error (cadr err)))
+              :to-equal "Remoto: repository is read-only")
+      (expect remoto-test--writes :to-be nil)))
+
+  (it "let a writable repository keep its modes and times, quietly"
+    (remoto-test-with-writer
+      (expect (set-file-modes "/writer:me/r:/a.txt" #o755) :to-be nil)
+      (expect (set-file-times "/writer:me/r:/a.txt") :to-be nil)
+      (expect (condition-case err (set-file-modes "/writer:other/r:/a.txt" #o755)
+                (user-error (cadr err)))
+              :to-equal "Remoto: repository is read-only")
+      (expect remoto-test--writes :to-be nil)))
+
+  (it "refuse a write to another's repository, or above a repository"
+    (remoto-test-with-writer
+      (dolist (name '("/writer:other/r:/a.txt" "/writer:me/" "/writer:"))
+        (expect (condition-case err (write-region "x" nil name) (user-error (cadr err)))
+                :to-equal "Remoto: repository is read-only"))
+      (expect remoto-test--writes :to-be nil))))
+
+(describe "a file the forge lets the user write"
+  (before-each
+    (spy-on 'remoto-forge-content :and-return-value "hi\n"))
+
+  (it "is writable as the forge answers, and nothing above a repository is"
+    (remoto-test-with-writer
+      (expect (file-writable-p "/writer:me/r:/a.txt") :to-be t)
+      (expect (file-writable-p "/writer:me/r:/new.txt") :to-be t)
+      (expect (file-writable-p "/writer:me/r:/") :to-be t)
+      (expect (file-writable-p "/writer:other/r:/a.txt") :to-be nil)
+      (expect (file-writable-p "/writer:me/") :to-be nil)
+      (expect (file-writable-p "/writer:") :to-be nil)
+      (expect (file-writable-p "/codeberg:o/r:/README.md") :to-be nil)
+      (expect (file-writable-p "/gist:me/0a1b:/kitty.sh") :to-be nil)))
+
+  (it "opens writable, and GitHub's file read-only with the note of after-find-file"
+    (remoto-test-with-writer
+      (spy-on 'message)
+      (remoto-test-as-command
+        (let ((writable (find-file-noselect "/writer:me/r:/a.txt"))
+              (github (find-file-noselect "/github:testowner/testrepo@main:/README.md")))
+          (unwind-protect
+              (progn
+                (expect (buffer-local-value 'buffer-read-only writable) :to-be nil)
+                (expect (buffer-local-value 'buffer-read-only github) :to-be t)
+                (expect 'message :to-have-been-called-with "%s" "Note: file is write protected"))
+            (kill-buffer writable)
+            (kill-buffer github))))))
+
+  (it "opens literally as it opens otherwise, though after-find-file skips that visit"
+    (remoto-test-with-writer
+      (let ((writable (find-file-noselect "/writer:me/r:/a.txt" nil t))
+            (github (find-file-noselect "/github:testowner/testrepo@main:/README.md" nil t)))
+        (unwind-protect
+            (progn
+              (expect (buffer-local-value 'buffer-read-only writable) :to-be nil)
+              (expect (buffer-local-value 'buffer-read-only github) :to-be t))
+          (kill-buffer writable)
+          (kill-buffer github)))))
+
+  (it "is not what a file of a gist is: it opens read-only, as before"
+    (remoto-test-with-gist-answers
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/kitty.sh")
+        (expect buffer-read-only :to-be t)))))
+
+(describe "the handlers a save runs"
+  (it "lock, unlock and test a lock with no lock file, local or remote"
+    (remoto-test-with-cache
+      (let ((create-lockfiles t)
+            (name "/github:testowner/testrepo@main:/README.md"))
+        (spy-on 'make-lock-file-name :and-call-through)
+        (expect (lock-file name) :to-be nil)
+        (expect (file-locked-p name) :to-be nil)
+        (expect (unlock-file name) :to-be nil)
+        (expect 'make-lock-file-name :not :to-have-been-called))))
+
+  (it "name no backup file, so a save makes none"
+    (remoto-test-with-cache
+      (expect (find-backup-file-name "/github:testowner/testrepo@main:/README.md")
+              :to-be nil)))
+
+  (it "answer the modes of a file that its Dired line shows, nil for no file"
+    (remoto-test-with-cache
+      (expect (file-modes "/github:testowner/testrepo@main:/README.md") :to-equal #o644)
+      (expect (file-modes "/github:testowner/testrepo@main:/bin/run") :to-equal #o755)
+      (expect (file-modes "/github:testowner/testrepo@main:/src") :to-equal #o755)
+      (expect (file-modes "/github:testowner/testrepo@main:/nope.txt") :to-be nil)
+      (expect (file-modes "/github:testowner/") :to-be nil))))
+
 ;;; copy-file
 
 (describe "copy-file"
@@ -1942,6 +2193,23 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
       (setq-local buffer-file-name "/home/me/x.el")
       (remoto--maybe-enable-mode)
       (expect remoto-mode :to-be nil)))
+
+  (it "keeps a save of a remoto file off a temporary file and off the idle timer"
+    (with-temp-buffer
+      (setq-local buffer-file-name "/github:o/r@main:/x.el")
+      (remoto--maybe-enable-mode)
+      (expect (local-variable-p 'file-precious-flag) :to-be t)
+      (expect file-precious-flag :to-be nil)
+      (expect (local-variable-p 'auto-save-visited-mode) :to-be t)
+      (expect auto-save-visited-mode :to-be nil)
+      (remoto-mode -1)))
+
+  (it "leaves the saves of a local file as they are"
+    (with-temp-buffer
+      (setq-local buffer-file-name "/home/me/x.el")
+      (remoto--maybe-enable-mode)
+      (expect (local-variable-p 'file-precious-flag) :to-be nil)
+      (expect (local-variable-p 'auto-save-visited-mode) :to-be nil)))
 
   (it "binds no key in remoto-mode-map (no reserved C-c LETTER bindings)"
     (expect (keymapp remoto-mode-map) :to-be-truthy)
@@ -3547,6 +3815,195 @@ using unauthenticated access until M-x remoto-reset-auth")
         (remoto--api remoto--github "repos/o/r"))
       (expect 'y-or-n-p :to-have-been-called-with "GitHub refused the token. Log in again? ")
       (expect (remoto--login-failed (remoto-test--github-login)) :to-be t))))
+
+(defun remoto-test--ghub-writes (answer)
+  "Fake `ghub-request' as a write that ANSWER answers before it returns.
+ANSWER is the value, or a function of the arguments of `ghub-request' that
+returns it or signals; a `ghub-http-error' reaches the errorback."
+  (spy-on 'ghub-request :and-call-fake
+          (lambda (&rest args)
+            (let ((keys (nthcdr 3 args)))
+              (condition-case err
+                  (funcall (plist-get keys :callback)
+                           (if (functionp answer) (apply answer args) answer)
+                           ghub-response-headers)
+                (ghub-http-error
+                 (funcall (plist-get keys :errorback)
+                          `(error http ,(nth 1 err) ,(nth 4 err)) ghub-response-headers)))
+              nil))))
+
+(defun remoto-test--write-fails-with (code &optional payload headers)
+  "Make `ghub-request' fail as ghub does for an answer of status CODE.
+PAYLOAD is the body that came with it and HEADERS the headers."
+  (spy-on 'ghub-request :and-call-fake
+          (lambda (_method _resource _params &rest args)
+            (funcall (plist-get args :errorback) `(error http ,code ,payload) headers)
+            nil)))
+
+(defun remoto-test--write-in-flight ()
+  "Fake `ghub-request' as a write that never answers; keep its callbacks."
+  (spy-on 'ghub-request :and-call-fake
+          (lambda (_method _resource _params &rest args)
+            (setq remoto-test--reply (list (plist-get args :callback)
+                                           (plist-get args :errorback)))
+            (generate-new-buffer " *remoto-test-http*"))))
+
+(defun remoto-test--write-message ()
+  "The `user-error' text of a PATCH of gists/abc, or the answer when none came."
+  (condition-case err
+      (remoto--api-write remoto--gist "PATCH" "gists/abc" '((description . "d")))
+    (user-error (error-message-string err))))
+
+(describe "a write to a forge"
+  (before-each
+    (remoto-test--requests-begin)
+    (spy-on 'message)
+    (spy-on 'y-or-n-p))
+
+  (after-each (remoto-test--requests-end))
+
+  (it "sends the method, the payload and the token, with no header of its own"
+    ;; GitHub answers 400 to a conditional header on a PATCH.
+    (let ((remoto--logins (remoto-test--logins :token "ghp_ok")))
+      (remoto-test--ghub-writes '((id . "abc")))
+      (expect (remoto-test--write-message) :to-equal '((id . "abc")))
+      (let ((args (spy-calls-args-for 'ghub-request 0)))
+        (expect (seq-take args 3) :to-equal '("PATCH" "/gists/abc" nil))
+        (expect (plist-get (nthcdr 3 args) :payload) :to-equal '((description . "d")))
+        (expect (plist-get (nthcdr 3 args) :auth) :to-equal "ghp_ok")
+        (expect (plist-get (nthcdr 3 args) :host) :to-equal "api.github.com")
+        (expect (plist-get (nthcdr 3 args) :headers) :to-be nil))))
+
+  (it "refuses without a token, names remoto-login, and sends nothing"
+    (let ((remoto--logins (remoto-test--logins :failed t)))
+      (spy-on 'ghub-request)
+      (spy-on 'ghub-get)
+      (expect (remoto-test--write-message)
+              :to-equal "Remoto: a write to GitHub Gist needs a token. M-x remoto-login")
+      (expect 'ghub-request :not :to-have-been-called)
+      (expect 'ghub-get :not :to-have-been-called)))
+
+  (it "waits under while-no-input too, where input would end a read"
+    (let ((remoto--logins (remoto-test--logins :token "ghp_ok"))
+          (throw-on-input 'remoto-test-input)
+          (seen 'unset))
+      (spy-on 'remoto--ghub-get-interruptible)
+      (remoto-test--ghub-writes (lambda (&rest _) (setq seen throw-on-input) '((id . "abc"))))
+      (expect (remoto-test--write-message) :to-equal '((id . "abc")))
+      (expect seen :to-be nil)
+      (expect 'remoto--ghub-get-interruptible :not :to-have-been-called)
+      (expect (hash-table-count remoto--pending-requests) :to-equal 0)))
+
+  (it "goes again once with the next token when the forge refuses one"
+    (let ((remoto--logins (remoto-test--logins))
+          (remoto-github-auth nil)
+          (auths nil))
+      (spy-on 'ghub--username :and-return-value nil)
+      (remoto-test--auth-rows '(("api.github.com" "other^ghub" "t-other")
+                                ("api.github.com" "alice^ghub" "t-alice")))
+      (remoto-test--ghub-writes
+       (lambda (_method _resource _params &rest args)
+         (push (plist-get args :auth) auths)
+         (if (equal (plist-get args :auth) "t-other")
+             (signal 'ghub-http-error (list 401 "Unauthorized" "https://api.github.com/x" nil))
+           '((id . "abc")))))
+      (expect (remoto-test--write-message) :to-equal '((id . "abc")))
+      (expect (nreverse auths) :to-equal '("t-other" "t-alice"))))
+
+  (it "stops at a refused token with no other in place, and never writes without one"
+    (let ((remoto--logins (remoto-test--logins))
+          (remoto-github-auth nil)
+          (auths nil))
+      (spy-on 'ghub--username :and-return-value nil)
+      (spy-on 'ghub-get)
+      (remoto-test--auth-rows '(("api.github.com" "alice^ghub" "t-alice")))
+      (remoto-test--ghub-writes
+       (lambda (_method _resource _params &rest args)
+         (push (plist-get args :auth) auths)
+         (signal 'ghub-http-error (list 401 "Unauthorized" "https://api.github.com/x" nil))))
+      (expect (remoto-test--write-message)
+              :to-match "\\`Remoto: authentication failed for api\\.github\\.com\\.")
+      (expect auths :to-equal '("t-alice"))
+      (expect 'ghub-get :not :to-have-been-called)))
+
+  (it "goes again only once when the next token is refused too"
+    (let ((remoto--logins (remoto-test--logins))
+          (remoto-github-auth nil)
+          (auths nil))
+      (spy-on 'ghub--username :and-return-value nil)
+      (remoto-test--auth-rows '(("api.github.com" "other^ghub" "t-other")
+                                ("api.github.com" "alice^ghub" "t-alice")
+                                ("api.github.com" "bob^ghub" "t-bob")))
+      (remoto-test--ghub-writes
+       (lambda (_method _resource _params &rest args)
+         (push (plist-get args :auth) auths)
+         (signal 'ghub-http-error (list 401 "Unauthorized" "https://api.github.com/x" nil))))
+      (expect (remoto-test--write-message)
+              :to-match "\\`Remoto: authentication failed for api\\.github\\.com\\.")
+      (expect (length auths) :to-equal 2)))
+
+  (it "puts GitHub's message and errors into the text of a refused write"
+    (let ((remoto--logins (remoto-test--logins :token "ghp_ok")))
+      (remoto-test--write-fails-with
+       422 '((message . "Validation Failed")
+             (errors ((resource . "Gist") (code . "missing_field") (field . "files")))))
+      (expect (remoto-test--write-message)
+              :to-equal "Remoto: api.github.com answered 422 to PATCH gists/abc: \
+Validation Failed (files: missing_field)")
+      (remoto-test--write-fails-with
+       400 '((message . "Bad Request")
+             (errors "Conditional request headers are not allowed in unsafe requests")))
+      (expect (remoto-test--write-message)
+              :to-equal "Remoto: api.github.com answered 400 to PATCH gists/abc: \
+Bad Request (Conditional request headers are not allowed in unsafe requests)")
+      (remoto-test--write-fails-with
+       422 '((message . "Validation Failed")
+             (errors ((code . "custom") (message . "a")) ((code . "invalid")))))
+      (expect (remoto-test--write-message)
+              :to-equal "Remoto: api.github.com answered 422 to PATCH gists/abc: \
+Validation Failed (a; invalid)")
+      (remoto-test--write-fails-with 404 '((message . "Not Found")))
+      (expect (remoto-test--write-message)
+              :to-equal "Remoto: api.github.com answered 404 to PATCH gists/abc: Not Found")
+      (remoto-test--write-fails-with
+       403 '((message . "Resource not accessible by personal access token")))
+      (expect (remoto-test--write-message)
+              :to-equal "Remoto: api.github.com answered 403 to PATCH gists/abc: \
+Resource not accessible by personal access token")
+      (remoto-test--write-fails-with 500)
+      (expect (remoto-test--write-message)
+              :to-equal "Remoto: api.github.com answered 500 to PATCH gists/abc: \
+Internal server error")))
+
+  (it "says until when the forge limits writes"
+    (let ((remoto--logins (remoto-test--logins :token "ghp_ok"))
+          (reset (+ (truncate (float-time)) 1800)))
+      (remoto-test--write-fails-with
+       403 '((message . "You have exceeded a secondary rate limit"))
+       `(("x-ratelimit-remaining" . "0") ("x-ratelimit-reset" . ,(number-to-string reset))))
+      (expect (remoto-test--write-message)
+              :to-equal (format "Remoto: GitHub Gist rate limited until %s"
+                                (format-time-string "%H:%M" reset)))))
+
+  (it "says the write may have gone through when the forge sends nothing until the deadline"
+    (let ((remoto--logins (remoto-test--logins :token "ghp_ok"))
+          (remoto-request-timeout 0.05))
+      (remoto-test--write-in-flight)
+      (expect (remoto-test--within 2 (remoto-test--write-message))
+              :to-equal "Remoto: api.github.com sent nothing for 0.05 seconds; \
+PATCH gists/abc may have gone through")))
+
+  (it "says the write may have gone through after a quit, and ends the request"
+    (let ((remoto--logins (remoto-test--logins :token "ghp_ok")))
+      (remoto-test--write-in-flight)
+      (run-at-time 0.01 nil (lambda () (signal 'quit nil)))
+      (expect (remoto-test--within 2 (remoto-test--write-message))
+              :to-equal "Remoto: quit before api.github.com answered; \
+PATCH gists/abc may have gone through")
+      (expect (seq-filter (lambda (buffer)
+                            (string-prefix-p " *remoto-test-http*" (buffer-name buffer)))
+                          (buffer-list))
+              :to-be nil))))
 
 (describe "a login of an older remoto"
   (it "is forgotten, so an upgrade in a running Emacs looks its token up again"
