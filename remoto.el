@@ -5425,6 +5425,11 @@ remoto was loaded some other way and the mode never turned on."
 
 (provide 'remoto)
 
+(defconst remoto--core-directory (file-name-directory (macroexp-file-name))
+  "The directory of the remoto.el loaded last, set before its forges load.
+A forge file reloads the core of its own directory unless this names it:
+`load-history' names the new remoto.el of an upgrade only once its load ends.")
+
 ;; The forges that come with remoto load after the core they extend, as
 ;; magit's own libraries do; each registers itself when loaded.  They load
 ;; from this file's directory: an upgrade by package.el reloads this file

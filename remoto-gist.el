@@ -17,7 +17,6 @@
 
 ;;; Code:
 
-(require 'loadhist)
 (require 'ucs-normalize)
 (require 'url)
 (require 'remoto)
@@ -25,11 +24,12 @@
 
 ;; package.el reloads this file before remoto.el when it upgrades remoto in
 ;; a running session, and the struct below needs the core of its version.
-;; While remoto.el loads and requires this file, its feature has no file.
+;; `remoto--core-directory' names the core that is in, or loading now.
 (when-let* ((file (macroexp-file-name))
-            (core (feature-file 'remoto))
-            ((not (file-equal-p (file-name-directory core) (file-name-directory file)))))
-  (load (expand-file-name "remoto" (file-name-directory file)) nil t))
+            (dir (file-name-directory file))
+            ((not (and (bound-and-true-p remoto--core-directory)
+                       (file-equal-p remoto--core-directory dir)))))
+  (load (expand-file-name "remoto" dir) nil t))
 
 (cl-defstruct (remoto-gist (:include remoto-forge (title "GitHub Gist"))
                            (:constructor remoto-gist-create)

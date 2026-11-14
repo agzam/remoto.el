@@ -11824,6 +11824,22 @@ with what the same call does once the mode is on."
                           (plist-get result :buffers))
                 :to-be nil)))))
 
+(defun remoto-test--old-version (dir &rest forges)
+  "Write into DIR the files of a remoto whose forge files are FORGES alone.
+FORGES are names such as \"remoto-github\"; they are copied, and the copy
+of remoto.el loses the tail `require' of every other forge file."
+  (let ((source (file-name-directory (locate-library "remoto"))))
+    (dolist (forge forges)
+      (copy-file (expand-file-name (concat forge ".el") source) dir))
+    (with-temp-file (expand-file-name "remoto.el" dir)
+      (insert (replace-regexp-in-string
+               "^(require '\\(remoto-[a-z]+\\)\n +(expand-file-name \"remoto-[a-z]+\" .*\n"
+               (lambda (form) (if (member (match-string 1 form) forges) form ""))
+               (with-temp-buffer
+                 (insert-file-contents (expand-file-name "remoto.el" source))
+                 (buffer-string))
+               t t)))))
+
 (describe "a fresh session"
   ;; The complaint this guards: with nothing in the init file, `C-x C-f
   ;; /gh:...' must work the way `M-x remoto-browse' does.
@@ -11919,6 +11935,57 @@ with what the same call does once the mode is on."
               (expect (plist-get result :codeberg) :to-be nil)
               (expect (plist-get result :gist) :to-be nil)
               (expect (plist-get result :registry) :to-equal '(t t t))))
+        (delete-directory old t)
+        (delete-directory new t))))
+
+  (it "upgrades from a remoto without gists, the forge files reloaded first"
+    ;; 2.7.0 has no remoto-gist.el, so remoto.el of the upgrade loads it while
+    ;; load-history still names the remoto.el of 2.7.0.
+    (let ((source (file-name-directory (locate-library "remoto")))
+          (old (file-name-as-directory (make-temp-file "remoto-old" t)))
+          (new (file-name-as-directory (make-temp-file "remoto-new" t))))
+      (unwind-protect
+          (progn
+            (remoto-test--old-version old "remoto-github" "remoto-forgejo")
+            (dolist (file '("remoto.el" "remoto-github.el" "remoto-forgejo.el" "remoto-gist.el"))
+              (copy-file (expand-file-name file source) new))
+            (let ((result (remoto-test--fresh-session
+                           nil
+                           `(progn
+                              (load ,(expand-file-name "remoto.el" old) nil t)
+                              (load ,(expand-file-name "remoto-github.el" new) nil t)
+                              (load ,(expand-file-name "remoto-forgejo.el" new) nil t)
+                              (list :core (symbol-file 'remoto-register-forge)
+                                    :gist (symbol-file 'remoto-gist--get)
+                                    :forges (mapcar #'car remoto--forges))))))
+              (expect (file-name-directory (or (plist-get result :core) "")) :to-equal new)
+              (expect (file-name-directory (or (plist-get result :gist) "")) :to-equal new)
+              (expect (plist-get result :forges) :to-contain "codeberg")
+              (expect (plist-get result :forges) :to-contain "gist")))
+        (delete-directory old t)
+        (delete-directory new t))))
+
+  (it "upgrades from a remoto of no forge files, remoto.el reloaded alone"
+    (let ((source (file-name-directory (locate-library "remoto")))
+          (old (file-name-as-directory (make-temp-file "remoto-old" t)))
+          (new (file-name-as-directory (make-temp-file "remoto-new" t))))
+      (unwind-protect
+          (progn
+            (remoto-test--old-version old)
+            (dolist (file '("remoto.el" "remoto-github.el" "remoto-forgejo.el" "remoto-gist.el"))
+              (copy-file (expand-file-name file source) new))
+            (let ((result (remoto-test--fresh-session
+                           nil
+                           `(progn
+                              (load ,(expand-file-name "remoto.el" old) nil t)
+                              (load ,(expand-file-name "remoto.el" new) nil t)
+                              (list :forgejo (symbol-file 'remoto-forgejo-register)
+                                    :gist (symbol-file 'remoto-gist--get)
+                                    :forges (mapcar #'car remoto--forges))))))
+              (expect (file-name-directory (or (plist-get result :forgejo) "")) :to-equal new)
+              (expect (file-name-directory (or (plist-get result :gist) "")) :to-equal new)
+              (expect (plist-get result :forges) :to-contain "codeberg")
+              (expect (plist-get result :forges) :to-contain "gist")))
         (delete-directory old t)
         (delete-directory new t)))))
 
