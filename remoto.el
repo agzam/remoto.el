@@ -917,6 +917,24 @@ it is over, and TIMER ends it when the forge sends nothing."
   "The headers of the answer that `remoto--ghub-get' read last.
 Bind it around a call to read the headers of that call's answer.")
 
+(defvar remoto--token-scopes (make-hash-table :test 'equal)
+  "Cache: the sha1 of a token -> the scopes the answers to it list.
+A token whose answers list none, a fine-grained one, has no entry.")
+
+(defun remoto--note-scopes (auth headers)
+  "Keep the scopes that HEADERS, of an answer to a request with AUTH, list."
+  (when-let* (((stringp auth))
+              (scopes (cdr (assoc-string "x-oauth-scopes" headers t))))
+    (puthash (secure-hash 'sha1 auth) (split-string scopes "[, ]+" t) remoto--token-scopes)))
+
+(defun remoto--scopes (forge)
+  "Return the scopes of the token of FORGE, as the answers to it list them.
+t when no answer listed any yet, or FORGE has no token."
+  (let ((auth (remoto--auth forge)))
+    (if (stringp auth)
+        (gethash (secure-hash 'sha1 auth) remoto--token-scopes t)
+      t)))
+
 (defvar remoto--pending-requests (make-hash-table :test 'equal)
   "Requests started under `while-no-input', keyed by (HOST RESOURCE AUTH).
 Such a request outlives the completion call that started it: the reply
@@ -1038,8 +1056,10 @@ answered, failed, or ended because the forge sent nothing."
                      :host host
                      :forge (remoto--ghub-forge forge)
                      :callback (lambda (value &optional headers &rest _)
+                                 (remoto--note-scopes auth headers)
                                  (remoto--request-end req 'done value headers))
                      :errorback (lambda (err &optional headers &rest _)
+                                  (remoto--note-scopes auth headers)
                                   (remoto--request-end
                                    req 'error
                                    (remoto--request-condition err host resource)
@@ -3230,7 +3250,7 @@ Where the user may write, the forge says why it keeps no directory."
   (unless (and (remoto--handle-file-directory-p dir)
                (remoto--handle-file-exists-p dir))
     (remoto--check-directory dir)
-    (remoto--refuse-write dir)))
+    (remoto--refuse-write dir t)))
 
 (defun remoto--handle-abbreviate-file-name (filename)
   "Return FILENAME as-is - no abbreviation for remote paths."
@@ -3301,13 +3321,33 @@ word of the command line after its -c."
   "Signal that remote repos are read-only."
   (user-error "Remoto: repository is read-only"))
 
-(defun remoto--refuse-write (filename)
-  "Refuse a write to FILENAME, with the hint of its forge where it has one."
-  (if-let* ((parts (remoto--bare-repo-parts filename))
-            (hint (remoto--forge-new-repo-hint (remoto-path-forge (remoto--parse filename))
-                                               (car parts) (cdr parts))))
-      (user-error "%s" hint)
-    (remoto--read-only)))
+(defun remoto--read-only-why (filename)
+  "Return why the user may not write FILENAME in a repository of his, or nil."
+  (when-let* ((parsed (remoto--parse filename))
+              (parts (or (remoto--bare-repo-parts filename)
+                         (and (remoto-path-repo parsed)
+                              (cons (remoto-path-owner parsed) (remoto-path-repo parsed))))))
+    (remoto--forge-read-only-why (remoto-path-forge parsed) (car parts) (cdr parts))))
+
+(defun remoto--refuse-write (filename &optional new)
+  "Refuse a write to FILENAME, saying why where its forge knows.
+NEW adds the forge's hint at a bare name: how a repository starts there."
+  (user-error "%s" (or (remoto--read-only-why filename)
+                       (when-let* ((new)
+                                   (parts (remoto--bare-repo-parts filename)))
+                         (remoto--forge-new-repo-hint (remoto-path-forge (remoto--parse filename))
+                                                      (car parts) (cdr parts)))
+                       "Remoto: repository is read-only")))
+
+(defvar remoto--told-read-only nil
+  "The reasons for a read-only repository already said this session.")
+
+(defun remoto--tell-read-only (filename)
+  "Say once a session why the user may not write FILENAME, of his own."
+  (when-let* ((why (remoto--read-only-why filename))
+              ((not (member why remoto--told-read-only))))
+    (push why remoto--told-read-only)
+    (message "%s" why)))
 
 (cl-defgeneric remoto--forge-writable-p (_forge _owner _repo _ref _path)
   "Return non-nil when the user may write PATH of OWNER/REPO at REF on FORGE.
@@ -3336,6 +3376,12 @@ non-nil for a repository anyone may find."
 (cl-defgeneric remoto--forge-delete-repo (_forge _owner _repo)
   "Delete the repository OWNER/REPO of FORGE and every file in it."
   (remoto--read-only))
+
+(cl-defgeneric remoto--forge-read-only-why (_forge _owner _repo)
+  "Return why the user may not write OWNER/REPO of FORGE, his own, or nil.
+Nil when nothing is to say: by default no repository is the user's to write.
+The message names what changes it, such as a token with another scope."
+  nil)
 
 (cl-defgeneric remoto--forge-deletable-p (_forge _owner _repo)
   "Return t when the user may delete OWNER/REPO of FORGE, or a refusal to say.
@@ -3460,7 +3506,7 @@ buffer read them, or gone, a question first."
   "Write START to END into FILENAME, a file the user may write.
 APPEND, VISIT and MUSTBENEW as `write-region' takes them.  A save of the
 visited file checks the forge's text first; elsewhere the write refuses."
-  (let ((target (or (remoto--write-target filename) (remoto--refuse-write filename)))
+  (let ((target (or (remoto--write-target filename) (remoto--refuse-write filename t)))
         (visiting (or (eq visit t) (stringp visit))))
     (when (and (eq mustbenew 'excl) (file-exists-p filename))
       (signal 'file-already-exists (list "File already exists" filename)))
@@ -3506,7 +3552,7 @@ buffer visits the file in the new repository.  Return t once saved."
   "Delete FILENAME, a file the user may write, else refuse.
 A forge keeps no trash, so TRASH changes nothing."
   (pcase-let ((`(,forge ,owner ,repo ,ref ,path) (or (remoto--write-target filename)
-                                                       (remoto--read-only))))
+                                                       (remoto--refuse-write filename))))
     (remoto--forge-delete forge owner repo ref path)))
 
 (defvar remoto--deletion-agreed nil
@@ -3568,7 +3614,7 @@ listing, which Dired takes for empty, needs none.  Elsewhere it refuses."
   (let* ((repo (remoto--repo-of directory))
          (deletable (and repo (apply #'remoto--forge-deletable-p repo))))
     (cond ((stringp deletable) (user-error "%s" deletable))
-          ((not deletable) (remoto--read-only))
+          ((not deletable) (remoto--refuse-write directory))
           ((and (not recursive) (not (remoto--bare-repo-parts directory)))
            (signal 'file-error (list "Removing directory" "Directory not empty" directory)))
           (t (remoto--delete-repo repo)))))
@@ -3667,7 +3713,7 @@ move is a copy and a deletion.  Elsewhere it refuses."
           ((remoto--bare-repo-parts file)
            (apply #'remoto--forge-rename-repo
                   (append (remoto--repo-of file) (list (file-name-nondirectory newname)))))
-          (t (remoto--read-only)))))
+          (t (remoto--refuse-write file)))))
 
 (defun remoto--copy-in (file newname target ok-if-already-exists)
   "Copy FILE, local or of a forge, to NEWNAME at TARGET, where the user may write.
@@ -3694,7 +3740,7 @@ PRESERVE-PERMISSIONS, gets the git mode of FILE.  Inside, see `remoto--copy-in'.
   (if-let* ((target (remoto--write-target newname)))
       (remoto--copy-in file newname target ok-if-already-exists)
     (when (remoto--parse-path newname)
-      (remoto--read-only 'copy-file file newname))
+      (remoto--refuse-write newname))
     (let* ((file (remoto--maybe-rewrite file))
            (local-copy (remoto--handle-file-local-copy file))
            (new (not (file-exists-p newname))))
@@ -3723,7 +3769,7 @@ PRESERVE-PERMISSIONS, gets the git mode of FILE.  Inside, see `remoto--copy-in'.
   "Do nothing for FILENAME in a repository the user may write.
 A save hook sets the modes or the time of the file it saved: in such a
 repository that does nothing and signals nothing.  Elsewhere it refuses."
-  (or (remoto--write-target filename) (remoto--read-only))
+  (or (remoto--write-target filename) (remoto--refuse-write filename))
   nil)
 
 (defalias 'remoto--handle-set-file-times #'remoto--handle-set-file-modes)
@@ -3942,12 +3988,9 @@ and LINE-END are retained only for `remoto-file' targets."
 
 (defun remoto--buffer-file-context ()
   "Return a context plist describing the current buffer's remoto target.
-
-Works in file buffers (line/region at point) and in Dired (entry at
-point, falling back to the directory).  Resolves the ref so the context
-carries a concrete branch, then delegates classification to
-`remoto--path-context'.  Signals a `user-error' when the current buffer
-is not a remoto buffer."
+In a file the line or region at point, in Dired the entry at point, else
+its directory; a line of a listing is its repository or its account.
+Signal a `user-error' outside remoto buffers."
   (let* ((dired (derived-mode-p 'dired-mode))
          (file (or buffer-file-name
                    (and dired (dired-get-filename nil t))
@@ -3955,23 +3998,44 @@ is not a remoto buffer."
                                   (car dired-directory)
                                 dired-directory))
                    default-directory))
-         (parsed (and file (remoto--parse-path file))))
-    (unless parsed
-      (user-error "Remoto: not in a remoto buffer"))
-    (let* ((canonical (remoto--canonical-path (remoto--resolve-ref parsed)))
-           (region (and (not dired) (use-region-p)))
-           (line-start (and (not dired)
-                            (line-number-at-pos
-                             (if region (region-beginning) (point)))))
-           (line-end (and region (line-number-at-pos (region-end)))))
-      (remoto--path-context canonical line-start line-end))))
+         (name (and file (remoto--maybe-rewrite file)))
+         (parsed (and name (remoto--parse-path name))))
+    (cond
+     (parsed
+      (let* ((canonical (remoto--canonical-path (remoto--resolve-ref parsed)))
+             (region (and (not dired) (use-region-p)))
+             (line-start (and (not dired)
+                              (line-number-at-pos
+                               (if region (region-beginning) (point)))))
+             (line-end (and region (line-number-at-pos (region-end)))))
+        (remoto--path-context canonical line-start line-end)))
+     ((and name (remoto--account-context name)))
+     (t (user-error "Remoto: not in a remoto buffer")))))
+
+(defun remoto--account-context (name)
+  "Return the context plist of the account NAME names, or nil.
+NAME is a line of the listing of accounts, or the listing of one."
+  (when-let* ((parsed (remoto--parse (remoto--normalize-shorthand name)))
+              (owner (pcase (remoto-path-level parsed)
+                       ('root (remoto--bare-name parsed))
+                       ('owner (and (string-empty-p (remoto-path-query parsed))
+                                    (remoto-path-owner parsed))))))
+    (list :forge (remoto-forge-name (remoto-path-forge parsed)) :owner owner
+          :kind 'owner :type 'remoto-owner)))
+
+(defun remoto--context-repo (ctx kind)
+  "Refuse KIND, a URL of a repository, for CTX, the context of an account."
+  (unless (or (plist-get ctx :repo) (memq kind '(owner owner-repos)))
+    (user-error "Remoto: an account has no %s URL" kind)))
 
 (defun remoto--context-url (ctx kind)
   "Return the URL of KIND for the context plist CTX, or refuse without one."
+  (remoto--context-repo ctx kind)
   (remoto--url (remoto--forge-named (plist-get ctx :forge)) kind ctx))
 
 (defun remoto--context-permalink-or-refuse (ctx)
   "Return the permalink of the context plist CTX, or refuse without one."
+  (remoto--context-repo ctx 'permalink)
   (or (remoto--context-permalink ctx)
       (remoto--refuse-url (remoto--forge-named (plist-get ctx :forge))
                           'permalink)))
@@ -4014,6 +4078,7 @@ the directory itself."
   "Copy the forge blame URL for the current file and line/region."
   (interactive)
   (let ((ctx (remoto--buffer-file-context)))
+    (remoto--context-repo ctx 'blame)
     (remoto--require-blob ctx "Blame")
     (remoto--kill-url (remoto--context-url ctx 'blame))))
 
@@ -4031,6 +4096,7 @@ pointing at the same content even after the branch advances."
   "Copy the raw-content URL for the current file."
   (interactive)
   (let ((ctx (remoto--buffer-file-context)))
+    (remoto--context-repo ctx 'raw)
     (remoto--require-blob ctx "Raw URL")
     (remoto--kill-url (remoto--context-url ctx 'raw))))
 
@@ -5058,6 +5124,7 @@ repository.  The URL commands are grouped in the variable
         ;; it over; `auto-save-visited-mode' would save to the forge when idle.
         (setq-local file-precious-flag nil
                     auto-save-visited-mode nil))
+      (remoto--tell-read-only file)
       (when-let* ((forge (remoto--buffer-forge)))
         (remoto--hint-login forge)))))
 

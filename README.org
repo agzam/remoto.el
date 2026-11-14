@@ -118,7 +118,7 @@ Auth works as on Codeberg: ~M-x remoto-login~ names each server by its host, and
 
 *** Auth
 
-Public gists need no setup. ~/gist:~ itself, which lists your gists and the ones you starred, needs your GitHub token: the same ~machine github.com~ row, or ~M-x remoto-login~. Your secret gists, and saving to any of your gists, also need the ~gist~ scope on that token.
+Public gists need no setup. ~/gist:~ itself, which lists your gists and the ones you starred, needs your GitHub token: the same ~machine github.com~ row, or ~M-x remoto-login~. Your secret gists, and saving to any of your gists, also need the ~gist~ scope on that token. Without it your gists open read-only, and remoto says why once.
 
 *** Usage Examples
 
@@ -132,7 +132,7 @@ C-x C-f https://gist.github.com/agzam/197a63b37ce827bb95761069ffc85b3c RET
 
 A gist's files are at ~/gist:OWNER/ID:/FILE~. Dired and completion keep the id out of sight: a gist shows its description and its file names, and a candidate says whether the gist is secret or public - an octicon when [[https://github.com/rainstormstudio/nerd-icons.el][nerd-icons]] is loaded.
 
-~M-x remoto-browse~ takes a gist's page URL, raw URL and clone URLs. The copy and browse commands give a gist's page, raw, revisions and clone URLs, and a permalink at its latest revision.
+~M-x remoto-browse~ takes a gist's page URL, raw URL and clone URLs. The copy and browse commands give a gist's page, raw, revisions and clone URLs, and a permalink at its latest revision, from a file of the gist, its Dired or its line in a listing.
 
 A gist opens at its latest revision; revisions, comments and search stay on the website.
 

@@ -14790,6 +14790,148 @@ buffers are killed after."
               :to-match "remoto-gist-edit-description")
       (expect 'remoto--api-write :not :to-have-been-called))))
 
+(describe "the scopes of a token"
+  (before-each (remoto-test--requests-begin))
+  (after-each (remoto-test--requests-end))
+
+  (it "are those the answers to it list, or unknown when they list none"
+    (let ((remoto--logins (remoto-test--logins :token "ghp_ok"))
+          (remoto--token-scopes (make-hash-table :test 'equal))
+          (answers (list nil '(("X-OAuth-Scopes" . "read:org, repo")))))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (&rest args)
+                (funcall (plist-get (cddr args) :callback) '((login . "me")) (pop answers))
+                nil))
+      (remoto--api remoto--github "user")
+      (expect (remoto--scopes remoto--gist) :to-be t)
+      (remoto--api remoto--github "user")
+      (expect (remoto--scopes remoto--gist) :to-equal '("read:org" "repo"))
+      (let ((remoto--logins (remoto-test--logins :token "ghp_other")))
+        (expect (remoto--scopes remoto--gist) :to-be t)))))
+
+(describe "a token without the gist scope"
+  (it "keeps one's own gists read-only and says why once, naming remoto-login"
+    (remoto-test-with-store
+      (let ((remoto--token-scopes (make-hash-table :test 'equal))
+            (remoto--told-read-only nil))
+        (puthash (secure-hash 'sha1 "ghp_me") '("read:org" "repo") remoto--token-scopes)
+        (spy-on 'message)
+        (expect (buffer-local-value 'buffer-read-only (find-file-noselect "/gist:me/0a1b:/a.sh"))
+                :to-be t)
+        (find-file-noselect "/gist:me/0a1b:/b.sh")
+        (expect (seq-count (lambda (args) (string-match-p "no gist scope.*remoto-login"
+                                                          (format "%s" (cdr args))))
+                           (spy-calls-all-args 'message))
+                :to-equal 1)
+        (expect (file-writable-p "/gist:me/0a1b:/") :to-be nil))))
+
+  (it "refuses a forced save, a deletion, a new gist and a description with that reason"
+    (remoto-test-with-store
+      (let ((remoto--token-scopes (make-hash-table :test 'equal))
+            (remoto--told-read-only nil))
+        (puthash (secure-hash 'sha1 "ghp_me") '("repo") remoto--token-scopes)
+        (remoto-test--list-store "0a1b" "0c3d")
+        ;; Emacs asks before it saves a file that is not writable.
+        (spy-on 'yes-or-no-p :and-return-value t)
+        (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+          (let ((inhibit-read-only t)) (insert "x"))
+          (dolist (call (list #'save-buffer
+                              (lambda () (delete-file "/gist:me/0a1b:/a.sh"))
+                              (lambda () (delete-directory "/gist:me/0a1b:/" t))
+                              (lambda () (remoto-gist-create '(("n.txt" . "n\n")) "" nil))
+                              (lambda () (remoto-gist-edit-description "me" "0a1b" "x"))))
+            (expect (condition-case err (progn (funcall call) "done") (user-error (cadr err)))
+                    :to-match "no gist scope")))
+        (with-current-buffer (dired-noselect "/gist:me/")
+          (remoto-mode 1)
+          (goto-char (point-min))
+          (re-search-forward "s\\.txt")
+          (expect (condition-case err (call-interactively (command-remapping 'dired-do-delete))
+                    (user-error (cadr err)))
+                  :to-match "no gist scope"))
+        (expect 'remoto--api-write :not :to-have-been-called))))
+
+  (it "refuses a new gist at a name, and the prompts of the commands, before they ask"
+    (remoto-test-with-store
+      (let ((remoto--token-scopes (make-hash-table :test 'equal))
+            (remoto--told-read-only nil))
+        (puthash (secure-hash 'sha1 "ghp_me") '("repo") remoto--token-scopes)
+        (remoto-test--list-store "0a1b")
+        (spy-on 'read-string)
+        (expect (condition-case err (find-file-noselect "/gist:me/idea.md") (user-error (cadr err)))
+                :to-match "no gist scope")
+        (with-temp-buffer
+          (insert "text\n")
+          (expect (condition-case err (call-interactively #'remoto-gist-create)
+                    (user-error (cadr err)))
+                  :to-match "no gist scope"))
+        (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+          (expect (condition-case err (call-interactively #'remoto-gist-edit-description)
+                    (user-error (cadr err)))
+                  :to-match "no gist scope"))
+        (expect 'read-string :not :to-have-been-called)))))
+
+(describe "the URL commands on a line of a listing"
+  (it "copy the gist of a line, or the file of a gist of one file"
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b" "0c3d")
+      (with-current-buffer (dired-noselect "/gist:me/")
+        (goto-char (point-min))
+        (re-search-forward "0a1b")
+        (remoto-copy-url)
+        (expect (car kill-ring) :to-equal "https://gist.github.com/me/0a1b")
+        (goto-char (point-min))
+        (re-search-forward "s\\.txt")
+        (remoto-copy-url)
+        (expect (car kill-ring) :to-equal "https://gist.github.com/me/0c3d#file-s-txt"))))
+
+  (it "browse the gist of a line of the root listing"
+    (remoto-test-with-gist-answers
+      (spy-on 'browse-url)
+      (with-current-buffer (dired-noselect "/gist:")
+        (goto-char (point-min))
+        (re-search-forward "capture\\.md")
+        (remoto-browse-url)
+        (expect 'browse-url :to-have-been-called-with
+                "https://gist.github.com/nikku/0e6f#file-capture-md"))))
+
+  (it "copy the repository of a line at its default branch"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (dired-mode)
+        (setq-local dired-directory "/github:testowner/")
+        (spy-on 'dired-get-filename :and-return-value "/github:testowner/testrepo")
+        (remoto-copy-url)
+        (expect (car kill-ring) :to-equal "https://github.com/testowner/testrepo/tree/main/"))))
+
+  (it "copy the account of a listing from its . line"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (dired-mode)
+        (setq-local dired-directory "/github:testowner/")
+        (spy-on 'dired-get-filename :and-return-value "/github:testowner/.")
+        (remoto-copy-url)
+        (expect (car kill-ring) :to-equal "https://github.com/testowner"))))
+
+  (it "copy the account of a line, or of the listing, and refuse what an account lacks"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (dired-mode)
+        (setq-local dired-directory "/github:")
+        (spy-on 'dired-get-filename :and-return-value "/github:testowner")
+        (remoto-copy-url)
+        (expect (car kill-ring) :to-equal "https://github.com/testowner")
+        (expect (condition-case err (remoto-copy-permalink) (user-error (cadr err)))
+                :to-equal "Remoto: an account has no permalink URL")
+        (expect (condition-case err (remoto-copy-history-url) (user-error (cadr err)))
+                :to-equal "Remoto: an account has no history URL")
+        (expect (condition-case err (remoto-copy-blame-url) (user-error (cadr err)))
+                :to-equal "Remoto: an account has no blame URL")
+        (setq-local dired-directory "/gist:me/")
+        (spy-on 'dired-get-filename :and-return-value nil)
+        (remoto-copy-url)
+        (expect (car kill-ring) :to-equal "https://gist.github.com/me")))))
+
 (describe "the token page that remoto-login opens"
   (it "ticks the gist scope, which secret gists need, for GitHub and its gists alike"
     (dolist (forge (list remoto--github remoto--gist))

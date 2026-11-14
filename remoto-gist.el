@@ -346,10 +346,32 @@ gist deletes %s" path))
               (file (cdr (assoc path (remoto-gist--files gist)))))
     (equal "base64" (alist-get 'encoding file))))
 
+(defun remoto-gist--scoped-p (forge)
+  "Return non-nil unless the answers to the token of FORGE list no gist scope."
+  (let ((scopes (remoto--scopes forge)))
+    (or (eq scopes t) (member "gist" scopes))))
+
+(defun remoto-gist--writer-p (forge owner)
+  "Return non-nil when the token of FORGE may write the gists of OWNER.
+They are of its account, and it has the gist scope."
+  (and (remoto-gist--mine-p forge owner) (remoto-gist--scoped-p forge)))
+
+(cl-defmethod remoto--forge-read-only-why ((forge remoto-gist) owner _id)
+  "The gists of OWNER, the token's account on FORGE, need the gist scope."
+  (when (and (remoto-gist--mine-p forge owner) (not (remoto-gist--scoped-p forge)))
+    (concat "Remoto: the GitHub token has no gist scope, so your gists stay read-only"
+            (remoto--login-tail))))
+
+(defun remoto-gist--check-writer (forge owner)
+  "Refuse unless the token of FORGE may write the gists of OWNER."
+  (unless (remoto-gist--writer-p forge owner)
+    (user-error "%s" (or (remoto--forge-read-only-why forge owner nil)
+                         "Remoto: repository is read-only"))))
+
 (cl-defmethod remoto--forge-writable-p ((forge remoto-gist) owner id _ref path)
   "A gist of the token's account on FORGE is writable, its binary files aside.
-OWNER and ID name the gist, PATH the file."
-  (and id (remoto-gist--mine-p forge owner)
+OWNER and ID name the gist, PATH the file; the token needs the gist scope."
+  (and id (remoto-gist--writer-p forge owner)
        (not (remoto-gist--binary-p id path))))
 
 (cl-defmethod remoto--forge-check-write ((_forge remoto-gist) _owner id _ref path bytes)
@@ -417,8 +439,7 @@ of a buffer that visits its file; \\[remoto-gist-create] makes one of any text")
 DESCRIPTION may be empty; PUBLIC non-nil makes it public, else secret.
 Each file is refused before the request where GitHub would refuse it.
 Return the id; the gist leads the cached listings of OWNER."
-  (unless (remoto-gist--mine-p forge owner)
-    (remoto--read-only))
+  (remoto-gist--check-writer forge owner)
   (let* ((payload `((description . ,description)
                     (public . ,(and public t))
                     (files . ,(mapcar (lambda (file)
@@ -454,7 +475,7 @@ It asks the description, and secret or public."
 (cl-defmethod remoto--forge-new-repo-hint ((forge remoto-gist) owner _name)
   "The hint for OWNER, the token's account on FORGE: a gist needs a file first.
 A visit of the name of that file below OWNER opens one."
-  (when (remoto-gist--mine-p forge owner)
+  (when (remoto-gist--writer-p forge owner)
     (format (substitute-command-keys "Remoto: a gist starts with a file; \\[find-file] %s%s/NAME \
 makes one")
             (remoto--prefix forge) owner)))
@@ -463,6 +484,7 @@ makes one")
   "The token's account on FORGE deletes its own gists; another's gist refuses.
 OWNER and ID name the gist."
   (cond ((equal id remoto-gist--new) nil)
+        ((remoto--forge-read-only-why forge owner id))
         ((remoto-gist--mine-p forge owner) t)
         (t (format "Remoto: only its owner deletes a gist, and %s owns %s" owner id))))
 
@@ -478,8 +500,7 @@ OWNER and ID name the gist."
 (cl-defmethod remoto--forge-delete-repo ((forge remoto-gist) owner id)
   "Delete the gist ID of OWNER on FORGE in one DELETE, history and all.
 Its lines leave the cached listings and its Dired buffers revert no more."
-  (unless (remoto-gist--mine-p forge owner)
-    (remoto--read-only))
+  (remoto-gist--check-writer forge owner)
   (remoto--api-write forge "DELETE" (concat "gists/" (url-hexify-string id)))
   (remoto-gist--relist forge id nil)
   (remhash (downcase (remoto--repo-id forge owner id)) remoto--entry-cache)
@@ -536,6 +557,8 @@ on as any other name."
                      ":/" name))
             ((not (remoto-gist--mine-p forge owner))
              (user-error "Remoto: no gist of %s has a file %s" owner name))
+            ((not (remoto-gist--writer-p forge owner))
+             (remoto-gist--check-writer forge owner))
             ((and (remoto--listing-state listing)
                   (not (y-or-n-p (format "%s lists part of your gists yet; a new gist of %s? "
                                          dir name))))
@@ -900,7 +923,8 @@ latest."
 PUBLIC non-nil makes it public, else secret.  Interactively FILES are the
 marked files of a Dired, else the region or the buffer under a name read.
 The URL of the gist goes to the kill ring; return it."
-  (interactive (cons (remoto-gist--files-to-share) (remoto-gist--ask)))
+  (interactive (progn (remoto-gist--check-writer remoto--gist (remoto-gist--account remoto--gist))
+                      (cons (remoto-gist--files-to-share) (remoto-gist--ask))))
   (let* ((owner (remoto-gist--account remoto--gist))
          (id (remoto--forge-create-repo
               remoto--gist owner
@@ -915,11 +939,18 @@ The URL of the gist goes to the kill ring; return it."
     (message "Remoto: copied the URL of the new gist, %s" url)
     url))
 
+(defun remoto-gist--check-describer (owner id)
+  "Refuse unless the token may describe the gist ID of OWNER."
+  (unless (remoto-gist--mine-p remoto--gist owner)
+    (user-error "Remoto: only its owner describes a gist, and %s owns %s" owner id))
+  (remoto-gist--check-writer remoto--gist owner))
+
 (defun remoto-gist--description-args ()
   "Return (OWNER ID DESCRIPTION) of the gist here, DESCRIPTION read anew.
 The current description fills the prompt in."
   (pcase-let ((`(,owner . ,id) (or (remoto-gist--at-point)
                                    (user-error "Remoto: no gist here"))))
+    (remoto-gist--check-describer owner id)
     (list owner id
           (read-string "Description of the gist: "
                        (or (alist-get 'description (remoto-gist--known remoto--gist owner id))
@@ -931,8 +962,7 @@ The current description fills the prompt in."
 Interactively the gist is the one at point: its line in a listing, its
 Dired or one of its files, and the current description fills the prompt."
   (interactive (remoto-gist--description-args))
-  (unless (remoto-gist--mine-p remoto--gist owner)
-    (user-error "Remoto: only its owner describes a gist, and %s owns %s" owner id))
+  (remoto-gist--check-describer owner id)
   (remoto-gist--patch remoto--gist id `((description . ,description)))
   (message "Remoto: the gist %s says %S now" id description))
 

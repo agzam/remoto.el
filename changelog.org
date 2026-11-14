@@ -14,6 +14,8 @@ Changes to the project, following Keep a Changelog conventions.
 - adds ~remoto-gist-create~ - a gist of the region, the buffer or the marked files of a Dired, its URL in the kill ring
 - ~D~ on a gist's line deletes the gist after one question that names it, and so does deleting its last file
 - adds ~remoto-gist-edit-description~
+- a token without the ~gist~ scope keeps your gists read-only, and remoto says so once, naming ~remoto-login~
+- the copy and browse commands work on a line of a listing: the repository or gist of the line, or its account
 
 ** Changed
 - ~file-modes~ on a remoto file answers the modes its Dired line shows, such as 644 or 755, instead of nil
