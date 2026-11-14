@@ -431,7 +431,9 @@ The web pages of gist.github.com, the raw files of either host and the
 clone URLs; a revision in a URL is left out, as a gist opens at its
 latest."
   (let ((input (string-trim input))
-        (scheme '(? (or "https://" "http://"))))
+        ;; A file prompt hands a pasted URL over as /gist.github.com/...:
+        ;; `substitute-in-file-name' drops what comes before its //.
+        (scheme '(? (or "https://" "http://" "/"))))
     (cond
      ((string-match (rx-to-string
                      `(seq bos ,scheme (or "gist.githubusercontent.com/" "gist.github.com/")

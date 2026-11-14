@@ -12737,6 +12737,21 @@ Buffers BODY creates are killed afterwards."
               :to-equal "/gist:me/0123456789abcdef0123:/notes.md")
       (expect (remoto-test--gist-direds) :to-be nil)))
 
+  (it "opens from a URL pasted at a file prompt, which reads it as /gist.github.com/..."
+    (remoto-test-with-gist-answers
+      (pcase-dolist (`(,typed . ,file)
+                     '(("~/https://gist.github.com/me/0a1b" . "/gist:me/0a1b:/kitty.sh")
+                       ("~/http://gist.github.com/me/0a1b" . "/gist:me/0a1b:/kitty.sh")
+                       ("~/https://gist.github.com/me/0c5d#file-b-md" . "/gist:me/0c5d:/b.md")
+                       ("~/https://gist.githubusercontent.com/me/0c5d/raw/a.sh"
+                        . "/gist:me/0c5d:/a.sh")))
+        (expect (buffer-file-name (find-file-noselect (substitute-in-file-name typed)))
+                :to-equal file))
+      (expect (buffer-local-value
+               'dired-directory
+               (dired-noselect (substitute-in-file-name "~/https://gist.github.com/me/0c5d")))
+              :to-equal "/gist:me/0c5d:/")))
+
   (it "opens at its file from remoto-browse and Embark's R"
     (remoto-test-with-gist-answers
       (dolist (input '("/gist:me/0a1b" "/gist:me/0a1b/" "/gist:me/0a1b:/"
