@@ -3,6 +3,17 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [Unreleased]
+
+** Added
+- the files of your own gists save to GitHub: ~C-x C-s~ sends the file, and the echo area says "(public gist)" after a save to a public one
+- a save asks before it goes over a change made on GitHub since you opened the file: overwrite, diff or quit
+- adds ~remoto-diff-buffer-with-file~ - the buffer against the text the forge holds now; in remoto buffers a key bound to ~diff-buffer-with-file~ runs it
+
+** Changed
+- ~file-modes~ on a remoto file answers the modes its Dired line shows, such as 644 or 755, instead of nil
+- ~revert-buffer~ in a file of your own gist reads it from GitHub anew, and so does a visit once remoto's copy is 10 seconds old
+
 * [2.8.0] - 2026-11-14
 
 ** Added

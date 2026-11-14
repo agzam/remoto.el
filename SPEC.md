@@ -4,7 +4,7 @@ Browse any GitHub repository in Emacs as if it were cloned locally - without clo
 
 ## Overview
 
-remoto.el registers a virtual filesystem via `file-name-handler-alist` that intercepts Emacs file operations on paths with a `/github:` prefix and translates them into GitHub REST API calls via the `ghub` library. The result: `find-file`, dired, completion, xref - all standard Emacs file tooling works against a remote GitHub repo. Read-only.
+remoto.el registers a virtual filesystem via `file-name-handler-alist` that intercepts Emacs file operations on paths with a `/github:` prefix and translates them into GitHub REST API calls via the `ghub` library. The result: `find-file`, dired, completion, xref - all standard Emacs file tooling works against a remote GitHub repo. Read-only, except the files of the user's own gists, which save back to GitHub.
 
 ## Path Syntax
 
@@ -185,7 +185,10 @@ This returns one directory level at a time. The tree cache stores what it has an
 | `file-directory-p` | Check `:type` = `"tree"` in cache; returns t for partial paths and for a ref that a Dired of matches shows |
 | `file-regular-p` | Check `:type` = `"blob"` in cache |
 | `file-readable-p` | `file-exists-p`, else `file-directory-p`: Dired asks this of `/github:OWNER` and `/github:OWNER/REPO@`, which `file-exists-p` denies, before it lists matches there |
-| `file-writable-p` | Always nil |
+| `file-writable-p` | Asks the forge (`remoto--forge-writable-p`, see Write operations), with no request: a file of a gist of the token's account is writable, a binary one aside, and so is the gist's directory; nil everywhere else and above a repository |
+| `file-modes` | The modes the Dired line shows, from the git mode: 644, 755 for an executable or a directory, 777 for a symlink |
+| `lock-file`, `unlock-file`, `file-locked-p` | Nil: a forge has no lock files to make, find or remove |
+| `find-backup-file-name` | Nil, so a save makes no backup: a forge keeps the history of its files itself |
 | `file-attributes` | Synthesize from cache entry (size, type, mode, epoch-0 timestamps), with an inode per canonical name (`remoto--inode`): `find-buffer-visiting` and `file-equal-p` take two files with equal inodes and attributes for one file |
 | `directory-files` | List tree cache children for parent path, prepend `.` and `..` |
 | `directory-files-and-attributes` | Same, with attributes |
@@ -212,9 +215,17 @@ This returns one directory level at a time. The tree cache stores what it has an
 
 A program started in a remoto directory, through `process-file`, `start-file-process`, `make-process` with `:file-handler` or `shell-command`, runs in `~`: `unhandled-file-name-directory` is nil. A search there would report the files of `~` as the repository's, so the handlers of those four operations refuse one with `(user-error "Remoto: grep needs a clone; a repository has no local files")`. A search is a program in `remoto--search-programs` (grep, egrep, fgrep, rg, ugrep, ag, ack, find, fd, fdfind), `git` with its `grep` subcommand, or a shell whose command line after `-c` names one of those in any word, as xref's `xargs -0 grep` does. Every other program passes on unchanged (`remoto--pass-on`), git for Magit and vc included.
 
-### Write operations (all read-only)
+### Write operations
 
-`write-region`, `delete-file`, `delete-directory`, `rename-file`, `copy-file`, `set-file-modes`, `set-file-times` - all signal `(user-error "Remoto: repository is read-only")`.
+The handlers ask the forge through private generics: `remoto--forge-writable-p (forge owner repo ref path)`, `remoto--forge-write (... path bytes)`, `remoto--forge-delete (... path)`, `remoto--forge-rename (... path newpath)`, `remoto--forge-create-repo (forge owner files description public)`, `remoto--forge-delete-repo (forge owner repo)`, `remoto--forge-check-write (... path bytes)` and `remoto--forge-current-content (... path)`. They are not part of the forge contract until a second source writes. By default nothing is writable and every write signals `(user-error "Remoto: repository is read-only")`; the gist source answers them for the gists of the token's account.
+
+- `write-region` gets its bytes from Emacs's own `write-region` into a local copy of the file (`remoto--region-bytes`), so coding systems, annotations, APPEND and `last-coding-system-used` are Emacs's; MUSTBENEW `excl` refuses an existing file. `remoto--forge-check-write` refuses what the forge cannot keep before any request: for a gist, a name with a slash, bytes that are no UTF-8, and a blank file, which GitHub would delete.
+- A save of the visited file checks the forge first (`remoto--save-p`). The buffer keeps the file it read or wrote last with the hash of its bytes in the permanent local `remoto--base`; the save asks `remoto--forge-current-content` for the forge's bytes now. Equal to the bytes to save: no write, and the buffer is saved. Equal to the hash: the write goes. Changed: `read-multiple-choice` asks to overwrite, to diff (`remoto-diff-buffer-with-file`, then it asks again) or to quit. Gone: `y-or-n-p` asks to save it there again. A write that visits nothing, or a file the buffer never read, writes with no check.
+- A gist write is one `PATCH /gists/ID` of that file alone, through `remoto--api-write`; the answer becomes every cache's: the gist, its listing lines, and its tree, dropped, with the Dired buffers of gists reverted by a zero-delay timer once the command is over. "Wrote NAME" adds "(public gist)" for a public gist. A read of a file of one's own gist (a visit, `file-local-copy`, a copy out) trusts the cached gist for `remoto-gist--fresh-seconds`, 10, and a revert asks anew: another session or the website may have changed it. An answer with another revision drops the gist's tree, so its Dired shows what GitHub holds; the tree and attribute lookups that Dired and completion run keep the cache.
+- `delete-file`, `delete-directory` (a repository root, under RECURSIVE) and `rename-file` (inside one repository, asking as `rename-file` asks over an existing name) call the generics in a writable repository and refuse elsewhere; `set-file-modes` and `set-file-times` do nothing there.
+- `copy-file` to a remoto name still refuses.
+
+`remoto--api-write (forge method endpoint payload)` is the transport of a write: `ghub-request` with the token only, a `user-error` that names `remoto-login` without one, never the interruptible path of `while-no-input`. A refused token is replaced once, as for a read. A 400, 403, 404 or 422 says GitHub's `message` and `errors`; a request ended by `remoto-request-timeout` or by a quit says the write may have gone through.
 
 `copy-file` to a name outside remoto works, from a short name too. The copy comes from a temporary file of mode 600, so remoto gives it the git mode of the file, 755 for an executable and 644 for anything else, as `copy-file` gives a local copy the modes of its source: masked by the default file modes for a new file, unmasked under PRESERVE-PERMISSIONS, untouched for a file it overwrites.
 
@@ -325,6 +336,7 @@ ghub signals typed conditions for HTTP errors. `remoto--api` catches these and r
 - `remoto-browse` - prompt for a repo using standard `completing-read` with a programmed completion table (`remoto--repo-completion-table`), open dired at root or find-file for blob paths. It opens names and URLs of every registered forge: a prefix such as `/cb:` picks the forge, a URL names its own, and a bare `OWNER/REPO` goes to `remoto-default-forge` (see Forges). Type 3+ characters to search. Tab completes repo names. Append `@` to complete refs, `#` topics, `/` files. Works with any completion frontend (vertico, ivy, helm, vanilla Emacs). Search results are cached for `remoto-search-cache-ttl` seconds (default 300). Owner-scoped repo search shares `remoto-forge-complete` with `/github:` completion (results are reformatted from bare repo names to `owner/repo`), and the ⟳ indicator shows while searching and during the post-selection fetch (see Fetch indicator).
 - `remoto-refresh` - invalidate tree and branch caches for current repo, re-fetch. Reverts dired buffer if in one. In a listing of `/github:` or `/github:OWNER/` it drops that listing and fetches it again; in a Dired of branches and tags it forgets the repository's branches and tags.
 - URL commands - `remoto-copy-url`, `remoto-copy-blame-url`, `remoto-copy-permalink`, `remoto-copy-raw-url`, `remoto-copy-history-url`, `remoto-browse-url` - and the `remoto-mode` minor mode. See "Forge-agnostic URL Layer" below. `remoto-copy-github-url` remains as an obsolete alias of `remoto-copy-url`.
+- `remoto-diff-buffer-with-file` - `diff-buffer-with-file` against the text the forge holds now: it asks `remoto--forge-current-content` first in a writable tree, binds `diff-use-labels` to t once `diff-command` proved to take `--label` (`remoto--diff-labels-p`, one run on the null device; Emacs looks for the option in `--help`, which macOS's diff leaves out), keeps that value local in the diff buffer for `g`, and diffs a file the forge lacks against the null device. `remoto-mode-map` remaps `diff-buffer-with-file` to it.
 
 ### find-file completion
 
@@ -458,7 +470,7 @@ A repo root is classified `remoto-repo` without resolving the ref or fetching th
 
 ### URL commands and `remoto-mode`
 
-`remoto-copy-url` (obsoletes `remoto-copy-github-url`), `remoto-copy-blame-url`, `remoto-copy-permalink` (resolves ref -> commit SHA), `remoto-copy-raw-url`, `remoto-copy-history-url`, `remoto-browse-url`. All work in file buffers (current line / active region) and in Dired (entry at point, falling back to the directory). `remoto-mode` is a buffer-local minor mode auto-enabled in remoto buffers via `find-file-hook` / `dired-mode-hook`; its keymap is empty by default to avoid the user-reserved `C-c LETTER` space. The commands are grouped in the prefix keymap `remoto-command-map`, which users bind to a prefix of their choosing.
+`remoto-copy-url` (obsoletes `remoto-copy-github-url`), `remoto-copy-blame-url`, `remoto-copy-permalink` (resolves ref -> commit SHA), `remoto-copy-raw-url`, `remoto-copy-history-url`, `remoto-browse-url`. All work in file buffers (current line / active region) and in Dired (entry at point, falling back to the directory). `remoto-mode` is a buffer-local minor mode auto-enabled in remoto buffers via `find-file-hook` / `dired-mode-hook`; its keymap binds no key, to avoid the user-reserved `C-c LETTER` space, and only remaps Dired's commands that go up a level and `diff-buffer-with-file`. In a remoto file buffer it also makes `file-precious-flag` and `auto-save-visited-mode` buffer-local nil: a precious save would write a temporary file beside the file, and the idle save would write to the forge. The commands are grouped in the prefix keymap `remoto-command-map`, which users bind to a prefix of their choosing.
 
 ## Embark Integration (remoto-embark.el)
 
@@ -542,7 +554,7 @@ project.el asks `file-remote-p` of every root it reads, writes and prunes, and r
 
 ## Limitations
 
-- Read-only. No commits, no pushes, no file modifications.
+- Read-only, except the files of the user's own gists. No commits, no pushes.
 - No git operations (log, blame, diff). These would require either `libgit2` or many API calls.
 - Timestamps in dired are synthetic (the tree API has no timestamps).
 - Very large repos (100k+ files) use slower per-directory fetching.

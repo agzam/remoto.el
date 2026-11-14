@@ -118,7 +118,7 @@ Auth works as on Codeberg: ~M-x remoto-login~ names each server by its host, and
 
 *** Auth
 
-Public gists need no setup. ~/gist:~ itself, which lists your gists and the ones you starred, needs your GitHub token: the same ~machine github.com~ row, or ~M-x remoto-login~. Your secret gists also need the ~gist~ scope on that token.
+Public gists need no setup. ~/gist:~ itself, which lists your gists and the ones you starred, needs your GitHub token: the same ~machine github.com~ row, or ~M-x remoto-login~. Your secret gists, and saving to any of your gists, also need the ~gist~ scope on that token.
 
 *** Usage Examples
 
@@ -135,6 +135,14 @@ A gist's files are at ~/gist:OWNER/ID:/FILE~. Dired and completion keep the id o
 ~M-x remoto-browse~ takes a gist's page URL, raw URL and clone URLs. The copy and browse commands give a gist's page, raw, revisions and clone URLs, and a permalink at its latest revision.
 
 A gist opens at its latest revision; revisions, comments and search stay on the website.
+
+*** Editing your gists
+
+The files of your own gists open writable; the gists of other accounts, starred ones included, stay read-only. ~C-x C-s~ (or ~:w~) saves the file to GitHub. The echo area says "(public gist)" after a save to a public gist: each of its saves is a public revision.
+
+If the file changed on GitHub since you opened it, remoto asks before the save goes over it: overwrite, see the diff, or quit. ~M-x remoto-diff-buffer-with-file~ shows the buffer against the text GitHub holds now, and in remoto buffers a key bound to ~diff-buffer-with-file~ runs it. ~revert-buffer~ reads the file from GitHub anew.
+
+A gist keeps UTF-8 text only: a binary file stays read-only, and a buffer in another coding system asks for ~C-x RET f utf-8~ first. A blank file is not saved, since GitHub would delete it.
 
 #+HTML: </details>
 
@@ -227,7 +235,7 @@ We can only imagine a world where git's transport layer gives you a browsable fi
 
 ** Limitations
 
-- Read-only. No commits, no pushes, no file modifications. You still can copy them out.
+- Repositories are read-only: no commits, no pushes, no file modifications. You still can copy files out. The files of your own gists are the exception (see Gists).
 - No git operations (log, blame, diff).
 - No programs run against a repository: grep, ripgrep, compile and ~project-find-regexp~ need a clone. In-buffer search (isearch, occur) works on opened files.
 - Timestamps in a repository's Dired are synthetic (the tree API has no timestamps); a listing of repositories shows their last push.

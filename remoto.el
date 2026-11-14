@@ -51,6 +51,7 @@
 (require 'iso8601)
 (require 'project)
 (require 'url-http)
+(eval-when-compile (require 'diff))
 
 ;;;; Forges
 
@@ -2462,6 +2463,16 @@ wildcard and completion matches its own name."
 
 ;;;; File contents
 
+(defvar-local remoto--base nil
+  "The file the buffer read or wrote last, and the hash of its bytes then.
+A save of that file compares the forge's bytes with it first.  A change of
+major mode or of the visited name keeps it.")
+(put 'remoto--base 'permanent-local t)
+
+(defvar remoto--read-anew nil
+  "Non-nil while a read is to ask the forge anew rather than trust a cache.
+`insert-file-contents' binds it for a REPLACE, which a revert asks for.")
+
 (defun remoto--relative-path (path)
   "Strip leading slash from PATH for API requests."
   (if (string-prefix-p "/" path) (substring path 1) path))
@@ -2521,12 +2532,13 @@ VISIT, BEG, END, REPLACE as per `insert-file-contents'."
               (list "Opening input file" "No such file or directory" filename)))
     (let* ((resolved (remoto--resolve-ref parsed))
            (path (remoto--relative-path (remoto-path-path resolved)))
-           (bytes (remoto-forge-content
-                   (remoto-path-forge resolved)
-                   (remoto-path-owner resolved)
-                   (remoto-path-repo resolved)
-                   (remoto-path-ref resolved)
-                   path)))
+           (bytes (let ((remoto--read-anew replace))
+                    (remoto-forge-content
+                     (remoto-path-forge resolved)
+                     (remoto-path-owner resolved)
+                     (remoto-path-repo resolved)
+                     (remoto-path-ref resolved)
+                     path))))
       (when replace (erase-buffer))
       (let ((pt (point))
             len)
@@ -2548,6 +2560,7 @@ VISIT, BEG, END, REPLACE as per `insert-file-contents'."
           (setq buffer-file-name filename)
           ;; As `after-find-file' does, which a literal visit skips.
           (setq buffer-read-only (not (remoto--handle-file-writable-p filename)))
+          (setq remoto--base (cons filename (secure-hash 'sha1 bytes)))
           (set-buffer-modified-p nil)
           (set-visited-file-modtime 0))
         (list filename len)))))
@@ -3294,6 +3307,20 @@ non-nil for a repository anyone may find."
   "Delete the repository OWNER/REPO of FORGE and every file in it."
   (remoto--read-only))
 
+(cl-defgeneric remoto--forge-check-write (_forge _owner _repo _ref _path _bytes)
+  "Signal a `user-error' when FORGE cannot keep BYTES as PATH of OWNER/REPO.
+REF is the ref of PATH.  A save asks this before it reads the forge's
+text, so a refusal costs no request."
+  nil)
+
+(cl-defgeneric remoto--forge-current-content (forge owner repo ref path)
+  "Return the bytes of PATH of OWNER/REPO at REF as they are on FORGE now.
+Nil means no such file.  A save compares them with the bytes its buffer
+read; the default reads the cache, as the content of a ref stays."
+  (condition-case nil
+      (remoto-forge-content forge owner repo ref path)
+    (user-error nil)))
+
 (defun remoto--write-target (filename)
   "Return (FORGE OWNER REPO REF PATH) of FILENAME if the user may write it.
 PATH is relative to the root of the repository.  A name above a
@@ -3333,17 +3360,59 @@ so the coding system and `last-coding-system-used' are its own."
             (buffer-string)))
       (delete-file copy))))
 
-(defun remoto--handle-write-region (start end filename &optional append _visit
+(defun remoto--ask-overwrite (filename title)
+  "Ask whether to save FILENAME over the text on TITLE now.
+Return non-nil to save; the diff shows the change, then asks again."
+  (pcase (car (read-multiple-choice
+               (format "%s changed on %s since you read it"
+                       (file-name-nondirectory filename) title)
+               '((?o "overwrite" "Save over the text the forge holds")
+                 (?d "diff" "Show the buffer against the text the forge holds")
+                 (?q "quit" "Keep the forge's text and the buffer's edits"))))
+    (?o t)
+    (?d (remoto-diff-buffer-with-file (current-buffer))
+        (remoto--ask-overwrite filename title))
+    (_ (user-error "Remoto: %s not saved; it changed on %s" filename title))))
+
+(defun remoto--save-p (target filename bytes)
+  "Return non-nil when the save of BYTES to FILENAME, at TARGET, is to write.
+The forge's bytes now decide: BYTES already, no write; changed since the
+buffer read them, or gone, a question first."
+  (pcase-let* ((`(,forge ,owner ,repo ,ref ,path) target)
+               (now (remoto--forge-current-content forge owner repo ref path))
+               (base (and (equal (car remoto--base) filename) (cdr remoto--base)))
+               (title (remoto-forge-title forge)))
+    (cond ((equal now bytes) nil)
+          ((null base) t)
+          ((null now)
+           (or (y-or-n-p (format "%s is gone from %s; save it there again? "
+                                 (file-name-nondirectory filename) title))
+               (user-error "Remoto: %s not saved; it is gone from %s" filename title)))
+          ((equal (secure-hash 'sha1 now) base) t)
+          (t (remoto--ask-overwrite filename title)))))
+
+(defun remoto--handle-write-region (start end filename &optional append visit
                                           _lockname mustbenew)
   "Write START to END into FILENAME, a file the user may write.
-APPEND and MUSTBENEW as `write-region' takes them.  Anywhere else the
-write refuses, as a repository of a forge does."
-  (pcase-let ((`(,forge ,owner ,repo ,ref ,path) (or (remoto--write-target filename)
-                                                       (remoto--read-only))))
+APPEND, VISIT and MUSTBENEW as `write-region' takes them.  A save of the
+visited file checks the forge's text first; elsewhere the write refuses."
+  (let ((target (or (remoto--write-target filename) (remoto--read-only)))
+        (visiting (or (eq visit t) (stringp visit))))
     (when (and (eq mustbenew 'excl) (file-exists-p filename))
       (signal 'file-already-exists (list "File already exists" filename)))
-    (remoto--forge-write forge owner repo ref path
-                         (remoto--region-bytes start end filename append))))
+    (let ((bytes (remoto--region-bytes start end filename append)))
+      (apply #'remoto--forge-check-write (append target (list bytes)))
+      (cond ((not visiting) (apply #'remoto--forge-write (append target (list bytes))))
+            ((remoto--save-p target filename bytes)
+             (let ((note (apply #'remoto--forge-write (append target (list bytes)))))
+               (unless noninteractive
+                 (message "Wrote %s%s" filename (or note "")))))
+            ((not noninteractive)
+             (message "Remoto: %s holds this text already" filename)))
+      (when visiting
+        (setq remoto--base (cons (if (stringp visit) visit filename)
+                                 (secure-hash 'sha1 bytes))))
+      nil)))
 
 (defun remoto--handle-delete-file (filename &optional _trash)
   "Delete FILENAME, a file the user may write, else refuse.
@@ -4654,15 +4723,52 @@ Bind it as a unit under a prefix of your choice, e.g.:
     (keymap-set remoto-mode-map \"C-c g\" remoto-command-map))")
 (defalias 'remoto-command-map remoto-command-map)
 
+(defvar remoto--diff-labels 'unknown
+  "Whether `diff-command' takes --label: t, nil, or `unknown' until asked.")
+
+(defun remoto--diff-labels-p ()
+  "Return non-nil when `diff-command' takes --label, asking it once.
+Emacs looks for --label in its --help, which the diff of macOS leaves out."
+  (when (eq remoto--diff-labels 'unknown)
+    (setq remoto--diff-labels
+          (let ((default-directory temporary-file-directory))
+            (eql 0 (ignore-errors
+                     (call-process diff-command nil nil nil "--label" "a" "--label" "b"
+                                   null-device null-device))))))
+  remoto--diff-labels)
+
+;;;###autoload
+(defun remoto-diff-buffer-with-file (&optional buffer)
+  "Show how BUFFER differs from its file as it is on the forge now.
+As `diff-buffer-with-file', with headers that name the file and the buffer
+where `diff-command' takes labels.  A file the forge lacks yet shows
+every line added.  Return the buffer of the diff."
+  (interactive (list (read-buffer "Diff buffer with file: " (current-buffer) t)))
+  (require 'diff)
+  (with-current-buffer (get-buffer (or buffer (current-buffer)))
+    (let* ((file (or buffer-file-name (user-error "Buffer is not visiting a file")))
+           (labels (if (remoto--diff-labels-p) t diff-use-labels))
+           (diff (progn
+                   (when-let* ((target (remoto--write-target file)))
+                     (apply #'remoto--forge-current-content target))
+                   (let ((diff-use-labels labels))
+                     (diff-no-select (if (file-exists-p file) file null-device)
+                                     (current-buffer) nil 'noasync)))))
+      (with-current-buffer diff
+        (setq-local diff-use-labels labels))
+      (display-buffer diff)
+      diff)))
+
 (defvar remoto-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map [remap dired-up-directory] #'remoto-dired-up-directory)
     (define-key map [remap dired-jump] #'remoto-dired-jump)
     (define-key map [remap dired-jump-other-window] #'remoto-dired-jump-other-window)
+    (define-key map [remap diff-buffer-with-file] #'remoto-diff-buffer-with-file)
     map)
   "Keymap for `remoto-mode'.
-It binds no key: it remaps the Dired commands that go up a level to
-remoto's, which know the levels above a repository.  Bind the variable
+It binds no key: it remaps the Dired commands that go up a level, and
+`diff-buffer-with-file', to remoto's.  Bind the variable
 `remoto-command-map' to a prefix key in it for the URL commands.")
 
 ;;;###autoload
