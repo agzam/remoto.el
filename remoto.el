@@ -51,7 +51,7 @@
 (require 'iso8601)
 (require 'project)
 (require 'url-http)
-(eval-when-compile (require 'diff))
+(require 'diff)
 
 ;;;; Forges
 
@@ -3205,9 +3205,11 @@ or /github:OWNER/REPO@/REF."
 (defun remoto--handle-make-directory (dir &optional _parents)
   "Ignore existing DIR and signal an error otherwise.
 Any name below an owner is a directory by its shape, so it must exist
-too, or Dired adds a line for the repository that `+' did not create."
+too, or Dired adds a line for the repository that `+' did not create.
+Where the user may write, the forge says why it keeps no directory."
   (unless (and (remoto--handle-file-directory-p dir)
                (remoto--handle-file-exists-p dir))
+    (remoto--check-directory dir)
     (user-error "Remoto: repository is read-only")))
 
 (defun remoto--handle-abbreviate-file-name (filename)
@@ -3432,26 +3434,72 @@ directory refuses, as a repository of a forge does."
        (signal 'file-error (list "Removing directory" "Directory not empty" directory))))
     (_ (remoto--read-only))))
 
+(defun remoto--check-directory (dir)
+  "Ask the forge of DIR, a name where the user may write, to refuse a directory."
+  (when-let* ((target (remoto--write-target dir)))
+    (apply #'remoto--forge-check-write
+           (append (butlast target) (list (concat (car (last target)) "/") "")))))
+
+(defun remoto--rebase (file newname)
+  "Move the base of the buffer that visits FILE to NEWNAME, now with its text."
+  (when-let* ((buffer (get-file-buffer file)))
+    (with-current-buffer buffer
+      (when (equal (car remoto--base) file)
+        (setq remoto--base (cons newname (cdr remoto--base)))))))
+
+(defun remoto--move (file newname ok-if-already-exists)
+  "Move FILE to NEWNAME as a copy, then a deletion: two places, two writes.
+OK-IF-ALREADY-EXISTS as `rename-file' takes it.  A failed deletion leaves
+the file in both places, and the message says so."
+  (copy-file file newname ok-if-already-exists)
+  (condition-case err
+      (delete-file file)
+    (error (user-error "Remoto: copied %s to %s, but %s stays: %s"
+                       file newname file (error-message-string err))))
+  (remoto--rebase file newname))
+
 (defun remoto--handle-rename-file (file newname &optional ok-if-already-exists)
-  "Rename FILE to NEWNAME inside one repository the user may write.
-OK-IF-ALREADY-EXISTS as `rename-file' takes it.  A move between
-repositories, or to or from a local name, refuses."
+  "Rename FILE to NEWNAME, a move the user may make at both ends.
+OK-IF-ALREADY-EXISTS as `rename-file' takes it.  Inside one repository
+the forge renames; between repositories, or to or from a local name, the
+move is a copy and a deletion.  Elsewhere it refuses."
   (let ((from (remoto--write-target file))
         (to (remoto--write-target newname)))
-    (unless (and from to (equal (butlast from) (butlast to)))
-      (remoto--read-only))
-    (remoto--barf-if-exists newname "rename to it" ok-if-already-exists)
-    (apply #'remoto--forge-rename (append from (last to)))))
+    (cond ((and from to (equal (butlast from) (butlast to)))
+           (remoto--barf-if-exists newname "rename to it" ok-if-already-exists)
+           (apply #'remoto--forge-rename (append from (last to)))
+           (remoto--rebase file newname))
+          ((and (or from (not (remoto--parse file)))
+                (or to (not (remoto--parse newname))))
+           (remoto--move file newname ok-if-already-exists))
+          (t (remoto--read-only)))))
+
+(defun remoto--copy-in (file newname target ok-if-already-exists)
+  "Copy FILE, local or of a forge, to NEWNAME at TARGET, where the user may write.
+OK-IF-ALREADY-EXISTS as `copy-file' takes it.  The forge refuses what it
+cannot keep before any request, a directory included."
+  (when (file-directory-p file)
+    (remoto--check-directory newname))
+  (remoto--barf-if-exists newname "copy to it" ok-if-already-exists)
+  (let ((bytes (with-temp-buffer
+                 (set-buffer-multibyte nil)
+                 (insert-file-contents-literally file)
+                 (buffer-string))))
+    (apply #'remoto--forge-check-write (append target (list bytes)))
+    (apply #'remoto--forge-write (append target (list bytes)))
+    nil))
 
 (defun remoto--handle-copy-file (file newname
                                       &optional ok-if-already-exists keep-time
                                       preserve-uid-gid preserve-permissions)
-  "Copy FILE to NEWNAME outside remoto, as `copy-file' copies a local file.
-OK-IF-ALREADY-EXISTS, KEEP-TIME and PRESERVE-UID-GID go to `copy-file'.
-A new copy, and any under PRESERVE-PERMISSIONS, gets the git mode of FILE
-rather than the mode of the temporary file it comes from."
-  (if (remoto--parse-path newname)
-      (remoto--read-only 'copy-file file newname)
+  "Copy FILE to NEWNAME, outside remoto or where the user may write.
+Outside, as `copy-file' copies a local file: OK-IF-ALREADY-EXISTS, KEEP-TIME
+and PRESERVE-UID-GID go to it, and a new copy, or one under
+PRESERVE-PERMISSIONS, gets the git mode of FILE.  Inside, see `remoto--copy-in'."
+  (if-let* ((target (remoto--write-target newname)))
+      (remoto--copy-in file newname target ok-if-already-exists)
+    (when (remoto--parse-path newname)
+      (remoto--read-only 'copy-file file newname))
     (let* ((file (remoto--maybe-rewrite file))
            (local-copy (remoto--handle-file-local-copy file))
            (new (not (file-exists-p newname))))
@@ -4388,13 +4436,15 @@ them for an empty QUERY; DIR is /github:OWNER/REPO@.  Signal a
   "Return (DIR . NAMES) when the canonical FILENAME is missing from its tree.
 NAMES are the entries of its directory DIR that hold each word of its
 name, in the order of the Dired's ls options.  A name with a trailing
-slash or a wildcard is no query; one that nothing matches is a new file."
+slash or a wildcard is no query; one that nothing matches, or one where
+the user may write, is a new file."
   (when-let* ((parsed (remoto--parse-path filename))
               (path (remoto-path-path parsed))
               (name (file-name-nondirectory path))
               ((not (string-empty-p name)))
               ((not (string-match-p "[[*?]" name)))
               ((not (remoto--tree-entry parsed)))
+              ((not (remoto--write-target filename)))
               (dir (concat (remoto--file-name-prefix filename)
                            (or (file-name-directory path) "/")))
               (dir-parsed (remoto--parse-path dir))
@@ -4744,7 +4794,6 @@ As `diff-buffer-with-file', with headers that name the file and the buffer
 where `diff-command' takes labels.  A file the forge lacks yet shows
 every line added.  Return the buffer of the diff."
   (interactive (list (read-buffer "Diff buffer with file: " (current-buffer) t)))
-  (require 'diff)
   (with-current-buffer (get-buffer (or buffer (current-buffer)))
     (let* ((file (or buffer-file-name (user-error "Buffer is not visiting a file")))
            (labels (if (remoto--diff-labels-p) t diff-use-labels))
@@ -5429,6 +5478,8 @@ Each step is idempotent, so a second call while on is a no-op."
   (remoto--sync-inhibited remoto-inhibited-functions)
   (add-hook 'find-file-hook #'remoto--maybe-enable-mode)
   (add-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
+  ;; `write-file' into a forge makes a remoto buffer that no visit made.
+  (add-hook 'after-set-visited-file-name-hook #'remoto--maybe-enable-mode)
   ;; Clear the fetch indicator and reset in-flight state whenever a
   ;; minibuffer exits.
   (add-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
@@ -5449,6 +5500,7 @@ Each step is idempotent, so a second call while on is a no-op."
   (remoto--sync-inhibited nil)
   (remove-hook 'find-file-hook #'remoto--maybe-enable-mode)
   (remove-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
+  (remove-hook 'after-set-visited-file-name-hook #'remoto--maybe-enable-mode)
   (remove-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
   (when (timerp remoto--warm-auth-timer)
     (cancel-timer remoto--warm-auth-timer))

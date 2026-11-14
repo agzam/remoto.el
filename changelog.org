@@ -9,6 +9,7 @@ Changes to the project, following Keep a Changelog conventions.
 - the files of your own gists save to GitHub: ~C-x C-s~ sends the file, and the echo area says "(public gist)" after a save to a public one
 - a save asks before it goes over a change made on GitHub since you opened the file: overwrite, diff or quit
 - adds ~remoto-diff-buffer-with-file~ - the buffer against the text the forge holds now; in remoto buffers a key bound to ~diff-buffer-with-file~ runs it
+- in your own gist a new name at ~C-x C-f~ opens a new file, ~C-x C-w~ writes a buffer in, and Dired's ~C~, ~R~ and ~D~, wdired, ~copy-file~, ~rename-file~ and ~delete-file~ add, rename and delete its files; a move to another gist or a local directory is a copy and a deletion
 
 ** Changed
 - ~file-modes~ on a remoto file answers the modes its Dired line shows, such as 644 or 755, instead of nil

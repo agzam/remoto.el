@@ -142,7 +142,9 @@ The files of your own gists open writable; the gists of other accounts, starred 
 
 If the file changed on GitHub since you opened it, remoto asks before the save goes over it: overwrite, see the diff, or quit. ~M-x remoto-diff-buffer-with-file~ shows the buffer against the text GitHub holds now, and in remoto buffers a key bound to ~diff-buffer-with-file~ runs it. ~revert-buffer~ reads the file from GitHub anew.
 
-A gist keeps UTF-8 text only: a binary file stays read-only, and a buffer in another coding system asks for ~C-x RET f utf-8~ first. A blank file is not saved, since GitHub would delete it.
+~C-x C-f~ a new name in your gist and the first save adds the file; ~C-x C-w~ writes any buffer into a gist. Dired's ~C~ copies files in, from a local directory or any repository, ~R~ and ~C-x x r~ rename, and ~D~ deletes a file, which stays in the gist's revisions. wdired edits the names in a gist's Dired. A rename to another gist, or to or from a local directory, is a copy and a deletion.
+
+A gist keeps UTF-8 text only: a binary file stays read-only, and a buffer in another coding system asks for ~C-x RET f utf-8~ first. A gist is flat and holds no blank file, since GitHub would delete it: a name with a slash, a directory and an empty file are refused. GitHub keeps the last file of a gist.
 
 #+HTML: </details>
 

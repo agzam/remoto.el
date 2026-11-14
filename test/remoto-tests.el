@@ -1596,15 +1596,23 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
               "File /writer:me/r:/b.txt already exists; rename to it anyway? ")
       (expect remoto-test--writes :to-be nil)))
 
-  (it "refuse a rename between repositories, to or from a local name, or of another's file"
+  (it "refuse a rename with an end the user may not write"
     (remoto-test-with-writer
-      (dolist (names '(("/writer:me/r:/a.txt" "/writer:me/s:/a.txt")
-                       ("/writer:me/r:/a.txt" "/tmp/remoto-test-a.txt")
-                       ("/tmp/remoto-test-a.txt" "/writer:me/r:/c.txt")
-                       ("/writer:other/r:/a.txt" "/writer:other/r:/c.txt")))
+      (dolist (names '(("/writer:other/r:/a.txt" "/writer:other/r:/c.txt")
+                       ("/writer:other/r:/a.txt" "/writer:me/r:/a.txt")
+                       ("/writer:me/r:/a.txt" "/writer:other/s:/a.txt")
+                       ("/github:testowner/testrepo@main:/README.md" "/tmp/remoto-test-a.txt")))
         (expect (condition-case err (apply #'rename-file names) (user-error (cadr err)))
                 :to-equal "Remoto: repository is read-only"))
       (expect remoto-test--writes :to-be nil)))
+
+  (it "move a file between repositories as a write there and a deletion here"
+    (remoto-test-with-writer
+      (spy-on 'remoto-forge-content :and-return-value "hi\n")
+      (rename-file "/writer:me/r:/a.txt" "/writer:me/s:/c.txt")
+      (expect (reverse remoto-test--writes)
+              :to-equal '((write "me" "s" nil "c.txt" "hi\n")
+                          (delete "me" "r" nil "a.txt")))))
 
   (it "delete a repository only when told to delete what it holds"
     (remoto-test-with-writer
@@ -11395,6 +11403,7 @@ of `completion-all-completions'; Vertico inserts a candidate as
             :to-be-truthy)
     (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be-truthy)
     (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be-truthy)
+    (expect (memq 'remoto--maybe-enable-mode after-set-visited-file-name-hook) :to-be-truthy)
     (expect (memq 'remoto--minibuffer-exit-cleanup minibuffer-exit-hook)
             :to-be-truthy))
 
@@ -11417,6 +11426,7 @@ of `completion-all-completions'; Vertico inserts a candidate as
                   :to-be nil)
           (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be nil)
           (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be nil)
+          (expect (memq 'remoto--maybe-enable-mode after-set-visited-file-name-hook) :to-be nil)
           (expect (memq 'remoto--minibuffer-exit-cleanup minibuffer-exit-hook)
                   :to-be nil))
       (global-remoto-mode 1)))
@@ -14115,7 +14125,7 @@ buffers are killed after."
           (erase-buffer)
           (insert " \n\t\n")
           (expect (condition-case err (save-buffer) (user-error (cadr err)))
-                  :to-match "cannot be blank; D in the Dired of the gist deletes it")
+                  :to-match "cannot be blank; D in the Dired of the gist deletes a\\.sh")
           (expect (remoto-test--gets "0a1b") :to-equal gets)
           (expect 'remoto--api-write :not :to-have-been-called)))))
 
@@ -14136,7 +14146,7 @@ buffers are killed after."
         (set-buffer-file-coding-system 'latin-1)
         (insert "é")
         (expect (condition-case err (save-buffer) (user-error (cadr err)))
-                :to-match "UTF-8 text only; C-x RET f utf-8")
+                :to-match "UTF-8 text only, so not a\\.sh; C-x RET f utf-8")
         (expect 'remoto--api-write :not :to-have-been-called))))
 
   (it "reads GitHub anew on a revert"
@@ -14201,6 +14211,180 @@ buffers are killed after."
       (remoto-mode 1)
       (expect (command-remapping 'diff-buffer-with-file) :to-be 'remoto-diff-buffer-with-file)
       (remoto-mode -1))))
+
+(describe "the files of one's own gist"
+  (it "opens a missing name as a new file, not as a Dired of the names that match"
+    (remoto-test-with-store
+      (spy-on 'message)
+      (let ((noninteractive nil))
+        (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a")
+          (expect buffer-file-name :to-equal "/gist:me/0a1b:/a")
+          (expect buffer-read-only :to-be nil)))
+      (expect 'message :to-have-been-called-with "%s" "(New file)")
+      (expect (buffer-local-value 'dired-directory (find-file-noselect "/gist:nikku/0e6f:/x"))
+              :to-equal '("/gist:nikku/0e6f:/" "x.md"))))
+
+  (it "adds the new file at its first save"
+    (remoto-test-with-store
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/c.sh")
+        (insert "echo c\n")
+        (save-buffer))
+      (expect (remoto-test--stored-text "0a1b" "c.sh") :to-equal "echo c\n")))
+
+  (it "takes a copy from a local file and from another forge, once per file"
+    (remoto-test-with-store
+      (let ((local (make-temp-file "remoto-test-" nil ".txt" "local\n")))
+        (unwind-protect
+            (progn
+              (copy-file local "/gist:me/0a1b:/l.txt")
+              (spy-on 'remoto-forge-content :and-return-value "readme\n")
+              (copy-file "/github:testowner/testrepo@main:/README.md" "/gist:me/0a1b:/r.md"))
+          (delete-file local)))
+      (expect (remoto-test--stored-text "0a1b" "l.txt") :to-equal "local\n")
+      (expect (remoto-test--stored-text "0a1b" "r.md") :to-equal "readme\n")
+      (expect (spy-calls-count 'remoto--api-write) :to-equal 2)))
+
+  (it "asks before a copy goes over a file the gist holds, as copy-file asks"
+    (remoto-test-with-store
+      (let ((local (make-temp-file "remoto-test-" nil ".sh" "new\n")))
+        (unwind-protect
+            (progn
+              (expect (copy-file local "/gist:me/0a1b:/a.sh") :to-throw 'file-already-exists)
+              (copy-file local "/gist:me/0a1b:/a.sh" t))
+          (delete-file local)))
+      (expect (remoto-test--stored-text "0a1b" "a.sh") :to-equal "new\n")))
+
+  (it "refuses a binary or an empty file by its name, and a directory"
+    (remoto-test-with-store
+      (let ((binary (make-temp-file "remoto-test-" nil ".bin"))
+            (empty (make-temp-file "remoto-test-" nil ".txt"))
+            (dir (make-temp-file "remoto-test-" t)))
+        (unwind-protect
+            (progn
+              (let ((coding-system-for-write 'no-conversion))
+                (write-region (unibyte-string #xff #xfe 0) nil binary))
+              (expect (condition-case err (copy-file binary "/gist:me/0a1b:/b.bin")
+                        (user-error (cadr err)))
+                      :to-match "UTF-8 text only, so not b\\.bin")
+              (expect (condition-case err (copy-file empty "/gist:me/0a1b:/e.txt")
+                        (user-error (cadr err)))
+                      :to-match "cannot be blank, so e\\.txt needs text first")
+              (expect (condition-case err (copy-file dir "/gist:me/0a1b:/d")
+                        (user-error (cadr err)))
+                      :to-match "no directories, so no d/"))
+          (delete-file binary)
+          (delete-file empty)
+          (delete-directory dir)))
+      (expect 'remoto--api-write :not :to-have-been-called)))
+
+  (it "writes a buffer into the gist with C-x C-w, which then visits it"
+    (remoto-test-with-store
+      (with-temp-buffer
+        (insert "echo w\n")
+        (write-file "/gist:me/0a1b:/w.sh")
+        (expect buffer-file-name :to-equal "/gist:me/0a1b:/w.sh")
+        (expect remoto-mode :to-be-truthy)
+        (set-visited-file-name nil))
+      (expect (remoto-test--stored-text "0a1b" "w.sh") :to-equal "echo w\n")))
+
+  (it "refuses a directory and an empty file with what to do"
+    (remoto-test-with-store
+      (expect (condition-case err (make-directory "/gist:me/0a1b:/dir")
+                (user-error (cadr err)))
+              :to-match "no directories, so no dir/")
+      (expect (condition-case err (make-empty-file "/gist:me/0a1b:/e.txt")
+                (user-error (cadr err)))
+              :to-match "cannot be blank, so e\\.txt needs text first")
+      (expect 'remoto--api-write :not :to-have-been-called)))
+
+  (it "renames a file in one PATCH that keeps its text"
+    (remoto-test-with-store
+      (rename-file "/gist:me/0a1b:/a.sh" "/gist:me/0a1b:/c.sh")
+      (expect (mapcar #'cdr (spy-calls-all-args 'remoto--api-write))
+              :to-equal '(("PATCH" "gists/0a1b" ((files (a.sh (filename . "c.sh")))))))
+      (expect (remoto-test--stored-text "0a1b" "a.sh") :to-be nil)
+      (expect (remoto-test--stored-text "0a1b" "c.sh") :to-equal "echo a\n")))
+
+  (it "renames over a name the gist holds as the text under it, the old name gone"
+    (remoto-test-with-store
+      (expect (rename-file "/gist:me/0a1b:/a.sh" "/gist:me/0a1b:/b.sh")
+              :to-throw 'file-already-exists)
+      (rename-file "/gist:me/0a1b:/a.sh" "/gist:me/0a1b:/b.sh" t)
+      (expect (mapcar #'cdr (spy-calls-all-args 'remoto--api-write))
+              :to-equal '(("PATCH" "gists/0a1b"
+                           ((files (b.sh (content . "echo a\n")) (a.sh . :null))))))
+      (expect (remoto-test--stored-text "0a1b" "b.sh") :to-equal "echo a\n")
+      (expect (remoto-test--stored-text "0a1b" "a.sh") :to-be nil)))
+
+  (it "refuses a name with a slash, a gist being flat, before any request"
+    (remoto-test-with-store
+      (expect (condition-case err (rename-file "/gist:me/0a1b:/a.sh" "/gist:me/0a1b:/d/a.sh")
+                (user-error (cadr err)))
+              :to-match "no directories, so no d/a\\.sh")
+      (expect 'remoto--api-write :not :to-have-been-called)))
+
+  (it "keeps the base of a renamed visiting buffer, so its next save still checks"
+    (remoto-test-with-store
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+        (rename-file buffer-file-name "/gist:me/0a1b:/c.sh")
+        (set-visited-file-name "/gist:me/0a1b:/c.sh" t t)
+        (remoto-test--github-edits "0a1b" "c.sh" "echo theirs\n")
+        (insert "x")
+        (spy-on 'read-multiple-choice :and-return-value '(?q "quit"))
+        (expect (save-buffer) :to-throw 'user-error)
+        (expect 'read-multiple-choice :to-have-been-called))))
+
+  (it "moves a file to another gist, and to and from a local file, as a copy and a deletion"
+    (remoto-test-with-store
+      (let ((local (make-temp-file "remoto-test-" nil ".sh")))
+        (delete-file local)
+        (unwind-protect
+            (progn
+              (rename-file "/gist:me/0a1b:/a.sh" "/gist:me/0c3d:/a.sh")
+              (expect (remoto-test--stored-text "0c3d" "a.sh") :to-equal "echo a\n")
+              (expect (remoto-test--stored-text "0a1b" "a.sh") :to-be nil)
+              (rename-file "/gist:me/0c3d:/a.sh" local)
+              (expect (with-temp-buffer (insert-file-contents local) (buffer-string))
+                      :to-equal "echo a\n")
+              (expect (remoto-test--stored-text "0c3d" "a.sh") :to-be nil)
+              (rename-file local "/gist:me/0a1b:/c.sh")
+              (expect (remoto-test--stored-text "0a1b" "c.sh") :to-equal "echo a\n")
+              (expect (file-exists-p local) :to-be nil))
+          (when (file-exists-p local) (delete-file local))))))
+
+  (it "says a move that failed after its copy left the file in both places"
+    (remoto-test-with-store
+      (spy-on 'remoto--forge-delete :and-call-fake
+              (lambda (&rest _) (user-error "Remoto: api.github.com answered 500")))
+      (expect (condition-case err (rename-file "/gist:me/0a1b:/a.sh" "/gist:me/0c3d:/a.sh")
+                (user-error (cadr err)))
+              :to-match "copied .* but /gist:me/0a1b:/a\\.sh stays")))
+
+  (it "refuses a rename of a gist's line in a listing, or of another's file"
+    (remoto-test-with-store
+      (dolist (names '(("/gist:me/0a1b" "/gist:me/renamed")
+                       ("/gist:nikku/0e6f:/x.md" "/gist:nikku/0e6f:/y.md")))
+        (expect (condition-case err (apply #'rename-file names) (user-error (cadr err)))
+                :to-equal "Remoto: repository is read-only"))
+      (expect 'remoto--api-write :not :to-have-been-called)))
+
+  (it "deletes a file in one PATCH, and a missing one with none"
+    (remoto-test-with-store
+      (delete-file "/gist:me/0a1b:/a.sh")
+      (delete-file "/gist:me/0a1b:/gone.sh")
+      (expect (mapcar #'cdr (spy-calls-all-args 'remoto--api-write))
+              :to-equal '(("PATCH" "gists/0a1b" ((files (a.sh . :null))))))
+      (expect (remoto-test--stored-text "0a1b" "b.sh") :to-equal "echo b\n")))
+
+  (it "deletes a file from the gist's Dired with D"
+    (remoto-test-with-store
+      (with-current-buffer (dired-noselect "/gist:me/0a1b:/")
+        (dired-goto-file "/gist:me/0a1b:/a.sh")
+        (let ((dired-deletion-confirmer #'always))
+          (dired-do-delete))
+        (accept-process-output nil 0.05)
+        (expect (remoto-test--dired-names) :to-equal '("." ".." "b.sh")))
+      (expect (remoto-test--stored-text "0a1b" "a.sh") :to-be nil))))
 
 (describe "the token page that remoto-login opens"
   (it "ticks the gist scope, which secret gists need, for GitHub and its gists alike"

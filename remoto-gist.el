@@ -292,19 +292,26 @@ Return the gist as GitHub answers it, which every cache takes."
                                                  (concat "gists/" (url-hexify-string id))
                                                  `((files . ,files)))))
 
-(defun remoto-gist--text (path bytes)
+(defun remoto-gist--flat (path)
+  "Refuse PATH, the name of a gist file, with a slash in it: a gist is flat."
+  (when (string-search "/" path)
+    (user-error "Remoto: a gist has no directories, so no %s" path)))
+
+(defun remoto-gist--text (path bytes &optional exists)
   "Return BYTES, the new content of the gist file PATH, as the API takes it.
 Refuse what GitHub refuses or turns into a deletion: a name with a slash,
-bytes that are no UTF-8, and a blank file."
+bytes that are no UTF-8, and a blank file, whose deletion, when the file
+EXISTS, the message names."
   (let ((text (decode-coding-string bytes 'utf-8-unix)))
-    (cond ((string-search "/" path)
-           (user-error "Remoto: a gist has no directories, so no %s" path))
-          ((string-match-p "[\200-\377]" text)
-           (user-error "%s" (substitute-command-keys "Remoto: a gist keeps UTF-8 text only; \
-\\[set-buffer-file-coding-system] utf-8, then save")))
-          ((string-match-p "\\`[ \t\n\r\f\v]*\\'" text)
-           (user-error "Remoto: a gist file cannot be blank; D in the Dired of the gist deletes it"))
-          (t text))))
+    (remoto-gist--flat path)
+    (cond ((string-match-p "[\200-\377]" text)
+           (user-error "%s" (format (substitute-command-keys "Remoto: a gist keeps UTF-8 text \
+only, so not %s; \\[set-buffer-file-coding-system] utf-8 recodes a buffer")
+                                    path)))
+          ((not (string-match-p "\\`[ \t\n\r\f\v]*\\'" text)) text)
+          (exists (user-error "Remoto: a gist file cannot be blank; D in the Dired of the \
+gist deletes %s" path))
+          (t (user-error "Remoto: a gist file cannot be blank, so %s needs text first" path)))))
 
 (defun remoto-gist--binary-p (id path)
   "Return non-nil when PATH of the cached gist ID is in base64, a binary file."
@@ -318,10 +325,42 @@ OWNER and ID name the gist, PATH the file."
   (and id (remoto-gist--mine-p forge owner)
        (not (remoto-gist--binary-p id path))))
 
-(cl-defmethod remoto--forge-check-write ((_forge remoto-gist) _owner _id _ref path bytes)
-  "Refuse BYTES as the gist file PATH where GitHub would, before any request."
-  (remoto-gist--text path bytes)
+(cl-defmethod remoto--forge-check-write ((_forge remoto-gist) _owner id _ref path bytes)
+  "Refuse BYTES as the file PATH of the gist ID where GitHub would.
+It costs no request: the cached gist tells whether PATH exists."
+  (remoto-gist--text path bytes
+                     (assoc path (remoto-gist--files (gethash id remoto-gist--gists))))
   nil)
+
+(cl-defmethod remoto--forge-rename ((forge remoto-gist) owner id _ref path newpath)
+  "Rename the file PATH of the gist ID of OWNER on FORGE to NEWPATH, one PATCH.
+Over a name the gist holds, the text goes under NEWPATH and PATH goes: a
+rename there would copy the text and keep both names."
+  (remoto-gist--flat newpath)
+  (let* ((files (remoto-gist--files (remoto-gist--get forge owner id 0)))
+         (file (or (cdr (assoc path files))
+                   (signal 'file-missing (list "Renaming" "No such file or directory" path)))))
+    (unless (equal path newpath)
+      (remoto-gist--patch
+       forge id
+       (if (assoc newpath files)
+           `((,(intern newpath) . ((content . ,(remoto-gist--text
+                                                  newpath (remoto-gist--bytes file) t))))
+             (,(intern path) . :null))
+         `((,(intern path) . ((filename . ,newpath))))))))
+  nil)
+
+(cl-defmethod remoto--forge-delete ((forge remoto-gist) owner id _ref path)
+  "Delete the file PATH of the gist ID of OWNER on FORGE, in one PATCH.
+It stays in the gist's revisions.  GitHub keeps the last file of a gist,
+which goes only with the gist; a file the gist lacks needs no request."
+  (let ((files (remoto-gist--files (remoto-gist--get forge owner id 0))))
+    (cond ((not (assoc path files)) nil)
+          ((null (cdr files))
+           (user-error "Remoto: GitHub keeps the last file of a gist; D on the line \
+of the gist deletes it"))
+          (t (remoto-gist--patch forge id `((,(intern path) . :null)))
+             nil))))
 
 (cl-defmethod remoto--forge-current-content ((forge remoto-gist) owner id _ref path)
   "The bytes of PATH in the gist ID of OWNER on FORGE, asked for anew, or nil."
