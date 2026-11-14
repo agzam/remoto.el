@@ -3,7 +3,7 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
-* [Unreleased]
+* [2.8.0] - 2026-11-14
 
 ** Added
 - adds GitHub gists - ~/gist:~
@@ -14,12 +14,19 @@ Changes to the project, following Keep a Changelog conventions.
 - ~remoto-browse~ opens names and URLs of every registered forge, ~/cb:~ input included
 - adds ~remoto-default-forge~ - the forge a bare ~OWNER/REPO~ in ~remoto-browse~ names, ~github~ by default
 - ~remoto-browse~ opens more GitHub input: ~/gh:~ and canonical paths, owner and root URLs, ~github.com/OWNER/REPO~
+- a gist's page URL at ~C-x C-f~ or ~C-x d~ opens the gist
+- adds ~remoto-request-timeout~ - seconds a forge may send nothing before remoto ends the request, 30 by default
 
 ** Changed
 - ~M-x remoto-login~ asks GitHub for the ~gist~ scope too, which secret gists need
 - copy and browse commands refuse a URL kind a forge lacks with one message: "Remoto: TITLE has no KIND URL"
 - TRAMP leaves remoto prefixes alone while ~global-remoto-mode~ is on
 - for source authors: the forge contract is 18 methods, described in SPEC.md
+- ~C-x p R~ in a file opens the forge's copy at the same code, the region's lines marked; in ~magit-refs~ it starts at the ref at point
+- ~^~, ~C-x C-j~ and ~C-x 4 C-j~ at a repository's root or in a Dired of its refs go up to the owner's listing, point on the repository
+
+** Fixed
+- a dead connection, as after sleep or a network change, no longer freezes Emacs until ~C-g~: the request ends with a message
 
 * [2.7.0] - 2026-11-01
 
