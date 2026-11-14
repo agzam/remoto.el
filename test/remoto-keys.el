@@ -548,6 +548,15 @@ Pending input cancels a fetch, so Embark and keys after a submit wait."
       ('(pause) (sleep-for remoto-keys--pause)
        (remoto-keys--wait-idle name 20)))))
 
+(defun remoto-keys--begin (name)
+  "Reset the Emacs of NAME for a case, a minibuffer left open closed first."
+  ;; One C-g at a time: two into a busy Emacs make an emergency escape.
+  (dotimes (_ 3)
+    (when (ignore-errors (remoto-keys--eval name '(and (active-minibuffer-window) t)))
+      (remoto-keys--tmux "send-keys" "-t" (remoto-keys--target name) "C-g")
+      (remoto-keys--wait-idle name 5)))
+  (remoto-keys--eval name '(remoto-keys-reset)))
+
 (defun remoto-keys--run (name case profile &optional continue)
   "Run CASE, (LABEL BINDINGS . PARTS), in the profile NAME of PROFILE.
 CONTINUE types into what the last case left, instead of after a reset.
@@ -555,12 +564,7 @@ Return a plist of the label, seconds, a note, the line and the state."
   (pcase-let ((`(,label ,_bindings . ,parts) case))
     (if continue
         (remoto-keys--eval name '(remoto-keys-mark))
-      ;; One C-g at a time: two into a busy Emacs make an emergency escape.
-      (dotimes (_ 3)
-        (when (ignore-errors (remoto-keys--eval name '(and (active-minibuffer-window) t)))
-          (remoto-keys--tmux "send-keys" "-t" (remoto-keys--target name) "C-g")
-          (remoto-keys--wait-idle name 5)))
-      (remoto-keys--eval name '(remoto-keys-reset)))
+      (remoto-keys--begin name))
     (remoto-keys--wait-for-search)
     (let ((start (float-time)))
       (remoto-keys--type name (remoto-keys--steps parts profile))
@@ -861,7 +865,8 @@ A batch Emacs exits 255 on an error nothing catches, before any results."
 ;;; Mock Forgejo
 
 (defvar remoto-keys--fault "none"
-  "What the mock Forgejo answers: \"none\" passes codeberg.org's answer on.")
+  "What the mock Forgejo answers: \"none\" passes codeberg.org's answer on.
+\"hang\" reads the request and sends nothing, the connection kept.")
 
 (defconst remoto-keys--faults
   '(("429" 429 "text/plain" "Too Many Requests\n" ("Retry-After" . "60"))
@@ -931,11 +936,12 @@ An error answers 502, since one that left a filter would end the batch run."
                    (string-match "\\`[A-Z]+ \\([^ ]+\\)" head))
           (let ((path (match-string 1 head)))
             (princ (format "  [mock Forgejo, fault %s: %s]\n" remoto-keys--fault path))
-            (remoto-keys--mock-send
-             process
-             (if-let* ((canned (assoc remoto-keys--fault remoto-keys--faults)))
-                 (apply #'remoto-keys--answer (cdr canned))
-               (remoto-keys--upstream path))))))
+            (unless (equal remoto-keys--fault "hang")
+              (remoto-keys--mock-send
+               process
+               (if-let* ((canned (assoc remoto-keys--fault remoto-keys--faults)))
+                   (apply #'remoto-keys--answer (cdr canned))
+                 (remoto-keys--upstream path)))))))
     (error (remoto-keys--mock-send
             process (remoto-keys--answer 502 "text/plain"
                                          (format "mock Forgejo: %s\n"
@@ -1098,13 +1104,25 @@ a probe or a check can hold one."
       (and (stringp value) (string-match-p expected value) t)
     (equal value expected)))
 
-(defun remoto-keys--check-step (name label form expected)
+(defun remoto-keys--value-until (name form expected end)
+  "Return FORM's value in the Emacs of NAME once it meets EXPECTED.
+Ask again every quarter of a second until the time END, then return the
+value that came last."
+  (let ((value (remoto-keys--redact
+                (condition-case err
+                    (remoto-keys--eval name form)
+                  (error (list 'error (error-message-string err)))))))
+    (if (or (remoto-keys--check-value value expected) (<= end (float-time)))
+        value
+      (sleep-for 0.25)
+      (remoto-keys--value-until name form expected end))))
+
+(defun remoto-keys--check-step (name label form expected &optional seconds)
   "Print LABEL with whether FORM's value in the Emacs of NAME meets EXPECTED.
+With SECONDS the value may take that long to: FORM is asked again meanwhile.
 Return non-nil when it does."
-  (let* ((value (remoto-keys--redact
-                 (condition-case err
-                     (remoto-keys--eval name form)
-                   (error (list 'error (error-message-string err))))))
+  (let* ((value (remoto-keys--value-until name form expected
+                                          (+ (float-time) (or seconds 0))))
          (pass (remoto-keys--check-value value expected)))
     (princ (format "%s %s | %s%s\n" (if pass "PASS" "FAIL") name label
                    (if pass ""
@@ -1515,7 +1533,25 @@ Each is (NAME SETUP . STEPS).  SETUP has :gitconfig and :authinfo texts, an
                    `((fault ,fault)
                      (case ,(format "ff /mock:forgejo/docs, fault %s" fault)
                            ,(kbd "C-x C-f") "/mock:forgejo/docs" submit)))
-                 '("429" "503" "502" "500" "none")))
+                 '("429" "503" "502" "500"))
+       ;; A forge that sends nothing: Emacs waits, answers its server
+       ;; meanwhile, and gives up at the deadline of every request.
+       (fault "hang")
+       (probe "deadline" (setq remoto-request-timeout 3))
+       (type "ff /mock:forgejo/docs, fault hang"
+             ,(kbd "C-x C-f") "/mock:forgejo/docs" submit)
+       (check "Emacs answers its server while the forge is silent"
+              (and (< 0 remoto--sync-fetch-depth) 'waiting) waiting 2)
+       (check "the wait ends with the message, within its deadline"
+              (seq-find (lambda (line) (string-search "sent nothing" line))
+                        (remoto-keys--messages))
+              ,(format "Remoto: %s/api/v1 sent nothing for 3 seconds\\'" (regexp-quote mock))
+              6)
+       (check "Emacs is idle again" (remoto-keys-busy-p) nil 10)
+       (probe "deadline" (setq remoto-request-timeout 30))
+       (fault "none")
+       (case "ff /mock:forgejo/docs, fault none"
+             ,(kbd "C-x C-f") "/mock:forgejo/docs" submit))
       ("instances" (:gitconfig "" :authinfo "")
        ,(remoto-keys--ff "/cb:forgejo/docs")
        ,(remoto-keys--ff "/gitea:gitea/tea")
@@ -1605,10 +1641,18 @@ scenario with a failure that says why."
                   (pcase step
                     (`(fault ,fault) (setq remoto-keys--fault fault))
                     (`(probe ,label ,form) (remoto-keys--probe profile label form))
-                    (`(check ,label ,form ,expected)
+                    (`(check ,label ,form ,expected . ,seconds)
                      (cl-incf cases)
-                     (unless (remoto-keys--check-step profile label form expected)
+                     (unless (remoto-keys--check-step profile label form expected
+                                                      (car seconds))
                        (cl-incf failed)))
+                    ;; No wait after the keys: the checks that follow run
+                    ;; while Emacs works on them.
+                    (`(type ,label . ,parts)
+                     (remoto-keys--begin profile)
+                     (remoto-keys--wait-for-search)
+                     (remoto-keys--type profile (remoto-keys--steps parts kind))
+                     (princ (format "%-16s %s: typed, Emacs left to work\n" profile label)))
                     ('(restart)
                      (remoto-keys--stop profile)
                      (princ (format "restart %s: %S\n" profile

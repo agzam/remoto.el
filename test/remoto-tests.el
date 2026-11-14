@@ -25,6 +25,10 @@
 (setq url-proxy-services '(("http" . "127.0.0.1:9") ("https" . "127.0.0.1:9"))
       auth-sources nil)
 
+;; A fake request that never answers would end at its deadline in the
+;; middle of a later spec.  The specs of the deadline bind a short one.
+(setq remoto-request-timeout 3600)
+
 ;; Dired orders names by the locale ls gets.  The C locale orders them by
 ;; bytes on every system, so the specs read the same everywhere; the specs
 ;; of the name order bind a locale of their own.
@@ -2549,10 +2553,10 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
           (auths nil))
       (spy-on 'remoto--find-token :and-return-value nil)
       (spy-on 'message)
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (_resource &optional _params &rest args)
-                (push (plist-get args :auth) auths)
-                '((name . "test-repo"))))
+      (remoto-test--ghub-answers
+       (lambda (_resource &optional _params &rest args)
+         (push (plist-get args :auth) auths)
+         '((name . "test-repo"))))
       (expect (remoto--api remoto--github "repos/owner/repo") :to-equal '((name . "test-repo")))
       (remoto--api remoto--github "repos/owner/repo")
       (expect auths :to-equal '(none none))
@@ -2566,10 +2570,10 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
       (setf (remoto--login-token (remoto--login "codeberg.org/api/v1")) "cb_token")
       (spy-on 'remoto--find-token :and-return-value "ghp_found")
       (spy-on 'message)
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (_resource &optional _params &rest args)
-                (push (plist-get args :auth) auths)
-                '((name . "docs"))))
+      (remoto-test--ghub-answers
+       (lambda (_resource &optional _params &rest args)
+         (push (plist-get args :auth) auths)
+         '((name . "docs"))))
       (expect (remoto--api remoto--codeberg "repos/o/r") :to-equal '((name . "docs")))
       (expect (remoto--api remoto--github "repos/o/r") :to-equal '((name . "docs")))
       (expect (nreverse auths) :to-equal '("cb_token" "ghp_found"))
@@ -2592,7 +2596,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
               (lambda (&rest spec)
                 (when (equal (plist-get spec :host) "github.com")
                   (list (list :user "alice^remoto" :secret "ghp_alice")))))
-      (spy-on 'ghub-get :and-return-value '((name . "r")))
+      (remoto-test--ghub-answers '((name . "r")))
       (remoto--api remoto--github "repos/o/r")
       (let ((args (cddr (spy-calls-args-for 'ghub-get 0))))
         (expect (plist-get args :auth) :to-equal "ghp_alice")
@@ -2601,7 +2605,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
   (it "hands ghub a name with a token whose row names no account"
     (let ((remoto--logins (remoto-test--logins :failed nil))
           (remoto-github-auth "ghp_literal"))
-      (spy-on 'ghub-get :and-return-value '((name . "r")))
+      (remoto-test--ghub-answers '((name . "r")))
       (remoto--api remoto--github "repos/o/r")
       (let ((args (cddr (spy-calls-args-for 'ghub-get 0))))
         (expect (plist-get args :auth) :to-equal "ghp_literal")
@@ -2619,10 +2623,10 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
     (let ((remoto--logins (remoto-test--logins :failed t))
           (remoto-github-auth nil)
           (auth-used nil))
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (_resource &optional _params &rest args)
-                (push (plist-get args :auth) auth-used)
-                '((name . "test-repo"))))
+      (remoto-test--ghub-answers
+       (lambda (_resource &optional _params &rest args)
+         (push (plist-get args :auth) auth-used)
+         '((name . "test-repo"))))
       (remoto--api remoto--github "repos/owner/repo")
       (expect auth-used :to-equal '(none))))
 
@@ -2640,10 +2644,10 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
           (auth-used nil))
       (spy-on 'remoto--find-token :and-call-fake
               (lambda (_forge) (setf (remoto--login-failed (remoto-test--github-login)) t) nil))
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (_resource &optional _params &rest args)
-                (push (plist-get args :auth) auth-used)
-                '((name . "test-repo"))))
+      (remoto-test--ghub-answers
+       (lambda (_resource &optional _params &rest args)
+         (push (plist-get args :auth) auth-used)
+         '((name . "test-repo"))))
       (expect (remoto--api remoto--github "repos/owner/repo") :to-equal '((name . "test-repo")))
       (expect auth-used :to-equal '(none))))
 
@@ -2651,7 +2655,7 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
     (let ((remoto--logins (remoto-test--logins :failed nil))
           (remoto-github-auth nil))
       (spy-on 'remoto--find-token :and-return-value "ghp_ok")
-      (spy-on 'ghub-get :and-return-value '((name . "test-repo")))
+      (remoto-test--ghub-answers '((name . "test-repo")))
       (remoto--api remoto--github "repos/owner/repo")
       (expect (remoto--login-failed (remoto-test--github-login)) :to-be nil)
       (expect (remoto--login-token (remoto-test--github-login)) :to-equal "ghp_ok"))))
@@ -2660,20 +2664,20 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
   (it "suppresses messages when ghub-debug is nil"
     (let ((ghub-debug nil)
           (captured-inhibit nil))
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (_resource &optional _params &rest _args)
-                (setq captured-inhibit inhibit-message)
-                '((result . t))))
+      (remoto-test--ghub-answers
+       (lambda (_resource &optional _params &rest _args)
+         (setq captured-inhibit inhibit-message)
+         '((result . t))))
       (remoto--ghub-get remoto--github "/repos/owner/repo" 'none "repos/owner/repo")
       (expect captured-inhibit :to-be t)))
 
   (it "allows messages when ghub-debug is t"
     (let ((ghub-debug t)
           (captured-inhibit nil))
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (_resource &optional _params &rest _args)
-                (setq captured-inhibit inhibit-message)
-                '((result . t))))
+      (remoto-test--ghub-answers
+       (lambda (_resource &optional _params &rest _args)
+         (setq captured-inhibit inhibit-message)
+         '((result . t))))
       (remoto--ghub-get remoto--github "/repos/owner/repo" 'none "repos/owner/repo")
       (expect captured-inhibit :to-be nil))))
 
@@ -2714,15 +2718,32 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
     (expect (remoto--ghub-get remoto--github "/repos/owner/repo" 'none "repos/owner/repo")
             :to-throw 'user-error)))
 
-(defun remoto-test--ghub-fails-with (code &optional payload headers)
-  "Make `ghub-get' signal the `ghub-http-error' ghub raises for status CODE.
-PAYLOAD is the body that came with it, as the reader returned it, and
-HEADERS the headers, which ghub leaves in `ghub-response-headers'."
+(defun remoto-test--ghub-answers (answer)
+  "Fake `ghub-get' as a request that ANSWER answers before it returns.
+ANSWER is the value, or a function of the arguments of `ghub-get' that
+returns it or signals.  A `ghub-http-error' reaches the errorback as ghub
+hands it one; the headers are those in `ghub-response-headers'."
   (spy-on 'ghub-get :and-call-fake
-          (lambda (&rest _)
-            (setq-default ghub-response-headers headers)
-            (signal 'ghub-http-error
-                    (list code "status text" "https://api.github.com/x" payload)))))
+          (lambda (&rest args)
+            (let ((callback (plist-get (cddr args) :callback))
+                  (errorback (plist-get (cddr args) :errorback)))
+              (condition-case err
+                  (funcall callback
+                           (if (functionp answer) (apply answer args) answer)
+                           ghub-response-headers)
+                (ghub-http-error
+                 (funcall errorback `(error http ,(nth 1 err) ,(nth 4 err))
+                          ghub-response-headers)))
+              nil))))
+
+(defun remoto-test--ghub-fails-with (code &optional payload headers)
+  "Make `ghub-get' fail as ghub does for an answer of status CODE.
+PAYLOAD is the body that came with it, as the reader returned it, and
+HEADERS the headers; both reach the errorback of the request."
+  (spy-on 'ghub-get :and-call-fake
+          (lambda (_resource _params &rest args)
+            (funcall (plist-get args :errorback) `(error http ,code ,payload) headers)
+            nil)))
 
 (defun remoto-test--ghub-get-message ()
   "The `user-error' text `remoto--ghub-get' produces for repos/o/r."
@@ -2765,13 +2786,14 @@ HEADERS the headers, which ghub leaves in `ghub-response-headers'."
   (it "names the host and the status for other codes, with no raw data"
     (remoto-test--ghub-fails-with 500)
     (expect (remoto-test--ghub-get-message)
-            :to-equal "Remoto: api.github.com answered 500 status text for repos/o/r")
+            :to-equal "Remoto: api.github.com answered 500 Internal server error for repos/o/r")
     (remoto-test--ghub-fails-with 400 '((message . "invalid limit")))
     (expect (remoto-test--ghub-get-message)
-            :to-equal "Remoto: api.github.com answered 400 status text for repos/o/r: invalid limit")
+            :to-equal "Remoto: api.github.com answered 400 Bad Request for repos/o/r: invalid limit")
     (remoto-test--ghub-fails-with 503 nil '(("Retry-After" . "30")))
     (expect (remoto-test--ghub-get-message)
-            :to-equal "Remoto: api.github.com answered 503 status text for repos/o/r; retry in 30 seconds"))
+            :to-equal "Remoto: api.github.com answered 503 Service unavailable for repos/o/r; \
+retry in 30 seconds"))
 
   (it "says until when GitHub rate limits, and names remoto-login without a token"
     (let ((reset (+ (truncate (float-time)) 1800)))
@@ -2817,15 +2839,39 @@ retry after Wed, 21 Oct 2026 07:28:00 GMT")
     (setq-default ghub-response-headers '(("Retry-After" . "999")))
     (unwind-protect
         (progn
-          (spy-on 'ghub-get :and-call-fake
-                  (lambda (&rest _)
-                    (signal 'ghub-http-error
-                            (list 429 "Too Many Requests" "https://api.github.com/x" nil))))
+          (remoto-test--ghub-answers
+           (lambda (&rest _)
+             (signal 'ghub-http-error
+                     (list 429 "Too Many Requests" "https://api.github.com/x" nil))))
           (expect (remoto-test--ghub-get-message) :to-match "retry later\\'"))
       (setq-default ghub-response-headers nil))))
 
 (defvar remoto-test--reply nil
   "The callback and errorback of the last faked callback request.")
+
+(defvar remoto-test--timers nil
+  "The timers that were set when the spec began.")
+
+(defmacro remoto-test--within (seconds &rest body)
+  "Run BODY and return its value, or `hung' when it is not over in SECONDS.
+A wait that lost its deadline then fails its spec instead of stalling the run."
+  (declare (indent 1))
+  `(with-timeout (,seconds 'hung) ,@body))
+
+(defun remoto-test--requests-begin ()
+  "Forget the requests of earlier specs before one that fakes requests."
+  (setq remoto-test--reply nil
+        remoto-test--timers (copy-sequence timer-list))
+  (clrhash remoto--pending-requests))
+
+(defun remoto-test--requests-end ()
+  "Cancel the timers the spec left and kill the buffers of its requests.
+A timer that outlived its spec would answer or end a request of a later one."
+  (mapc #'cancel-timer (seq-difference timer-list remoto-test--timers))
+  (let ((kill-buffer-query-functions nil))
+    (dolist (buffer (buffer-list))
+      (when (string-prefix-p " *remoto-test-http*" (buffer-name buffer))
+        (kill-buffer buffer)))))
 
 (defun remoto-test--ghub-answers-later ()
   "Fake `ghub-get' as a callback request: return a live buffer, keep the callbacks.
@@ -2840,24 +2886,9 @@ The test delivers the reply through `remoto-test--reply' when it decides."
   ;; `while-no-input' binds `throw-on-input'; a synchronous wait that it
   ;; throws past leaves the url buffer behind, so the call goes through a
   ;; callback request that ghub cleans up itself.
-  (before-each
-    (setq remoto-test--reply nil)
-    (clrhash remoto--pending-requests))
+  (before-each (remoto-test--requests-begin))
 
-  (after-each
-    (dolist (buf (buffer-list))
-      (when (string-prefix-p " *remoto-test-http*" (buffer-name buf))
-        (kill-buffer buf))))
-
-  (it "calls ghub synchronously when input cannot interrupt"
-    (let ((throw-on-input nil) callback)
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (_resource _params &rest args)
-                (setq callback (plist-get args :callback))
-                '((name . "main"))))
-      (expect (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r")
-              :to-equal '((name . "main")))
-      (expect callback :to-be nil)))
+  (after-each (remoto-test--requests-end))
 
   (it "waits for the callback reply and returns it"
     (let ((throw-on-input 'remoto-test-input))
@@ -2879,10 +2910,10 @@ The test delivers the reply through `remoto-test--reply' when it decides."
       (expect remoto--response-headers :to-equal '(("X-Total-Count" . "306"))))
     (let ((remoto--response-headers nil)
           (throw-on-input nil))
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (&rest _)
-                (setq ghub-response-headers '(("X-Total-Count" . "28")))
-                '((name . "main"))))
+      (remoto-test--ghub-answers-later)
+      (run-at-time 0.01 nil (lambda ()
+                              (funcall (car remoto-test--reply) '((name . "main"))
+                                       '(("X-Total-Count" . "28")))))
       (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r")
       (expect remoto--response-headers :to-equal '(("X-Total-Count" . "28")))))
 
@@ -2967,6 +2998,401 @@ The test delivers the reply through `remoto-test--reply' when it decides."
       (run-at-time 0.01 nil (lambda () (kill-buffer buffer)))
       (expect (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r") :to-throw 'error)
       (expect (hash-table-count remoto--pending-requests) :to-equal 0))))
+
+(describe "remoto--ghub-get in a command"
+  ;; No `while-no-input' around it: the command waits for the reply of a
+  ;; callback request too, so the wait has the deadline of every request.
+  (before-each (remoto-test--requests-begin))
+
+  (after-each (remoto-test--requests-end))
+
+  (it "sends a callback request and waits for its reply"
+    (let ((throw-on-input nil))
+      (remoto-test--ghub-answers-later)
+      (run-at-time 0.01 nil (lambda () (funcall (car remoto-test--reply) '((name . "main")))))
+      (expect (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r")
+              :to-equal '((name . "main")))
+      (expect (functionp (car remoto-test--reply)) :to-be t)))
+
+  (it "ends with the message when the forge sends nothing"
+    (let ((remoto-request-timeout 0.05)
+          (throw-on-input nil))
+      (remoto-test--ghub-answers-later)
+      (expect (remoto-test--within 2 (remoto-test--ghub-get-message))
+              :to-equal "Remoto: api.github.com sent nothing for 0.05 seconds")))
+
+  (it "reports a failed reply by its status and headers"
+    (let ((throw-on-input nil)
+          (reset (+ (truncate (float-time)) 600)))
+      (remoto-test--ghub-answers-later)
+      (run-at-time 0.01 nil (lambda () (funcall (cadr remoto-test--reply) '(error http 404 nil))))
+      (expect (remoto-test--ghub-get-message) :to-equal "Remoto: not found: repos/o/r")
+      (run-at-time 0.01 nil
+                   (lambda ()
+                     (funcall (cadr remoto-test--reply) '(error http 403 nil)
+                              `(("x-ratelimit-remaining" . "0")
+                                ("x-ratelimit-reset" . ,(number-to-string reset))))))
+      (expect (remoto-test--ghub-get-message)
+              :to-equal (format "Remoto: GitHub rate limited until %s. M-x remoto-login"
+                                (format-time-string "%H:%M" reset)))))
+
+  (it "keeps its request out of the table of abandoned ones"
+    ;; Nothing can abandon it: a quit ends it, and no later call shares it.
+    (let ((throw-on-input nil)
+          (registered nil))
+      (remoto-test--ghub-answers-later)
+      (run-at-time 0.01 nil (lambda ()
+                              (setq registered (hash-table-count remoto--pending-requests))
+                              (funcall (car remoto-test--reply) '((name . "main")))))
+      (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r")
+      (expect registered :to-equal 0)))
+
+  (it "asks the forge even when a reply landed for an abandoned completion call"
+    ;; That reply waits for the next completion call, however long; a
+    ;; command reads what the forge says now.
+    (remoto-test--ghub-answers-later)
+    (let ((throw-on-input 'remoto-test-input))
+      (catch 'remoto-test-input
+        (run-at-time 0.01 nil (lambda () (throw 'remoto-test-input 'typed)))
+        (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r"))
+      (funcall (car remoto-test--reply) '((name . "then"))))
+    (let ((throw-on-input nil))
+      (run-at-time 0.01 nil (lambda () (funcall (car remoto-test--reply) '((name . "now")))))
+      (expect (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r")
+              :to-equal '((name . "now")))
+      (expect 'ghub-get :to-have-been-called-times 2))))
+
+(defun remoto-test--request-in (buffer-var &optional process-var sentinel)
+  "Fake `ghub-get' as a request that never answers; keep its callbacks.
+Its buffer goes to the variable BUFFER-VAR and names the URL as url.el's
+does.  With PROCESS-VAR the buffer gets a connection, kept there, that
+SENTINEL hears."
+  (spy-on 'ghub-get :and-call-fake
+          (lambda (resource _params &rest args)
+            (let ((buffer (generate-new-buffer " *remoto-test-http*")))
+              (setq remoto-test--reply (list (plist-get args :callback)
+                                             (plist-get args :errorback)))
+              (with-current-buffer buffer
+                (setq-local url-current-object
+                            (url-generic-parse-url
+                             (concat "https://" (plist-get args :host) resource))))
+              (set buffer-var buffer)
+              (when process-var
+                (set process-var (make-pipe-process :name "remoto-test" :buffer buffer
+                                                    :sentinel (or sentinel #'ignore))))
+              buffer))))
+
+(defvar remoto-test--buffer nil
+  "The buffer of the last request `remoto-test--request-in' faked.")
+
+(defvar remoto-test--process nil
+  "The connection of the last request `remoto-test--request-in' faked.")
+
+(describe "a forge request that gets no reply"
+  ;; A connection that died without a FIN holds its request until TCP gives
+  ;; up, so every request ends once the forge sent nothing for
+  ;; `remoto-request-timeout' seconds.
+  (before-each
+    (setq remoto-test--buffer nil
+          remoto-test--process nil)
+    (remoto-test--requests-begin))
+
+  (after-each (remoto-test--requests-end))
+
+  (it "ends with a message that names the API host and the seconds"
+    (let ((remoto-request-timeout 0.05)
+          (throw-on-input 'remoto-test-input))
+      (remoto-test--request-in 'remoto-test--buffer)
+      (expect (remoto-test--within 2 (remoto-test--ghub-get-message))
+              :to-equal "Remoto: api.github.com sent nothing for 0.05 seconds")
+      (expect (remoto-test--within 2
+                (condition-case err
+                    (remoto--ghub-get remoto--codeberg "/repos/o/r" 'none "repos/o/r")
+                  (user-error (error-message-string err))))
+              :to-equal "Remoto: codeberg.org/api/v1 sent nothing for 0.05 seconds")
+      (expect (hash-table-count remoto--pending-requests) :to-equal 0)))
+
+  (it "closes the connection, url.el's sentinel unheard, and kills the buffer"
+    ;; The sentinel of url.el sends the request again or hands ghub a reply
+    ;; that never came; a busy connection makes `kill-buffer' ask.
+    (let ((remoto-request-timeout 0.05)
+          (throw-on-input 'remoto-test-input)
+          (heard nil))
+      (remoto-test--request-in 'remoto-test--buffer 'remoto-test--process
+                               (lambda (&rest _) (setq heard t)))
+      (spy-on 'yes-or-no-p)
+      (remoto-test--within 2 (remoto-test--ghub-get-message))
+      (expect (process-live-p remoto-test--process) :to-be nil)
+      (expect heard :to-be nil)
+      (expect (buffer-live-p remoto-test--buffer) :to-be nil)
+      (expect 'yes-or-no-p :not :to-have-been-called)))
+
+  (it "lets a reply that keeps arriving take longer than the deadline"
+    (let ((remoto-request-timeout 0.1)
+          (throw-on-input 'remoto-test-input)
+          (timers (copy-sequence timer-list)))
+      (remoto-test--request-in 'remoto-test--buffer)
+      ;; A byte every 30 ms for four deadlines, then the reply.
+      (let ((feed (run-at-time 0.03 0.03
+                               (lambda ()
+                                 (with-current-buffer remoto-test--buffer (insert "x"))))))
+        (run-at-time 0.4 nil (lambda ()
+                               (cancel-timer feed)
+                               (funcall (car remoto-test--reply) '((name . "main")))))
+        (expect (remoto-test--within 2
+                  (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r"))
+                :to-equal '((name . "main")))
+        (cancel-timer feed))
+      ;; The reply took the timer of the request with it.
+      (expect (seq-difference timer-list timers) :to-be nil)))
+
+  (it "ends a request that input abandoned, once the forge was silent that long"
+    (let ((remoto-request-timeout 0.05)
+          (throw-on-input 'remoto-test-input))
+      (remoto-test--request-in 'remoto-test--buffer 'remoto-test--process)
+      (catch 'remoto-test-input
+        (run-at-time 0.01 nil (lambda () (throw 'remoto-test-input 'typed)))
+        (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r"))
+      (expect (hash-table-count remoto--pending-requests) :to-equal 1)
+      (sleep-for 0.2)
+      (expect (hash-table-count remoto--pending-requests) :to-equal 0)
+      (expect (process-live-p remoto-test--process) :to-be nil)
+      (expect (buffer-live-p remoto-test--buffer) :to-be nil)))
+
+  (it "follows a redirect into the buffer url.el goes on in"
+    ;; url.el kills the buffer a request began in once its next request starts.
+    (let ((throw-on-input 'remoto-test-input)
+          (first nil))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (_resource _params &rest args)
+                (setq remoto-test--reply (list (plist-get args :callback))
+                      remoto-test--buffer (generate-new-buffer " *remoto-test-http*")
+                      first (generate-new-buffer " *remoto-test-http*"))
+                (with-current-buffer first
+                  (setq-local url-redirect-buffer remoto-test--buffer))
+                first))
+      (run-at-time 0.02 nil (lambda () (kill-buffer first)))
+      (run-at-time 0.15 nil (lambda () (funcall (car remoto-test--reply) '((name . "moved")))))
+      (expect (remoto-test--within 2
+                (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r"))
+              :to-equal '((name . "moved")))))
+
+  (it "closes the connection of a redirect that gets no reply"
+    (let ((remoto-request-timeout 0.05)
+          (throw-on-input 'remoto-test-input))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (&rest _)
+                (let ((first (generate-new-buffer " *remoto-test-http*")))
+                  (setq remoto-test--buffer (generate-new-buffer " *remoto-test-http*")
+                        remoto-test--process (make-pipe-process
+                                              :name "remoto-test" :sentinel #'ignore
+                                              :buffer remoto-test--buffer))
+                  (with-current-buffer first
+                    (setq-local url-redirect-buffer remoto-test--buffer))
+                  first)))
+      (expect (remoto-test--within 2 (remoto-test--ghub-get-message))
+              :to-equal "Remoto: api.github.com sent nothing for 0.05 seconds")
+      (expect (process-live-p remoto-test--process) :to-be nil)
+      (expect (buffer-live-p remoto-test--buffer) :to-be nil)))
+
+  (it "drops the idle connections url.el keeps to that host, and no other"
+    ;; What silenced one connection, a sleep or a change of network, killed
+    ;; the rest; each would cost a later request a deadline of its own.
+    (let* ((remoto-request-timeout 0.05)
+           (throw-on-input 'remoto-test-input)
+           (url-http-open-connections (make-hash-table :test 'equal))
+           (idle (lambda (host)
+                   (let ((process (make-pipe-process :name "remoto-test-idle" :noquery t)))
+                     (url-http-mark-connection-as-free host 443 process)
+                     process)))
+           (same (list (funcall idle "api.github.com") (funcall idle "api.github.com")))
+           (other (funcall idle "codeberg.org")))
+      (unwind-protect
+          (progn
+            (remoto-test--request-in 'remoto-test--buffer)
+            (remoto-test--within 2 (remoto-test--ghub-get-message))
+            (expect (seq-filter #'process-live-p same) :to-be nil)
+            (expect (process-live-p other) :to-be-truthy)
+            (expect (seq-filter #'process-live-p
+                                (apply #'append (hash-table-values url-http-open-connections)))
+                    :to-equal (list other)))
+        (mapc #'delete-process (cons other same)))))
+
+  (it "finds those connections under either key url.el files them by"
+    ;; (HOST PORT THREAD) in an Emacs with threads, (HOST . PORT) before.
+    (let* ((remoto-request-timeout 0.05)
+           (throw-on-input 'remoto-test-input)
+           (url-http-open-connections (make-hash-table :test 'equal))
+           (idle (lambda (key)
+                   (let ((process (make-pipe-process :name "remoto-test-idle" :noquery t
+                                                     :sentinel #'url-http-idle-sentinel)))
+                     (puthash key (list process) url-http-open-connections)
+                     process)))
+           (same (list (funcall idle '("api.github.com" . 443))
+                       (funcall idle '("api.github.com" 443 thread))))
+           (other (list (funcall idle '("api.github.com" . 8443))
+                        (funcall idle '("api.github.com" 8443 thread))
+                        (funcall idle '("github.com" 443 thread)))))
+      (unwind-protect
+          (progn
+            (remoto-test--request-in 'remoto-test--buffer)
+            (remoto-test--within 2 (remoto-test--ghub-get-message))
+            (expect (seq-filter #'process-live-p same) :to-be nil)
+            (expect (seq-filter #'process-live-p other) :to-equal other))
+        (mapc #'delete-process (append other same))))))
+
+(defun remoto-test--quit-result ()
+  "Return `quit' when `remoto--ghub-get' of repos/o/r ends in a quit, else its value."
+  (remoto-test--within 2
+    (condition-case nil
+        (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r")
+      (quit 'quit))))
+
+(describe "a quit while remoto waits for a forge"
+  ;; C-g is how a person ends a wait before its deadline.  The request
+  ;; must not stay behind: the next call would wait on it again.
+  (before-each
+    (setq remoto-test--buffer nil
+          remoto-test--process nil)
+    (remoto-test--requests-begin))
+
+  (after-each (remoto-test--requests-end))
+
+  (it "ends the request of a command: connection, buffer and timer"
+    (let ((throw-on-input nil)
+          (timers (copy-sequence timer-list)))
+      (remoto-test--request-in 'remoto-test--buffer 'remoto-test--process)
+      ;; A timer plays the C-g.
+      (run-at-time 0.01 nil (lambda () (signal 'quit nil)))
+      (expect (remoto-test--quit-result) :to-be 'quit)
+      (expect (process-live-p remoto-test--process) :to-be nil)
+      (expect (buffer-live-p remoto-test--buffer) :to-be nil)
+      (expect (seq-difference timer-list timers) :to-be nil)))
+
+  (it "ends the request of the completion and forgets it, where input keeps it"
+    (let ((throw-on-input 'remoto-test-input))
+      (remoto-test--request-in 'remoto-test--buffer 'remoto-test--process)
+      (run-at-time 0.01 nil (lambda () (signal 'quit nil)))
+      (expect (remoto-test--quit-result) :to-be 'quit)
+      (expect (hash-table-count remoto--pending-requests) :to-equal 0)
+      (expect (process-live-p remoto-test--process) :to-be nil)
+      (expect (buffer-live-p remoto-test--buffer) :to-be nil)))
+
+  (it "asks the forge again on the next call"
+    (let ((throw-on-input 'remoto-test-input))
+      (remoto-test--request-in 'remoto-test--buffer)
+      (run-at-time 0.01 nil (lambda () (signal 'quit nil)))
+      (remoto-test--quit-result)
+      (run-at-time 0.01 nil (lambda () (funcall (car remoto-test--reply) '((name . "main")))))
+      (expect (remoto-test--within 2
+                (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r"))
+              :to-equal '((name . "main")))
+      (expect 'ghub-get :to-have-been-called-times 2)))
+
+  (it "drops the idle connections to the host, as a deadline does"
+    ;; Else each dead one costs the person one more wait and one more C-g.
+    (let ((throw-on-input nil)
+          (url-http-open-connections (make-hash-table :test 'equal))
+          (idle (make-pipe-process :name "remoto-test-idle" :noquery t)))
+      (url-http-mark-connection-as-free "api.github.com" 443 idle)
+      (unwind-protect
+          (progn
+            (remoto-test--request-in 'remoto-test--buffer)
+            (run-at-time 0.01 nil (lambda () (signal 'quit nil)))
+            (expect (remoto-test--quit-result) :to-be 'quit)
+            (expect (process-live-p idle) :to-be nil))
+        (delete-process idle))))
+
+  (it "passes on the quit it got, a minibuffer's included"
+    (let ((throw-on-input nil))
+      (remoto-test--request-in 'remoto-test--buffer)
+      (run-at-time 0.01 nil (lambda () (signal 'minibuffer-quit nil)))
+      (expect (remoto-test--within 2
+                (condition-case err
+                    (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r")
+                  (quit (car err))))
+              :to-be 'minibuffer-quit))))
+
+(describe "a request of an older remoto"
+  (it "is forgotten, so an upgrade in a running Emacs asks the forge again"
+    (let ((remoto--pending-requests (make-hash-table :test 'equal)))
+      ;; 2.7.0's request had four slots; the accessors of this remoto fail on it.
+      (puthash '("api.github.com" "/repos/o/old" none)
+               (record 'remoto--request 'pending nil nil nil) remoto--pending-requests)
+      (puthash '("api.github.com" "/repos/o/new" none)
+               (remoto--request-create :status 'done :value 1) remoto--pending-requests)
+      (remoto--forget-stale-requests)
+      (expect (hash-table-keys remoto--pending-requests)
+              :to-equal '(("api.github.com" "/repos/o/new" none))))))
+
+(defvar remoto-test--served nil
+  "The paths the server of a spec was asked for, oldest first.")
+
+(defvar remoto-test--answering t
+  "Non-nil while the server of a spec answers; nil while it sends nothing.")
+
+(defun remoto-test--serve (process chunk)
+  "Answer the request that CHUNK completes on PROCESS with [], the connection kept.
+The request gets no answer while `remoto-test--answering' is nil."
+  (let ((head (concat (process-get process :head) chunk)))
+    (if (not (and (string-search "\r\n\r\n" head)
+                  (string-match "\\`[A-Z]+ \\([^ ]+\\)" head)))
+        (process-put process :head head)
+      (setq remoto-test--served (append remoto-test--served (list (match-string 1 head))))
+      (process-put process :head nil)
+      (when remoto-test--answering
+        (process-send-string
+         process (concat "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                         "Content-Length: 2\r\n\r\n[]"))))))
+
+(defun remoto-test--idle-connections ()
+  "Return the live connections url.el keeps for its next requests.
+url.el files a connection once for each time it frees it."
+  (thread-last (hash-table-values url-http-open-connections)
+               (apply #'append)
+               (seq-uniq)
+               (seq-filter #'process-live-p)))
+
+(describe "a connection of url.el that went silent"
+  ;; The real thing over the loopback, ghub and url.el included: url.el
+  ;; keeps the connection of an answered request and sends the next on it.
+  (it "ends the request on it, sent once, and drops the other idle connection"
+    (let* ((remoto-test--served nil)
+           (remoto-test--answering t)
+           (url-proxy-services nil)
+           (url-http-open-connections (make-hash-table :test 'equal))
+           (url-debug nil)
+           (throw-on-input nil)
+           (server (make-network-process :name "remoto-test-server" :server t
+                                         :host 'local :family 'ipv4 :service t
+                                         :coding 'binary :noquery t
+                                         :filter #'remoto-test--serve))
+           (host (format "127.0.0.1:%d" (process-contact server :service)))
+           (ghub-insecure-hosts (list (concat host "/api/v1")))
+           (forge (remoto-forgejo-create :name 'silent :prefixes '("silent") :host host)))
+      (unwind-protect
+          (progn
+            ;; Two requests at once leave two idle connections.
+            (let ((both (list (remoto--request-send forge "/a" 'none)
+                              (remoto--request-send forge "/b" 'none))))
+              (remoto-test--within 5 (mapc #'remoto--request-wait both))
+              (expect (mapcar #'remoto--request-status both) :to-equal '(done done)))
+            (expect (length (remoto-test--idle-connections)) :to-equal 2)
+            (setq remoto-test--answering nil)
+            (let ((remoto-request-timeout 0.3))
+              (expect (remoto-test--within 5
+                        (condition-case err
+                            (remoto--ghub-get forge "/c" 'none "c")
+                          (user-error (error-message-string err))))
+                      :to-equal (format "Remoto: %s/api/v1 sent nothing for 0.3 seconds"
+                                        host)))
+            (expect (remoto-test--idle-connections) :to-be nil)
+            ;; url.el's sentinel, left on, would send /c once more.
+            (expect (sort (copy-sequence remoto-test--served) #'string<)
+                    :to-equal '("/api/v1/a" "/api/v1/b" "/api/v1/c"))
+            (expect url-debug :to-be nil))
+        (mapc #'delete-process (remoto-test--idle-connections))
+        (delete-process server)))))
 
 (defun remoto-test--auth-rows (rows)
   "Make `auth-source-search' answer ROWS, each (HOST USER SECRET), by host."
@@ -3068,12 +3494,12 @@ using unauthenticated access until M-x remoto-reset-auth")
 
 (defun remoto-test--ghub-refuses (&rest refused)
   "Make `ghub-get' refuse the tokens REFUSED with a 401 and answer any other."
-  (spy-on 'ghub-get :and-call-fake
-          (lambda (_resource &optional _params &rest args)
-            (if (member (plist-get args :auth) refused)
-                (signal 'ghub-http-error
-                        (list 401 "Unauthorized" "https://api.github.com/x" nil))
-              '((name . "r") (login . "alice"))))))
+  (remoto-test--ghub-answers
+   (lambda (_resource &optional _params &rest args)
+     (if (member (plist-get args :auth) refused)
+         (signal 'ghub-http-error
+                 (list 401 "Unauthorized" "https://api.github.com/x" nil))
+       '((name . "r") (login . "alice"))))))
 
 (describe "a refused token"
   (before-each
@@ -3146,7 +3572,7 @@ using unauthenticated access until M-x remoto-reset-auth")
   (it "caches authenticated user and token on success"
     (let ((remoto--logins (remoto-test--logins :user nil :failed nil :token nil)))
       (spy-on 'remoto--find-token :and-return-value "ghp_fake_token")
-      (spy-on 'ghub-get :and-return-value '((login . "agzam")))
+      (remoto-test--ghub-answers '((login . "agzam")))
       (spy-on 'message)
       (remoto--warm-auth)
       (expect (remoto--login-user (remoto-test--github-login)) :to-equal "agzam")
@@ -3177,10 +3603,10 @@ using unauthenticated access until M-x remoto-reset-auth")
   (it "drops a token GitHub refuses, and says so"
     (let ((remoto--logins (remoto-test--logins :user nil :failed nil :token nil)))
       (spy-on 'remoto--find-token :and-return-value "ghp_bad_token")
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (&rest _)
-                (signal 'ghub-http-error
-                        (list 401 "Unauthorized" "https://api.github.com/user" nil))))
+      (remoto-test--ghub-answers
+       (lambda (&rest _)
+         (signal 'ghub-http-error
+                 (list 401 "Unauthorized" "https://api.github.com/user" nil))))
       (spy-on 'message)
       (remoto--warm-auth)
       (expect (remoto--login-failed (remoto-test--github-login)) :to-be t)
@@ -3199,6 +3625,25 @@ using unauthenticated access until M-x remoto-reset-auth")
       (expect (remoto--login-token (remoto-test--github-login)) :to-equal "ghp_ok")
       (expect 'message :not :to-have-been-called)))
 
+  (it "gives up on a GitHub that sends nothing, and keeps the token"
+    ;; An idle timer runs it: without the deadline of every request, a
+    ;; dead connection would freeze Emacs with nothing on the screen.
+    (let ((remoto--logins (remoto-test--logins :user nil :failed nil :token nil))
+          (remoto-request-timeout 0.05))
+      (remoto-test--requests-begin)
+      (spy-on 'remoto--find-token :and-return-value "ghp_ok")
+      (remoto-test--ghub-answers-later)
+      (spy-on 'message)
+      (unwind-protect
+          (progn
+            (expect (remoto-test--within 2 (remoto--warm-auth) 'over) :to-be 'over)
+            (expect (functionp (car remoto-test--reply)) :to-be t)
+            (expect (remoto--login-user (remoto-test--github-login)) :to-be nil)
+            (expect (remoto--login-failed (remoto-test--github-login)) :to-be nil)
+            (expect (remoto--login-token (remoto-test--github-login)) :to-equal "ghp_ok")
+            (expect 'message :not :to-have-been-called))
+        (remoto-test--requests-end))))
+
   (it "skips when user already cached"
     (let ((remoto--logins (remoto-test--logins :user "agzam" :failed nil)))
       (spy-on 'remoto--find-token)
@@ -3215,7 +3660,7 @@ using unauthenticated access until M-x remoto-reset-auth")
     (let ((remoto--logins (remoto-test--logins :user nil :failed nil :token nil))
           (remoto-github-auth "ghp_explicit_token"))
       (spy-on 'remoto--find-token)
-      (spy-on 'ghub-get :and-return-value '((login . "agzam")))
+      (remoto-test--ghub-answers '((login . "agzam")))
       (spy-on 'message)
       (remoto--warm-auth)
       (expect 'remoto--find-token :not :to-have-been-called)
@@ -3251,7 +3696,7 @@ using unauthenticated access until M-x remoto-reset-auth")
   (it "opens the token page, checks the token, keeps it, and says whose it is"
     (let ((remoto--logins (remoto-test--logins :failed t :declined t)))
       (spy-on 'read-passwd :and-return-value " ghp_new \n")
-      (spy-on 'ghub-get :and-return-value '((login . "alice")))
+      (remoto-test--ghub-answers '((login . "alice")))
       (spy-on 'remoto--store-token :and-return-value "/tmp/a.gpg")
       (expect (remoto-login remoto--github) :to-equal "alice")
       (expect 'browse-url :to-have-been-called-with
@@ -3272,7 +3717,7 @@ using unauthenticated access until M-x remoto-reset-auth")
     (let ((remoto--logins (remoto-test--logins))
           (auth-sources '("~/.authinfo")))
       (spy-on 'read-passwd :and-return-value "ghp_new")
-      (spy-on 'ghub-get :and-return-value '((login . "alice")))
+      (remoto-test--ghub-answers '((login . "alice")))
       (spy-on 'write-region)
       (remoto-login remoto--github)
       (expect 'write-region :not :to-have-been-called)
@@ -3299,7 +3744,7 @@ using unauthenticated access until M-x remoto-reset-auth")
   (it "keeps the token for the session when the store fails, and says why"
     (let ((remoto--logins (remoto-test--logins :failed t)))
       (spy-on 'read-passwd :and-return-value "ghp_new")
-      (spy-on 'ghub-get :and-return-value '((login . "alice")))
+      (remoto-test--ghub-answers '((login . "alice")))
       (spy-on 'remoto--token-file :and-return-value "/tmp/x/authinfo.gpg")
       (spy-on 'remoto--store-token :and-call-fake
               (lambda (&rest _) (error "GPG error: \"no usable configuration\", OpenPGP")))
@@ -3314,7 +3759,7 @@ using unauthenticated access until M-x remoto-reset-auth")
     (let ((remoto--logins (remoto-test--logins)))
       (spy-on 'browse-url :and-call-fake (lambda (&rest _) (error "No usable browser found")))
       (spy-on 'read-passwd :and-return-value "ghp_new")
-      (spy-on 'ghub-get :and-return-value '((login . "alice")))
+      (remoto-test--ghub-answers '((login . "alice")))
       (spy-on 'remoto--store-token :and-return-value "/tmp/a.gpg")
       (expect (remoto-login remoto--github) :to-equal "alice")
       (expect 'message :to-have-been-called-with
@@ -3343,7 +3788,7 @@ using unauthenticated access until M-x remoto-reset-auth")
               (lambda (&rest _)
                 (setq pasting (bound-and-true-p xterm-store-paste-on-kill-ring))
                 " ghp_new \n"))
-      (spy-on 'ghub-get :and-return-value '((login . "alice")))
+      (remoto-test--ghub-answers '((login . "alice")))
       (spy-on 'remoto--store-token :and-return-value "/tmp/a.gpg")
       (remoto-login remoto--github)
       (expect pasting :to-be nil)
@@ -3353,7 +3798,7 @@ using unauthenticated access until M-x remoto-reset-auth")
   (it "opens Codeberg's page and names the permissions to tick there"
     (let ((remoto--logins (remoto-test--logins)))
       (spy-on 'read-passwd :and-return-value "cb_new")
-      (spy-on 'ghub-get :and-return-value '((login . "ag")))
+      (remoto-test--ghub-answers '((login . "ag")))
       (spy-on 'remoto--store-token :and-return-value "/tmp/a.gpg")
       (remoto-login remoto--codeberg)
       (expect 'browse-url :to-have-been-called-with
@@ -3450,15 +3895,15 @@ using unauthenticated access until M-x remoto-reset-auth")
 
 (defun remoto-test--limit-anonymous (reset)
   "Make GitHub rate limit anonymous requests until RESET, and answer a token."
-  (spy-on 'ghub-get :and-call-fake
-          (lambda (_resource &optional _params &rest args)
-            (if (not (eq (plist-get args :auth) 'none))
-                '((name . "r"))
-              (setq-default ghub-response-headers
-                            `(("x-ratelimit-remaining" . "0")
-                              ("x-ratelimit-reset" . ,(number-to-string reset))))
-              (signal 'ghub-http-error
-                      (list 403 "Forbidden" "https://api.github.com/x" nil))))))
+  (remoto-test--ghub-answers
+   (lambda (_resource &optional _params &rest args)
+     (if (not (eq (plist-get args :auth) 'none))
+         '((name . "r"))
+       (setq-default ghub-response-headers
+                     `(("x-ratelimit-remaining" . "0")
+                       ("x-ratelimit-reset" . ,(number-to-string reset))))
+       (signal 'ghub-http-error
+               (list 403 "Forbidden" "https://api.github.com/x" nil))))))
 
 (defun remoto-test--login-as (user)
   "Make `remoto-login' log in as USER with a fresh token, as on yes."
@@ -3542,13 +3987,13 @@ using unauthenticated access until M-x remoto-reset-auth")
   (it "offers to log in again when the forge refuses the token, and goes on with the new one"
     (let ((remoto--logins (remoto-test--logins :token "ghp_revoked"))
           (auths nil))
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (_resource &optional _params &rest args)
-                (push (plist-get args :auth) auths)
-                (if (equal (plist-get args :auth) "ghp_revoked")
-                    (signal 'ghub-http-error
-                            (list 401 "Unauthorized" "https://api.github.com/x" nil))
-                  '((name . "r")))))
+      (remoto-test--ghub-answers
+       (lambda (_resource &optional _params &rest args)
+         (push (plist-get args :auth) auths)
+         (if (equal (plist-get args :auth) "ghp_revoked")
+             (signal 'ghub-http-error
+                     (list 401 "Unauthorized" "https://api.github.com/x" nil))
+           '((name . "r")))))
       (spy-on 'y-or-n-p :and-return-value t)
       (remoto-test--login-as "alice")
       (remoto-test-as-command
@@ -3607,10 +4052,10 @@ using unauthenticated access until M-x remoto-reset-auth")
           (remoto--maybe-enable-mode)
           (setq buffer-file-name nil)))
       (setf (remoto--login-token (remoto-test--github-login)) "ghp_revoked")
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (&rest _)
-                (signal 'ghub-http-error
-                        (list 401 "Unauthorized" "https://api.github.com/x" nil))))
+      (remoto-test--ghub-answers
+       (lambda (&rest _)
+         (signal 'ghub-http-error
+                 (list 401 "Unauthorized" "https://api.github.com/x" nil))))
       (ignore-errors (remoto--api remoto--github "repos/o/r"))
       (with-temp-buffer
         (setq buffer-file-name "/github:o/r@main:/b")
@@ -4565,11 +5010,11 @@ At the level of OWNER, or at the root without OWNER."
   (it "sends a request to the API host of the forge, in ghub's spelling"
     (let ((remoto--logins (remoto-test--logins :failed t))
           (calls nil))
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (resource &optional _params &rest args)
-                (push (list resource (plist-get args :host) (plist-get args :forge))
-                      calls)
-                '((ok . t))))
+      (remoto-test--ghub-answers
+       (lambda (resource &optional _params &rest args)
+         (push (list resource (plist-get args :host) (plist-get args :forge))
+               calls)
+         '((ok . t))))
       (remoto--api remoto--github "repos/o/r")
       (remoto--api remoto--codeberg "repos/o/r")
       (expect (nreverse calls)
@@ -4582,10 +5027,10 @@ At the level of OWNER, or at the root without OWNER."
       (setf (remoto--login-failed (remoto--login "codeberg.org/api/v1")) t
             (remoto--login-token (remoto--login "api.github.com")) "ghp_x"
             (remoto--login-user (remoto--login "api.github.com")) "me")
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (_resource &optional _params &rest args)
-                (push (plist-get args :auth) auths)
-                '((ok . t))))
+      (remoto-test--ghub-answers
+       (lambda (_resource &optional _params &rest args)
+         (push (plist-get args :auth) auths)
+         '((ok . t))))
       (remoto--api remoto--codeberg "repos/o/r")
       (remoto--api remoto--github "repos/o/r")
       (expect (nreverse auths) :to-equal '(none "ghp_x"))))
@@ -4596,10 +5041,10 @@ At the level of OWNER, or at the root without OWNER."
           (auths nil))
       (spy-on 'remoto--find-token :and-call-fake
               (lambda (forge) (and (eq forge remoto--codeberg) "cb_token")))
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (_resource &optional _params &rest args)
-                (push (cons (plist-get args :host) (plist-get args :auth)) auths)
-                '((ok . t))))
+      (remoto-test--ghub-answers
+       (lambda (_resource &optional _params &rest args)
+         (push (cons (plist-get args :host) (plist-get args :auth)) auths)
+         '((ok . t))))
       (remoto--api remoto--codeberg "repos/o/r")
       (remoto--api remoto--github "repos/o/r")
       (expect (nreverse auths)
@@ -4610,7 +5055,7 @@ At the level of OWNER, or at the root without OWNER."
     (let ((remoto--logins (remoto-test--logins))
           (remoto-github-auth 'none))
       (spy-on 'remoto--find-token :and-return-value "cb_token")
-      (spy-on 'ghub-get :and-return-value '((ok . t)))
+      (remoto-test--ghub-answers '((ok . t)))
       (remoto--api remoto--github "repos/o/r")
       (remoto--api remoto--codeberg "repos/o/r")
       (expect (mapcar (lambda (args) (plist-get (cddr args) :auth))
@@ -4627,10 +5072,10 @@ At the level of OWNER, or at the root without OWNER."
               (lambda (forge)
                 (setf (remoto--login-failed (remoto--forge-login forge)) t)
                 nil))
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (_resource &optional _params &rest args)
-                (push (plist-get args :auth) auths)
-                '((ok . t))))
+      (remoto-test--ghub-answers
+       (lambda (_resource &optional _params &rest args)
+         (push (plist-get args :auth) auths)
+         '((ok . t))))
       (remoto--api remoto--codeberg "repos/o/r")
       (expect auths :to-equal '(none))
       (expect (remoto--literal-token
@@ -4661,13 +5106,13 @@ At the level of OWNER, or at the root without OWNER."
           (auths nil))
       (setf (remoto--login-token (remoto--login "codeberg.org/api/v1")) "revoked")
       (spy-on 'message)
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (_resource &optional _params &rest args)
-                (push (plist-get args :auth) auths)
-                (if (eq (plist-get args :auth) 'none)
-                    '((name . "docs"))
-                  (signal 'ghub-http-error
-                          (list 401 "Unauthorized" "https://codeberg.org/api/v1/x" nil)))))
+      (remoto-test--ghub-answers
+       (lambda (_resource &optional _params &rest args)
+         (push (plist-get args :auth) auths)
+         (if (eq (plist-get args :auth) 'none)
+             '((name . "docs"))
+           (signal 'ghub-http-error
+                   (list 401 "Unauthorized" "https://codeberg.org/api/v1/x" nil)))))
       (expect (remoto--api remoto--codeberg "repos/o/r") :to-equal '((name . "docs")))
       (expect (remoto--api remoto--codeberg "repos/o/r") :to-equal '((name . "docs")))
       (expect (reverse auths) :to-equal '("revoked" none none))
@@ -4680,10 +5125,10 @@ At the level of OWNER, or at the root without OWNER."
     (let ((remoto--logins (remoto-test--logins)))
       (setf (remoto--login-token (remoto--login "codeberg.org/api/v1")) "revoked")
       (spy-on 'message)
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (&rest _)
-                (signal 'ghub-http-error
-                        (list 401 "Unauthorized" "https://codeberg.org/api/v1/user" nil))))
+      (remoto-test--ghub-answers
+       (lambda (&rest _)
+         (signal 'ghub-http-error
+                 (list 401 "Unauthorized" "https://codeberg.org/api/v1/user" nil))))
       (expect (remoto--get-authenticated-user remoto--codeberg) :to-be nil)
       (expect 'ghub-get :to-have-been-called-times 1)))
 
@@ -4702,7 +5147,7 @@ At the level of OWNER, or at the root without OWNER."
   (it "reads one forge anonymously without its token, and leaves the other alone"
     (let ((remoto--logins (remoto-test--logins))
           (remoto-github-auth nil))
-      (spy-on 'ghub-get :and-return-value '((ok . t)))
+      (remoto-test--ghub-answers '((ok . t)))
       (spy-on 'remoto--find-token :and-return-value nil)
       (expect (remoto--api remoto--codeberg "repos/o/r") :to-equal '((ok . t)))
       (expect (plist-get (cddr (spy-calls-args-for 'ghub-get 0)) :auth) :to-be 'none)
@@ -7200,17 +7645,17 @@ release-2, and only main and release-1 have a tree."
       (let ((remoto--logins (remoto-test--logins :failed t))
             (dired-listing-switches "-al")
             (before (buffer-list)))
-        (spy-on 'ghub-get :and-call-fake
-                (lambda (resource &rest _)
-                  (pcase resource
-                    ("/repos/acme/tool/git/trees/rel?recursive=1&per_page=1000&page=1"
-                     (signal 'ghub-http-error
-                             (list 400 "Bad Request" "https://codeberg.org/api/v1/x"
-                                   '((message . "sha not found [rel]")))))
-                    ("/repos/acme/tool/branches?limit=50&page=1"
-                     '(((name . "main")) ((name . "release-1"))))
-                    ("/repos/acme/tool/tags?limit=50&page=1" '(((name . "release-2"))))
-                    (_ (error "Unexpected %s" resource)))))
+        (remoto-test--ghub-answers
+         (lambda (resource &rest _)
+           (pcase resource
+             ("/repos/acme/tool/git/trees/rel?recursive=1&per_page=1000&page=1"
+              (signal 'ghub-http-error
+                      (list 400 "Bad Request" "https://codeberg.org/api/v1/x"
+                            '((message . "sha not found [rel]")))))
+             ("/repos/acme/tool/branches?limit=50&page=1"
+              '(((name . "main")) ((name . "release-1"))))
+             ("/repos/acme/tool/tags?limit=50&page=1" '(((name . "release-2"))))
+             (_ (error "Unexpected %s" resource)))))
         (unwind-protect
             (expect (buffer-local-value 'dired-directory
                                         (find-file-noselect "/cb:acme/tool@rel"))
@@ -8959,10 +9404,10 @@ Returns the full path after completion, or INPUT if no completion."
           (remoto--default-branch-cache (make-hash-table :test 'equal))
           (remoto--logins (remoto-test--logins :failed nil :token "ghp_private_token" :user "testuser"))
           (captured-auth nil))
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (_resource &optional _params &rest args)
-                (setq captured-auth (plist-get args :auth))
-                '((default_branch . "main"))))
+      (remoto-test--ghub-answers
+       (lambda (_resource &optional _params &rest args)
+         (setq captured-auth (plist-get args :auth))
+         '((default_branch . "main"))))
       (remoto-forge-default-ref remoto--github "acme" "widgets")
       (expect captured-auth :to-equal "ghp_private_token")))
 
@@ -8971,10 +9416,10 @@ Returns the full path after completion, or INPUT if no completion."
           (remoto--default-branch-cache (make-hash-table :test 'equal))
           (remoto--logins (remoto-test--logins :failed t :token nil :user nil))
           (captured-auth nil))
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (_resource &optional _params &rest args)
-                (setq captured-auth (plist-get args :auth))
-                '((default_branch . "main"))))
+      (remoto-test--ghub-answers
+       (lambda (_resource &optional _params &rest args)
+         (setq captured-auth (plist-get args :auth))
+         '((default_branch . "main"))))
       (remoto-forge-default-ref remoto--github "acme" "widgets")
       (expect captured-auth :to-equal 'none)))
 
@@ -8996,10 +9441,10 @@ Returns the full path after completion, or INPUT if no completion."
     (let ((remoto--logins (remoto-test--logins :failed nil :token nil :user nil))
           (remoto-github-auth nil)
           (auths nil))
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (_resource &optional _params &rest args)
-                (push (plist-get args :auth) auths)
-                '((default_branch . "main"))))
+      (remoto-test--ghub-answers
+       (lambda (_resource &optional _params &rest args)
+         (push (plist-get args :auth) auths)
+         '((default_branch . "main"))))
       (spy-on 'remoto--find-token :and-return-value "ghp_found")
       (expect (alist-get 'default_branch (remoto--api remoto--github "repos/acme/widgets"))
               :to-equal "main")
@@ -9016,10 +9461,10 @@ Returns the full path after completion, or INPUT if no completion."
     (let ((remoto--logins (remoto-test--logins :failed nil :token nil :user nil))
           (remoto-github-auth nil)
           (auths nil))
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (_resource &optional _params &rest args)
-                (push (plist-get args :auth) auths)
-                '((full_name . "acme/widgets"))))
+      (remoto-test--ghub-answers
+       (lambda (_resource &optional _params &rest args)
+         (push (plist-get args :auth) auths)
+         '((full_name . "acme/widgets"))))
       (spy-on 'remoto--find-token :and-return-value nil)
       (expect (remoto--api remoto--github "repos/acme/widgets")
               :to-equal '((full_name . "acme/widgets")))
@@ -9126,6 +9571,62 @@ Returns the full path after completion, or INPUT if no completion."
       (expect remoto--inflight-count :to-equal 2)
       (funcall (car callbacks) 'V 'h 's 'r)
       (expect remoto--inflight-count :to-equal 1))))
+
+(describe "an async request that gets no reply"
+  ;; The fetches of the completion and the later pages of a listing: nobody
+  ;; waits for them, so only their deadline can end a dead one.
+  (before-each
+    (spy-on 'remoto--show-status)
+    (setq remoto-test--buffer nil
+          remoto-test--process nil)
+    (remoto-test--requests-begin))
+
+  (after-each (remoto-test--requests-end))
+
+  (it "calls ERRBACK once and frees the indicator, and drops a reply that comes after"
+    (let ((remoto-request-timeout 0.05)
+          (remoto--inflight-count 0)
+          (remoto--logins (remoto-test--logins :failed nil :token 'token))
+          (failed 0)
+          (got 'none))
+      (remoto-test--request-in 'remoto-test--buffer 'remoto-test--process)
+      (remoto--api-async remoto--github "search/x"
+                         (lambda (data) (setq got data))
+                         (lambda () (setq failed (1+ failed))))
+      (expect remoto--inflight-count :to-equal 1)
+      (sleep-for 0.2)
+      (expect failed :to-equal 1)
+      (expect remoto--inflight-count :to-equal 0)
+      (expect (process-live-p remoto-test--process) :to-be nil)
+      (expect (buffer-live-p remoto-test--buffer) :to-be nil)
+      (funcall (car remoto-test--reply) 'VALUE)
+      (expect got :to-be 'none)
+      (expect failed :to-equal 1)
+      (expect remoto--inflight-count :to-equal 0)))
+
+  (it "leaves no timer behind once the reply is in"
+    (let ((remoto--inflight-count 0)
+          (remoto--logins (remoto-test--logins :failed nil :token 'token))
+          (timers (copy-sequence timer-list))
+          (got 'none))
+      (remoto-test--request-in 'remoto-test--buffer)
+      (remoto--api-async remoto--github "search/x" (lambda (data) (setq got data)))
+      (funcall (car remoto-test--reply) 'VALUE)
+      (expect got :to-be 'VALUE)
+      (expect (seq-difference timer-list timers) :to-be nil)))
+
+  (it "lets Forgejo's pages asked at once come back with those that answered"
+    (let ((remoto-request-timeout 0.05)
+          (remoto--inflight-count 0)
+          (remoto--logins (remoto-test--logins :failed t)))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (resource _params &rest args)
+                (if (equal resource "/a")
+                    (progn (funcall (plist-get args :callback) '((n . 1))) nil)
+                  (generate-new-buffer " *remoto-test-http*"))))
+      (expect (remoto-test--within 2
+                (remoto-forgejo--at-once remoto--codeberg '("a" "b")))
+              :to-equal '(((n . 1)) failed)))))
 
 (describe "remoto fetch indicator overlay"
   (it "renders the indicator between the prompt and the input"
@@ -9463,10 +9964,10 @@ three functions the indicator asks are answered by a temp buffer."
           (throw-on-input nil)
           seen)
       (spy-on 'redisplay)
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (&rest _)
-                (setq seen (overlayp remoto--status-overlay))
-                '((name . "main"))))
+      (remoto-test--ghub-answers
+       (lambda (&rest _)
+         (setq seen (overlayp remoto--status-overlay))
+         '((name . "main"))))
       (remoto-test-with-minibuffer-contents "/gh:agzam/remoto.el@"
         (expect (remoto--ghub-get remoto--github "/repos/o/r/branches" 'none "repos/o/r/branches")
                 :to-equal '((name . "main")))
@@ -9479,7 +9980,7 @@ three functions the indicator asks are answered by a temp buffer."
           (remoto-show-fetch-indicator t)
           (throw-on-input nil))
       (spy-on 'message)
-      (spy-on 'ghub-get :and-return-value '((default_branch . "main")))
+      (remoto-test--ghub-answers '((default_branch . "main")))
       (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil)))
         (remoto--ghub-get remoto--github "/repos/o/r" 'none "repos/o/r"))
       (expect 'message :to-have-been-called-with
@@ -9492,8 +9993,8 @@ three functions the indicator asks are answered by a temp buffer."
           (remoto--status-overlay nil)
           (throw-on-input nil))
       (spy-on 'redisplay)
-      (spy-on 'ghub-get :and-call-fake
-              (lambda (&rest _) (signal 'ghub-http-error '(404 "Not found" "u" nil))))
+      (remoto-test--ghub-answers
+       (lambda (&rest _) (signal 'ghub-http-error '(404 "Not found" "u" nil))))
       (remoto-test-with-minibuffer-contents "/gh:agzam/nope/"
         (expect (remoto--ghub-get remoto--github "/repos/agzam/nope" 'none "repos/agzam/nope")
                 :to-throw 'user-error)
@@ -12814,6 +13315,63 @@ Buffers BODY creates are killed afterwards."
                 :to-equal bytes)
         (expect (remoto-forge-content remoto--gist "me" "0b1c" nil "notes.md")
                 :to-equal (encode-coding-string "é!" 'utf-8))))))
+
+(defconst remoto-test--raw-url "https://gist.githubusercontent.com/me/0b1c/raw/big.bin"
+  "The raw URL of a file of a gist.")
+
+(defun remoto-test--raw-answers (status body)
+  "Fake `url-retrieve' as a request answered with STATUS and BODY at once.
+Its buffer, which url.el leaves to the callback, goes to `remoto-test--buffer'."
+  (spy-on 'url-retrieve :and-call-fake
+          (lambda (_url callback &rest _)
+            (setq remoto-test--buffer (generate-new-buffer " *remoto-test-http*"))
+            (with-current-buffer remoto-test--buffer
+              (set-buffer-multibyte nil)
+              (insert (format "HTTP/1.1 %d X\r\nContent-Type: text/plain\r\n\r\n" status)
+                      body)
+              (setq-local url-http-response-status status)
+              (funcall callback (and (/= status 200) `(:error (error http ,status)))))
+            remoto-test--buffer)))
+
+(describe "a gist file past 1MB"
+  ;; The answer of a gist holds a file up to 1MB; its raw URL has the rest.
+  (before-each
+    (setq remoto-test--buffer nil)
+    (remoto-test--requests-begin))
+
+  (after-each (remoto-test--requests-end))
+
+  (it "reads as the bytes its raw URL answers, and leaves no buffer"
+    (remoto-test-with-gist-answers
+      (let ((bytes (unibyte-string #xff 0 ?a ?\n)))
+        (puthash "0b1c" `((id . "0b1c") (owner (login . "me"))
+                          (files (big.bin (filename . "big.bin") (size . 2000000)
+                                          (truncated . t) (content . "")
+                                          (raw_url . ,remoto-test--raw-url))))
+                 remoto-gist--gists)
+        (remoto-test--raw-answers 200 bytes)
+        (expect (remoto-forge-content remoto--gist "me" "0b1c" nil "big.bin")
+                :to-equal bytes)
+        (expect (buffer-live-p remoto-test--buffer) :to-be nil))))
+
+  (it "says what the raw URL answered when that is no 200"
+    (remoto-test--raw-answers 404 "Not Found")
+    (expect (remoto-gist--raw remoto-test--raw-url)
+            :to-throw 'user-error
+            (list (concat "Remoto: " remoto-test--raw-url " answered 404")))
+    (expect (buffer-live-p remoto-test--buffer) :to-be nil))
+
+  (it "ends once the host sent nothing for remoto-request-timeout seconds"
+    (let ((remoto-request-timeout 0.05))
+      (spy-on 'url-retrieve :and-call-fake
+              (lambda (&rest _)
+                (setq remoto-test--buffer (generate-new-buffer " *remoto-test-http*"))))
+      (expect (remoto-test--within 2
+                (condition-case err
+                    (remoto-gist--raw remoto-test--raw-url)
+                  (user-error (error-message-string err))))
+              :to-equal "Remoto: gist.githubusercontent.com sent nothing for 0.05 seconds")
+      (expect (buffer-live-p remoto-test--buffer) :to-be nil))))
 
 (describe "the anchor of a gist file"
   (it "follows the gist page, which runs the name through Rails' parameterize"

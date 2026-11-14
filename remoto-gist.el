@@ -101,19 +101,32 @@ names its files without their content."
     (or (cdr (assoc name (remoto-gist--files (remoto-gist--get forge owner id))))
         (user-error "%s%s in the gist %s" remoto--not-found name id))))
 
-(defun remoto-gist--raw (url)
-  "Return the bytes at URL, the raw URL of a file, as a unibyte string."
-  (let ((buffer (or (url-retrieve-synchronously url t t 60)
-                    (user-error "Remoto: no answer from %s" url))))
+(defun remoto-gist--raw-end (req url)
+  "End REQ with the answer to URL in the current buffer, and kill the buffer."
+  (let ((buffer (current-buffer))
+        (status (bound-and-true-p url-http-response-status)))
     (unwind-protect
-        (with-current-buffer buffer
-          (unless (eql 200 (bound-and-true-p url-http-response-status))
-            (user-error "Remoto: %s answered %s" url
-                        (bound-and-true-p url-http-response-status)))
-          (goto-char (point-min))
-          (re-search-forward "\r?\n\r?\n")
-          (buffer-substring-no-properties (point) (point-max)))
+        (cond ((null status)
+               (remoto--request-end
+                req 'error (list 'user-error (format "Remoto: no answer from %s" url))))
+              ((not (eql 200 status))
+               (remoto--request-end
+                req 'error (list 'user-error (format "Remoto: %s answered %s" url status))))
+              (t (goto-char (point-min))
+                 (re-search-forward "\r?\n\r?\n")
+                 (remoto--request-end
+                  req 'done (buffer-substring-no-properties (point) (point-max)))))
       (kill-buffer buffer))))
+
+(defun remoto-gist--raw (url)
+  "Return the bytes at URL, the raw URL of a file, as a unibyte string.
+The request ends as every request does when its host sends nothing."
+  (let ((req (remoto--request-create :host (url-host (url-generic-parse-url url))
+                                     :resource url)))
+    (setf (remoto--request-buffer req)
+          (url-retrieve url (lambda (_status) (remoto-gist--raw-end req url)) nil t t))
+    (remoto--request-watch req)
+    (remoto--request-result (remoto--request-wait req))))
 
 (cl-defmethod remoto-forge-default-ref ((_forge remoto-gist) _owner _id)
   "A gist has no refs: its one tree is its latest revision."

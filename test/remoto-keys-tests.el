@@ -617,7 +617,7 @@
                           "login-full"))
       (dolist (scenario scenarios)
         (dolist (step (cddr scenario))
-          (expect (memq (car step) '(case step probe fault check restart visit spend))
+          (expect (memq (car step) '(case step type probe fault check restart visit spend))
                   :to-be-truthy)))
       (expect (seq-filter (lambda (scenario) (plist-get (cadr scenario) :token)) scenarios)
               :to-equal (list (assoc "lit" scenarios)))
@@ -640,6 +640,23 @@
     (it "points the mock instance at the port, over plain HTTP"
       (expect (format "%S" (plist-get (cadr (assoc "mock" scenarios)) :init))
               :to-match "\"127\\.0\\.0\\.1:8899/api/v1\".*(\"mock\" \"127\\.0\\.0\\.1:8899\")"))
+    (it "plays a forge that sends nothing between the canned faults and the relay"
+      ;; Typed and not waited for: the checks run while Emacs waits for the
+      ;; forge, then find the message a deadline of 3 seconds leaves.
+      (let* ((steps (cddr (assoc "mock" scenarios)))
+             (hang (member '(fault "hang") steps)))
+        (expect (mapcar #'car hang)
+                :to-equal '(fault probe type check check check probe fault case))
+        (expect (mapcar #'cadr (seq-filter (lambda (step) (eq (car step) 'fault)) steps))
+                :to-equal '("429" "503" "502" "500" "hang" "none"))
+        (expect (nth 1 hang) :to-equal '(probe "deadline" (setq remoto-request-timeout 3)))
+        (expect (nth 2 hang)
+                :to-equal `(type "ff /mock:forgejo/docs, fault hang"
+                                 ,(kbd "C-x C-f") "/mock:forgejo/docs" submit))
+        (expect (mapcar (lambda (check) (nth 4 check)) (seq-subseq hang 3 6))
+                :to-equal '(2 6 10))
+        (expect "remoto--if-found: Remoto: 127.0.0.1:8899/api/v1 sent nothing for 3 seconds"
+                :to-match (nth 3 (nth 4 hang)))))
     (it "types a setopt form at eval-expression"
       (expect (remoto-keys--steps (cddr (car (remoto-keys--setopt '(("gitea" "gitea.com")))))
                                   "vanilla")
@@ -713,7 +730,88 @@
     ;; An error that leaves a process filter ends a batch Emacs with 255.
     (spy-on 'remoto-keys--upstream :and-call-fake (lambda (_) (error "Relay broke")))
     (expect (remoto-keys-tests--mock-get "/api/v1/repos/forgejo/docs")
-            :to-equal '(502 . "mock Forgejo: Relay broke\n"))))
+            :to-equal '(502 . "mock Forgejo: Relay broke\n")))
+  (it "reads a request and sends nothing under the hang fault, the connection kept"
+    (spy-on 'remoto-keys--upstream)
+    (let* ((remoto-keys--fault "hang")
+           (printed nil)
+           (received "")
+           (standard-output (lambda (char) (push char printed)))
+           (server (remoto-keys--mock-start))
+           (client (make-network-process
+                    :name "remoto-keys-tests-client" :host "127.0.0.1"
+                    :service (process-contact server :service)
+                    :coding 'binary :noquery t
+                    :filter (lambda (_process chunk)
+                              (setq received (concat received chunk))))))
+      (unwind-protect
+          (progn
+            (process-send-string
+             client "GET /api/v1/repos/forgejo/docs HTTP/1.1\r\nHost: mock\r\n\r\n")
+            ;; Until the mock has read the request, then long enough for an answer.
+            (with-timeout (5)
+              (while (null printed) (accept-process-output nil 0.05)))
+            (sleep-for 0.2)
+            (expect (concat (reverse printed))
+                    :to-equal "  [mock Forgejo, fault hang: /api/v1/repos/forgejo/docs]\n")
+            (expect received :to-equal "")
+            (expect (process-live-p client) :to-be-truthy)
+            (expect 'remoto-keys--upstream :not :to-have-been-called))
+        (delete-process client)
+        (delete-process server)))))
+
+(describe "remoto-keys--check-step"
+  (it "asks once, and prints what it got when that is not what it wants"
+    (spy-on 'remoto-keys--eval :and-return-value "Remoto: no")
+    (expect (with-output-to-string
+              (expect (remoto-keys--check-step "sc-x" "a label" '(form) "\\`Remoto: yes")
+                      :to-be nil))
+            :to-equal "FAIL sc-x | a label: got \"Remoto: no\", want \"\\\\`Remoto: yes\"\n")
+    (expect 'remoto-keys--eval :to-have-been-called-times 1))
+  (it "with seconds, asks again until the value is the one it wants"
+    ;; What a typed command leaves comes when the command is over.
+    (let ((values (list nil nil 'waiting)))
+      (spy-on 'remoto-keys--eval :and-call-fake (lambda (&rest _) (pop values)))
+      (spy-on 'sleep-for)
+      (expect (with-output-to-string
+                (expect (remoto-keys--check-step "sc-x" "a label" '(form) 'waiting 5)
+                        :to-be t))
+              :to-equal "PASS sc-x | a label\n")
+      (expect 'remoto-keys--eval :to-have-been-called-times 3)))
+  (it "with seconds, fails once they have passed"
+    (spy-on 'remoto-keys--eval :and-return-value nil)
+    (expect (with-output-to-string
+              (expect (remoto-keys--check-step "sc-x" "a label" '(form) 'waiting 0.3)
+                      :to-be nil))
+            :to-equal "FAIL sc-x | a label: got nil, want waiting\n")))
+
+(describe "a (type ...) step of a scenario"
+  (it "types after a reset and leaves Emacs working: no wait, no case"
+    (let ((remoto-keys--dir (file-name-as-directory (make-temp-file "remoto-keys" t)))
+          (remoto-keys--keep nil)
+          (evaluated nil))
+      (spy-on 'remoto-keys--start :and-return-value '(:lib "remoto"))
+      (spy-on 'remoto-keys--stop)
+      (spy-on 'remoto-keys--write)
+      (spy-on 'remoto-keys--wait-for-search)
+      (spy-on 'remoto-keys--wait-idle)
+      (spy-on 'remoto-keys--type)
+      (spy-on 'remoto-keys--eval
+              :and-call-fake (lambda (_name form &rest _) (push form evaluated) nil))
+      (unwind-protect
+          (expect (with-output-to-string
+                    (expect (remoto-keys--scenario
+                             `("x" (:gitconfig "")
+                               (type "ff /mock:o/r" ,(kbd "C-x C-f") "/mock:o/r" submit))
+                             "/elpa/")
+                            :to-equal '(:cases 0 :failed 0)))
+                  :to-match "^sc-x +ff /mock:o/r: typed, Emacs left to work$")
+        (delete-directory remoto-keys--dir t))
+      (expect (delete-dups evaluated)
+              :to-equal '((remoto-keys-reset) (and (active-minibuffer-window) t)))
+      (expect (spy-calls-args-for 'remoto-keys--type 0)
+              :to-equal '("sc-x" ((key "C-x") (key "C-f") (text "/mock:o/r") (key "Enter"))))
+      (expect 'remoto-keys--wait-idle :not :to-have-been-called))))
 
 (describe "remoto-keys--profile"
   :var (counts output written)

@@ -229,25 +229,32 @@ The account of the token is the fake one, never recorded."
       (progn (push resource remoto-e2e--missing)
              remoto-e2e--not-found)))
 
+(defvar remoto-e2e--waited nil
+  "Non-nil while remoto sends a request it waits for and input cannot end.")
+
+(defun remoto-e2e--request (request &rest args)
+  "Call `remoto--request' as REQUEST with ARGS, its request marked waited for."
+  (let ((remoto-e2e--waited t))
+    (apply request args)))
+
 (cl-defun remoto-e2e--ghub-get (ghub-get resource &optional _params
                                          &key reader callback errorback
                                          &allow-other-keys)
   "Answer the `ghub-get' of RESOURCE as GitHub did, parsed by READER.
-GHUB-GET is the real one.  Without CALLBACK and ERRORBACK the answer
-returns or signals at once; with them a timer delivers it, and the value
+GHUB-GET is the real one.  A request Emacs waits for has its answer
+before this returns; a timer delivers that of any other, and the value
 is a live buffer, as ghub's would be."
-  (push (if (or callback errorback) (concat "async " resource) resource)
+  (push (if remoto-e2e--waited resource (concat "async " resource))
         remoto-e2e--requests)
   (pcase-let* ((`(,code ,body) (remoto-e2e--answer ghub-get resource))
                (value (with-temp-buffer
                         (insert (remoto-e2e--json body))
                         (funcall reader nil))))
-    (if (not (or callback errorback))
-        (if (eql code 200)
-            value
-          (signal 'ghub-http-error
-                  (list code (nth 2 (assq code url-http-codes))
-                        (concat "https://api.github.com" resource) value)))
+    (if remoto-e2e--waited
+        (progn (if (eql code 200)
+                   (funcall callback value nil nil nil)
+                 (funcall errorback (list 'error 'http code value) nil nil nil))
+               nil)
       (let ((buffer (generate-new-buffer " *remoto-e2e-request*" t)))
         (cl-incf remoto-e2e--in-flight)
         (push (run-at-time
@@ -279,6 +286,7 @@ Return non-nil when answers keep coming."
 
 (remoto-e2e--load-fixtures)
 (advice-add 'ghub-get :around #'remoto-e2e--ghub-get)
+(advice-add 'remoto--request :around #'remoto-e2e--request)
 
 (defvar remoto-e2e--browsed nil
   "URLs the case sent to a browser, newest first.")

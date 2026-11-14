@@ -50,6 +50,7 @@
 (require 'ghub)
 (require 'iso8601)
 (require 'project)
+(require 'url-http)
 
 ;;;; Forges
 
@@ -644,6 +645,13 @@ directory-listing caches.  Defined early so functions above the
   :type 'integer
   :group 'remoto)
 
+(defcustom remoto-request-timeout 30
+  "Seconds a forge may send nothing before remoto ends a request to it.
+A connection that died without notice would otherwise hold Emacs until
+\\[keyboard-quit].  A reply that keeps arriving, however slowly, is not cut."
+  :type 'number
+  :group 'remoto)
+
 (cl-defstruct (remoto--login (:constructor remoto--login-create)
                              (:copier nil))
   "What remoto knows of its login at one API host.
@@ -890,11 +898,18 @@ there is no display.  Returns BODY's value."
        (remoto--sync-fetch-end))))
 
 (cl-defstruct (remoto--request (:constructor remoto--request-create))
-  "A forge request started under `while-no-input'."
+  "A forge request sent through a callback.
+STATUS is `pending', `done' or `error'; VALUE is the answer, or the
+condition of a request that failed.  THEN is called with the request once
+it is over, and TIMER ends it when the forge sends nothing."
   (status 'pending)
   buffer
   value
-  headers)
+  headers
+  host
+  resource
+  then
+  timer)
 
 (defvar remoto--response-headers nil
   "The headers of the answer that `remoto--ghub-get' read last.
@@ -908,6 +923,16 @@ waits on that request or reads the landed reply instead of asking
 the forge again.  A failed request leaves the table, so the next call
 retries.")
 
+(defun remoto--forget-stale-requests ()
+  "Forget the requests an older remoto left, which lack this one's slots.
+Loading remoto again in a running Emacs, as an upgrade does, keeps them."
+  (maphash (lambda (key req)
+             (unless (ignore-errors (or (remoto--request-timer req) t))
+               (remhash key remoto--pending-requests)))
+           remoto--pending-requests))
+
+(remoto--forget-stale-requests)
+
 (defun remoto--request-condition (err host resource)
   "Turn ERR, as ghub hands it to an errorback, into the condition ghub signals.
 HOST and RESOURCE name the request in the condition data."
@@ -918,10 +943,88 @@ HOST and RESOURCE name the request in the condition data."
     (`(error . ,data) (cons 'ghub-error data))
     (_ err)))
 
-(defun remoto--request-start (key forge resource auth)
-  "Start a callback request to FORGE for RESOURCE with AUTH, registered under KEY."
-  (let ((req (remoto--request-create))
-        (host (remoto--api-host forge)))
+(defun remoto--request-end (req status value &optional headers)
+  "Mark REQ over with STATUS, VALUE and HEADERS, and tell who waits for it.
+A request ends once: what comes for it later is dropped."
+  (when (eq (remoto--request-status req) 'pending)
+    (when-let* ((timer (remoto--request-timer req)))
+      (cancel-timer timer))
+    (setf (remoto--request-value req) value
+          (remoto--request-headers req) headers
+          (remoto--request-status req) status)
+    (when-let* ((then (remoto--request-then req)))
+      (funcall then req))))
+
+(defun remoto--request-reply-buffer (req)
+  "Return the buffer of the reply to REQ, and keep it in REQ.
+url.el goes on with a redirect in another buffer, which the buffer the
+request began in names in `url-redirect-buffer' until url.el kills it."
+  (let ((buffer (remoto--request-buffer req)))
+    (if-let* (((buffer-live-p buffer))
+              (next (buffer-local-value 'url-redirect-buffer buffer))
+              ((not (eq next buffer))))
+        (progn (setf (remoto--request-buffer req) next)
+               (remoto--request-reply-buffer req))
+      buffer)))
+
+(defun remoto--drop-connections (host port)
+  "Delete the idle connections of url.el to HOST at PORT.
+What silenced one connection there, a sleep or a change of network,
+likely killed them, and each would cost a request a deadline of its own."
+  (thread-last
+    (hash-table-keys url-http-open-connections)
+    ;; (HOST PORT THREAD) in an Emacs with threads, (HOST . PORT) before.
+    (seq-filter (lambda (key)
+                  (and (equal host (car-safe key))
+                       (eql port (or (car-safe (cdr-safe key)) (cdr-safe key))))))
+    (seq-mapcat (lambda (key) (gethash key url-http-open-connections)))
+    ;; url.el files a connection once for each time it frees it.
+    (seq-uniq)
+    (mapc #'delete-process)))
+
+(defun remoto--request-abort (req condition)
+  "End REQ with CONDITION; close its connection and the idle ones to its host.
+The sentinel of url.el goes first: it would send the request again, or
+hand ghub a reply that never came."
+  (let ((buffer (remoto--request-reply-buffer req)))
+    (when (buffer-live-p buffer)
+      (when-let* ((url (buffer-local-value 'url-current-object buffer)))
+        (remoto--drop-connections (url-host url) (url-port url)))
+      (when-let* ((process (get-buffer-process buffer)))
+        (set-process-sentinel process #'ignore)
+        (delete-process process))
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer buffer))))
+  (remoto--request-end req 'error condition))
+
+(defun remoto--request-progress (req)
+  "Return the buffer of the reply to REQ and its size, to tell when it grows."
+  (let ((buffer (remoto--request-reply-buffer req)))
+    (cons buffer (and (buffer-live-p buffer) (buffer-size buffer)))))
+
+(defun remoto--request-watch (req)
+  "End REQ once its forge sent nothing for `remoto-request-timeout' seconds.
+The timer comes back while the reply grows, so only silence ends a request."
+  (when (eq (remoto--request-status req) 'pending)
+    (setf (remoto--request-timer req)
+          (run-at-time remoto-request-timeout nil #'remoto--request-check
+                       req (remoto--request-progress req)))))
+
+(defun remoto--request-check (req seen)
+  "End REQ when its reply is where SEEN found it, else watch it on."
+  (if (equal seen (remoto--request-progress req))
+      (remoto--request-abort
+       req (list 'user-error (format "Remoto: %s sent nothing for %g seconds"
+                                     (remoto--request-host req)
+                                     remoto-request-timeout)))
+    (remoto--request-watch req)))
+
+(defun remoto--request-send (forge resource auth &optional then)
+  "GET RESOURCE of FORGE with AUTH through a callback; return the request.
+THEN, when non-nil, is called with the `remoto--request' once it is over:
+answered, failed, or ended because the forge sent nothing."
+  (let* ((host (remoto--api-host forge))
+         (req (remoto--request-create :host host :resource resource :then then)))
     (setf (remoto--request-buffer req)
           (ghub-get resource nil
                     :auth auth
@@ -930,16 +1033,61 @@ HOST and RESOURCE name the request in the condition data."
                     :host host
                     :forge (remoto--ghub-forge forge)
                     :callback (lambda (value &optional headers &rest _)
-                                (setf (remoto--request-value req) value
-                                      (remoto--request-headers req) headers
-                                      (remoto--request-status req) 'done))
+                                (remoto--request-end req 'done value headers))
                     :errorback (lambda (err &optional headers &rest _)
-                                 (remhash key remoto--pending-requests)
-                                 (setf (remoto--request-value req)
-                                       (remoto--request-condition err host resource)
-                                       (remoto--request-headers req) headers
-                                       (remoto--request-status req) 'error))))
-    (puthash key req remoto--pending-requests)
+                                 (remoto--request-end
+                                  req 'error
+                                  (remoto--request-condition err host resource)
+                                  headers))))
+    (remoto--request-watch req)
+    req))
+
+(defun remoto--request-wait (req)
+  "Wait until REQ is over and return it; a quit ends REQ.
+A request whose buffer died with no reply is over too: ghub kills the
+buffer when it fails to handle the reply."
+  (condition-case err
+      ;; No sequence to map: the loop reads processes until the request is over.
+      (while (eq (remoto--request-status req) 'pending)
+        (if (buffer-live-p (remoto--request-reply-buffer req))
+            (accept-process-output nil 0.1)
+          (remoto--request-end
+           req 'error (list 'error (format "Remoto: no reply for %s"
+                                           (remoto--request-resource req))))))
+    (quit (remoto--request-abort req err)
+          (signal (car err) (cdr err))))
+  req)
+
+(defun remoto--request-result (req)
+  "Return the value of REQ, or signal the condition it failed with.
+The headers go where `remoto--ghub-get' reads them: those of an answer in
+`remoto--response-headers', those of a failure in `ghub-response-headers'."
+  (if (eq (remoto--request-status req) 'done)
+      (progn (setq remoto--response-headers (remoto--request-headers req))
+             (remoto--request-value req))
+    (let ((err (remoto--request-value req)))
+      (setq ghub-response-headers (remoto--request-headers req))
+      (signal (car err) (cdr err)))))
+
+(defun remoto--request (forge resource auth)
+  "GET RESOURCE of FORGE with AUTH and wait for the reply.
+Return its value, or signal the condition the request failed with."
+  (thread-first (remoto--request-send forge resource auth)
+                (remoto--request-wait)
+                (remoto--request-result)))
+
+(defun remoto--request-start (key forge resource auth)
+  "Start a callback request to FORGE for RESOURCE with AUTH, registered under KEY.
+A request that fails leaves `remoto--pending-requests', so the next call
+for KEY asks again."
+  (let ((req (remoto--request-send
+              forge resource auth
+              (lambda (req)
+                (unless (or (eq (remoto--request-status req) 'done)
+                            (not (eq req (gethash key remoto--pending-requests))))
+                  (remhash key remoto--pending-requests))))))
+    (unless (eq (remoto--request-status req) 'error)
+      (puthash key req remoto--pending-requests))
     req))
 
 (defun remoto--auth-key (auth)
@@ -950,27 +1098,16 @@ goes in hashed.  A symbol such as `none' is no secret and stays as is."
   (if (stringp auth) (secure-hash 'sha256 auth) auth))
 
 (defun remoto--ghub-get-interruptible (forge resource auth)
-  "GET RESOURCE of FORGE with AUTH through a callback, in a way input can end.
-`url-retrieve-synchronously' leaves its buffer behind when `while-no-input'
-throws past it, and the reply nobody reads keeps the buffer alive; ghub
-kills the buffer of a callback request itself once the reply is handled.
-Return the value or signal the condition the synchronous call would."
+  "GET RESOURCE of FORGE with AUTH, waiting in a way input can end.
+The request is in `remoto--pending-requests': it outlives a wait that
+`while-no-input' threw out of, and the next call for it reads its reply.
+Return the value or signal the condition the request failed with."
   (let* ((key (list (remoto--api-host forge) resource (remoto--auth-key auth)))
          (req (or (gethash key remoto--pending-requests)
                   (remoto--request-start key forge resource auth))))
-    (while (and (eq (remoto--request-status req) 'pending)
-                (buffer-live-p (remoto--request-buffer req)))
-      (accept-process-output nil 0.1))
+    (remoto--request-wait req)
     (remhash key remoto--pending-requests)
-    (pcase (remoto--request-status req)
-      ('done (setq remoto--response-headers (remoto--request-headers req))
-             (remoto--request-value req))
-      ;; `remoto--ghub-get' binds these around this call and reads them
-      ;; for the message, as after a synchronous request.
-      ('error (let ((err (remoto--request-value req)))
-                (setq ghub-response-headers (remoto--request-headers req))
-                (signal (car err) (cdr err))))
-      (_ (error "Remoto: no reply for %s" resource)))))
+    (remoto--request-result req)))
 
 (defconst remoto--not-found "Remoto: not found: "
   "How the `user-error' for an answer of 404 starts, or of 422 to a search.
@@ -1029,26 +1166,20 @@ Without a token it names `remoto-login', which lifts GitHub's limit."
           (and (eq auth 'none) (remoto--login-tail))))
 
 (defun remoto--ghub-get (forge resource auth endpoint)
-  "Call `ghub-get' on RESOURCE of FORGE with AUTH, translating errors.
+  "GET RESOURCE of FORGE with AUTH through ghub and wait, translating errors.
 ENDPOINT is used in error messages for context.  The host is always
 explicit: ghub's default for a forge is its web host, which answers HTML."
-  ;; A synchronous ghub-get leaves the headers of its answer here, so
-  ;; the binding holds this request's and no earlier one's.
+  ;; A failed request leaves the headers of its answer here, so the
+  ;; binding holds this request's and no earlier one's.
   (let ((ghub-response-headers nil))
     (condition-case err
         (remoto--with-fetch-indicator
           (let ((inhibit-message (not ghub-debug)))
             ;; `while-no-input' binds `throw-on-input'; only then can input
-            ;; abandon the call, and only then is the callback path needed.
+            ;; abandon the wait, and only then does a request outlive its call.
             (if throw-on-input
                 (remoto--ghub-get-interruptible forge resource auth)
-              (prog1 (ghub-get resource nil
-                               :auth auth
-                               :username (remoto--ghub-username forge auth)
-                               :reader #'remoto--json-reader
-                               :host (remoto--api-host forge)
-                               :forge (remoto--ghub-forge forge))
-                (setq remoto--response-headers ghub-response-headers)))))
+              (remoto--request forge resource auth))))
       ;; ghub signals every HTTP failure as (ghub-http-error CODE MESSAGE URL
       ;; PAYLOAD); there are no per-status error symbols to match on.
       (ghub-http-error
@@ -3469,22 +3600,13 @@ CALLBACK and ERRBACK are those of `remoto--api-async'."
   (condition-case nil
       (let ((inhibit-message t))
         (remoto--inflight-inc)
-        ;; ghub calls :callback as (value headers status req) and retries
-        ;; with (value) on `wrong-number-of-arguments'.  Accept the full
-        ;; arglist so the retry never fires and the in-flight counter is
-        ;; decremented exactly once.  All callers pass a 1-arg callback.
-        (ghub-get resource nil
-                  :auth auth
-                  :username (remoto--ghub-username forge auth)
-                  :reader #'remoto--json-reader
-                  :host (remoto--api-host forge)
-                  :forge (remoto--ghub-forge forge)
-                  :callback (lambda (value &rest _)
-                              (remoto--inflight-dec)
-                              (funcall callback value))
-                  :errorback (lambda (&rest _)
-                               (remoto--inflight-dec)
-                               (when errback (funcall errback)))))
+        (remoto--request-send
+         forge resource auth
+         (lambda (req)
+           (remoto--inflight-dec)
+           (if (eq (remoto--request-status req) 'done)
+               (funcall callback (remoto--request-value req))
+             (when errback (funcall errback))))))
     (error (remoto--inflight-dec)
            (when errback (funcall errback)))))
 
@@ -4275,12 +4397,7 @@ types.  It says who the token belongs to, or that GitHub refused it."
                   ((stringp token)))
         (condition-case err
             (when-let* ((data (let ((inhibit-message t))
-                                (ghub-get "/user" nil
-                                          :auth token
-                                          :username (remoto--ghub-username
-                                                     remoto--github token)
-                                          :host (remoto--api-host remoto--github)
-                                          :reader #'remoto--json-reader)))
+                                (remoto--request remoto--github "/user" token)))
                         (user (alist-get 'login data)))
               (setf (remoto--login-user login) user)
               (message "Remoto: authenticated as %s" user))
