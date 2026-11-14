@@ -32,7 +32,7 @@
   (load (expand-file-name "remoto" dir) nil t))
 
 (cl-defstruct (remoto-gist (:include remoto-forge (title "GitHub Gist"))
-                           (:constructor remoto-gist-create)
+                           (:constructor remoto-gist--create)
                            (:copier nil))
   "GitHub's gists: repositories of one flat tree, with no refs.")
 
@@ -95,16 +95,22 @@ shows what GitHub holds."
   (puthash id (float-time) remoto-gist--fetched)
   (puthash id answer remoto-gist--gists))
 
+(defconst remoto-gist--new "new"
+  "The id of a gist still to make, at /gist:ME/new:/FILE; its first save makes it.
+No gist has that id: GitHub's ids are hex or digits.")
+
 (defun remoto-gist--get (forge owner id &optional max-age)
   "Return the gist ID on FORGE, as gists/ID answers it, cached.
 OWNER nil takes the gist's own; another owner than the gist's finds
 none, as on the gist site.  An answer older than MAX-AGE seconds is
-asked for again."
-  (let ((gist (or (and (not (remoto-gist--stale-p id max-age))
-                       (gethash id remoto-gist--gists))
-                  (when-let* ((answer (remoto--api forge (concat "gists/"
-                                                                 (url-hexify-string id)))))
-                    (remoto-gist--keep forge id answer)))))
+asked for again.  The gist still to make has no files."
+  (let ((gist (cond ((equal id remoto-gist--new)
+                     `((id . ,id) (owner (login . ,owner)) (files)))
+                    ((and (not (remoto-gist--stale-p id max-age))
+                          (gethash id remoto-gist--gists)))
+                    ((when-let* ((answer (remoto--api forge (concat "gists/"
+                                                                    (url-hexify-string id)))))
+                       (remoto-gist--keep forge id answer))))))
     (if (or (null gist)
             (and owner (not (string-equal-ignore-case owner (remoto-gist--owner gist)))))
         (user-error "%sthe gist %s of %s" remoto--not-found id owner)
@@ -241,14 +247,18 @@ for `remoto-gist--fresh-seconds', and a revert asks anew."
   "The timer that reverts the Dired buffers of gists once a command is over.")
 
 (defun remoto-gist--revert-direds (forge)
-  "Revert the Dired buffers of the gists and the listings of FORGE."
+  "Revert the Dired buffers of the listings of FORGE and of its cached gists.
+A deleted gist is in no cache: its Dired, still open, stays as it is."
   (setq remoto-gist--revert-timer nil)
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when-let* (((derived-mode-p 'dired-mode))
                   (dir (if (consp dired-directory) (car dired-directory) dired-directory))
                   ((stringp dir))
-                  ((string-prefix-p (remoto--prefix forge) dir)))
+                  ((string-prefix-p (remoto--prefix forge) dir))
+                  ((if-let* ((id (remoto-path-repo (remoto--parse dir))))
+                       (or (gethash id remoto-gist--gists) (gethash id remoto-gist--listed))
+                     t)))
         (revert-buffer)))))
 
 (defun remoto-gist--changed (forge owner id)
@@ -261,19 +271,36 @@ running keeps its buffer as it is."
           (run-at-time 0 nil #'remoto-gist--revert-direds forge))))
 
 (defun remoto-gist--relist (forge id answer)
-  "Put ANSWER, the gist ID now, in place of its lines in FORGE's cached listings."
-  (remoto--remember (remoto--repo-id forge (remoto-gist--owner answer) id)
-                    (remoto-gist--attributes answer t))
+  "Put ANSWER, the gist ID now, in place of its lines in FORGE's cached listings.
+A nil ANSWER, the gist deleted, takes its lines out."
+  (when answer
+    (remoto--remember (remoto--repo-id forge (remoto-gist--owner answer) id)
+                      (remoto-gist--attributes answer t)))
   (maphash (lambda (dir listing)
              (when (string-prefix-p (remoto--prefix forge) dir)
                (setf (remoto--listing-entries listing)
-                     (mapcar (lambda (entry)
-                               (if (equal id (alist-get 'gist-id (cdr entry)))
-                                   (remoto-gist--entry answer (equal dir (remoto--prefix forge))
-                                                       (alist-get 'gist-group (cdr entry)))
-                                 entry))
-                             (remoto--listing-entries listing)))))
+                     (seq-keep (lambda (entry)
+                                 (cond ((not (equal id (alist-get 'gist-id (cdr entry)))) entry)
+                                       (answer (remoto-gist--entry
+                                                answer (equal dir (remoto--prefix forge))
+                                                (alist-get 'gist-group (cdr entry))))))
+                               (remoto--listing-entries listing)))))
            remoto--listing-cache))
+
+(defun remoto-gist--list-new (forge answer)
+  "Put ANSWER, a gist just made on FORGE, first in its owner's cached listings.
+Those are the root's, among the token's own gists, and the owner's."
+  (let ((owner (remoto-gist--owner answer)))
+    (maphash (lambda (dir listing)
+               (when-let* ((parsed (and (string-prefix-p (remoto--prefix forge) dir)
+                                        (remoto--parse dir)))
+                           ((or (eq (remoto-path-level parsed) 'root)
+                                (string-equal-ignore-case
+                                 owner (or (remoto-path-owner parsed) "")))))
+                 (let ((root (eq (remoto-path-level parsed) 'root)))
+                   (push (remoto-gist--entry answer root (and root "Your gists"))
+                         (remoto--listing-entries listing)))))
+             remoto--listing-cache)))
 
 (defun remoto-gist--take (forge id answer)
   "Make ANSWER, what a write of the gist ID on FORGE answered, every cache's.
@@ -285,12 +312,12 @@ Its listing lines and its tree follow; return ANSWER."
   (remoto-gist--changed forge (remoto-gist--owner answer) id)
   answer)
 
-(defun remoto-gist--patch (forge id files)
-  "Send FILES, as PATCH gists/ID takes them, to the gist ID on FORGE.
+(defun remoto-gist--patch (forge id payload)
+  "Send PAYLOAD, as PATCH gists/ID takes it, to the gist ID on FORGE.
 Return the gist as GitHub answers it, which every cache takes."
   (remoto-gist--take forge id (remoto--api-write forge "PATCH"
                                                  (concat "gists/" (url-hexify-string id))
-                                                 `((files . ,files)))))
+                                                 payload)))
 
 (defun remoto-gist--flat (path)
   "Refuse PATH, the name of a gist file, with a slash in it: a gist is flat."
@@ -343,23 +370,22 @@ rename there would copy the text and keep both names."
     (unless (equal path newpath)
       (remoto-gist--patch
        forge id
-       (if (assoc newpath files)
-           `((,(intern newpath) . ((content . ,(remoto-gist--text
-                                                  newpath (remoto-gist--bytes file) t))))
-             (,(intern path) . :null))
-         `((,(intern path) . ((filename . ,newpath))))))))
+       `((files . ,(if (assoc newpath files)
+                       `((,(intern newpath) . ((content . ,(remoto-gist--text
+                                                              newpath (remoto-gist--bytes file) t))))
+                         (,(intern path) . :null))
+                     `((,(intern path) . ((filename . ,newpath))))))))))
   nil)
 
 (cl-defmethod remoto--forge-delete ((forge remoto-gist) owner id _ref path)
   "Delete the file PATH of the gist ID of OWNER on FORGE, in one PATCH.
 It stays in the gist's revisions.  GitHub keeps the last file of a gist,
-which goes only with the gist; a file the gist lacks needs no request."
+so it goes with the gist, after a question; a file the gist lacks needs
+no request."
   (let ((files (remoto-gist--files (remoto-gist--get forge owner id 0))))
     (cond ((not (assoc path files)) nil)
-          ((null (cdr files))
-           (user-error "Remoto: GitHub keeps the last file of a gist; D on the line \
-of the gist deletes it"))
-          (t (remoto-gist--patch forge id `((,(intern path) . :null)))
+          ((null (cdr files)) (remoto--delete-repo (list forge owner id)))
+          (t (remoto-gist--patch forge id `((files (,(intern path) . :null))))
              nil))))
 
 (cl-defmethod remoto--forge-current-content ((forge remoto-gist) owner id _ref path)
@@ -369,10 +395,192 @@ of the gist deletes it"))
 
 (cl-defmethod remoto--forge-write ((forge remoto-gist) _owner id _ref path bytes)
   "Make BYTES the file PATH of the gist ID on FORGE, in one PATCH.
-Return the note of the save's message: a public gist says so."
+Return the note of the save's message: a public gist says so.  The gist
+still to make takes no write but the save of a buffer that visits it."
+  (when (equal id remoto-gist--new)
+    (user-error "%s" (substitute-command-keys "Remoto: a new gist starts at the save \
+of a buffer that visits its file; \\[remoto-gist-create] makes one of any text")))
   (let ((answer (remoto-gist--patch
-                 forge id `((,(intern path) . ((content . ,(remoto-gist--text path bytes))))))))
+                 forge id
+                 `((files (,(intern path) . ((content . ,(remoto-gist--text path bytes)))))))))
     (and (eq (alist-get 'public answer) t) " (public gist)")))
+
+(defun remoto-gist--account (forge)
+  "Return the account of the token of FORGE: the owner of a new gist."
+  (or (remoto-gist--me forge)
+      (progn (remoto--write-token forge)
+             (user-error "Remoto: GitHub did not say whose token remoto has%s"
+                         (remoto--login-tail)))))
+
+(cl-defmethod remoto--forge-create-repo ((forge remoto-gist) owner files description public)
+  "Make a gist of OWNER on FORGE of FILES, each (NAME . BYTES), in one POST.
+DESCRIPTION may be empty; PUBLIC non-nil makes it public, else secret.
+Each file is refused before the request where GitHub would refuse it.
+Return the id; the gist leads the cached listings of OWNER."
+  (unless (remoto-gist--mine-p forge owner)
+    (remoto--read-only))
+  (let* ((payload `((description . ,description)
+                    (public . ,(and public t))
+                    (files . ,(mapcar (lambda (file)
+                                        `(,(intern (car file))
+                                          . ((content . ,(remoto-gist--text (car file)
+                                                                            (cdr file))))))
+                                      files))))
+         (answer (remoto--api-write forge "POST" "gists" payload))
+         (id (alist-get 'id answer)))
+    (remoto-gist--take forge id answer)
+    (remoto-gist--list-new forge answer)
+    id))
+
+(cl-defmethod remoto--forge-new-repo-p ((_forge remoto-gist) id)
+  "ID stands for a gist still to make when it is `remoto-gist--new'."
+  (equal id remoto-gist--new))
+
+(defun remoto-gist--ask ()
+  "Read what a new gist needs: (DESCRIPTION PUBLIC), PUBLIC t for a public gist.
+Secret or public has no default: a public gist shows on the owner's profile."
+  (list (read-string "Description of the new gist: ")
+        (eq ?p (car (read-multiple-choice
+                     "Make the gist"
+                     '((?s "secret" "Only who has its URL finds it")
+                       (?p "public" "Anyone finds it; it shows on your profile")))))))
+
+(cl-defmethod remoto--forge-new-repo ((forge remoto-gist) owner path bytes)
+  "Make a gist of OWNER on FORGE with BYTES as its file PATH; return its id.
+It asks the description, and secret or public."
+  (pcase-let ((`(,description ,public) (remoto-gist--ask)))
+    (remoto--forge-create-repo forge owner (list (cons path bytes)) description public)))
+
+(cl-defmethod remoto--forge-new-repo-hint ((forge remoto-gist) owner _name)
+  "The hint for OWNER, the token's account on FORGE: a gist needs a file first.
+A visit of the name of that file below OWNER opens one."
+  (when (remoto-gist--mine-p forge owner)
+    (format (substitute-command-keys "Remoto: a gist starts with a file; \\[find-file] %s%s/NAME \
+makes one")
+            (remoto--prefix forge) owner)))
+
+(cl-defmethod remoto--forge-deletable-p ((forge remoto-gist) owner id)
+  "The token's account on FORGE deletes its own gists; another's gist refuses.
+OWNER and ID name the gist."
+  (cond ((equal id remoto-gist--new) nil)
+        ((remoto-gist--mine-p forge owner) t)
+        (t (format "Remoto: only its owner deletes a gist, and %s owns %s" owner id))))
+
+(cl-defmethod remoto--forge-describe-repo ((forge remoto-gist) owner id)
+  "The gist ID of OWNER on FORGE: secret or public, its description, its files."
+  (let* ((gist (remoto-gist--known forge owner id))
+         (description (string-trim (remoto--one-line (or (alist-get 'description gist) "")))))
+    (format "the %s gist%s (%s)"
+            (if (eq (alist-get 'public gist) t) "public" "secret")
+            (if (string-empty-p description) "" (format " \"%s\"" description))
+            (remoto-gist--label (mapcar #'car (remoto-gist--files gist))))))
+
+(cl-defmethod remoto--forge-delete-repo ((forge remoto-gist) owner id)
+  "Delete the gist ID of OWNER on FORGE in one DELETE, history and all.
+Its lines leave the cached listings and its Dired buffers revert no more."
+  (unless (remoto-gist--mine-p forge owner)
+    (remoto--read-only))
+  (remoto--api-write forge "DELETE" (concat "gists/" (url-hexify-string id)))
+  (remoto-gist--relist forge id nil)
+  (remhash (downcase (remoto--repo-id forge owner id)) remoto--entry-cache)
+  (remoto-forge-forget forge owner id)
+  (remoto-gist--changed forge owner id)
+  nil)
+
+(cl-defmethod remoto--forge-rename-repo ((_forge remoto-gist) _owner _id _newname)
+  "GitHub names a gist; what a reader sees of it is its description."
+  (user-error "%s" (substitute-command-keys "Remoto: GitHub names a gist; \
+\\[remoto-gist-edit-description] edits what it says")))
+
+;;;; New gists, by name and by command
+
+(defvar remoto-gist--listing-wait 5
+  "Seconds a visit of a new name waits for the later pages of a listing.
+A name may be the file of a gist they hold.")
+
+(defun remoto-gist--whole-listing (dir)
+  "Return the listing of DIR, its later pages awaited for a few seconds."
+  (let ((listing (remoto--listing dir))
+        (end (+ (float-time) remoto-gist--listing-wait)))
+    ;; The pages come from a process, which no sequence function waits for.
+    (while (and (eq (remoto--listing-state listing) 'fetching) (< (float-time) end))
+      (accept-process-output nil 0.1))
+    listing))
+
+(defun remoto-gist--listed-gists (listing)
+  "Return the gists of the lines of LISTING, each as a list endpoint gave it."
+  (seq-keep (lambda (entry)
+              (let ((id (alist-get 'gist-id (cdr entry))))
+                (or (gethash id remoto-gist--listed) (gethash id remoto-gist--gists))))
+            (remoto--listing-entries listing)))
+
+(cl-defmethod remoto--forge-visit-name ((forge remoto-gist) owner name)
+  "The file NAME of a gist of OWNER on FORGE, when NAME is no gist.
+One gist holds it: its file.  None: the gist still to make, for one's own
+account, after a question while the listing is not whole.  A gist id goes
+on as any other name."
+  (unless (or (remoto-gist--id-p name)
+              (gethash name remoto-gist--gists)
+              (gethash name remoto-gist--listed)
+              (remoto--entry-for (remoto--repo-id forge owner name)))
+    (let* ((dir (format "%s%s/" (remoto--prefix forge) owner))
+           (listing (remoto-gist--whole-listing dir))
+           (holders (seq-filter (lambda (gist) (assoc name (remoto-gist--files gist)))
+                                (remoto-gist--listed-gists listing))))
+      (cond ((cdr holders)
+             (user-error "Remoto: %d gists of %s hold %s; %s lists them"
+                         (length holders) owner name dir))
+            (holders
+             (concat (remoto--repo-id forge (remoto-gist--owner (car holders))
+                                      (alist-get 'id (car holders)))
+                     ":/" name))
+            ((not (remoto-gist--mine-p forge owner))
+             (user-error "Remoto: no gist of %s has a file %s" owner name))
+            ((and (remoto--listing-state listing)
+                  (not (y-or-n-p (format "%s lists part of your gists yet; a new gist of %s? "
+                                         dir name))))
+             (user-error "Remoto: nothing opened"))
+            (t (concat (remoto--repo-id forge owner remoto-gist--new) ":/" name))))))
+
+(defun remoto-gist--dired-file (file)
+  "Return (NAME . TEXT) of FILE, marked in a Dired, for a new gist."
+  (when (file-directory-p file)
+    (user-error "Remoto: a gist has no directories, so not %s" file))
+  (cons (file-name-nondirectory file)
+        (with-temp-buffer
+          (insert-file-contents file)
+          (buffer-string))))
+
+(defun remoto-gist--files-to-share ()
+  "Return the files of a new gist, each (NAME . TEXT).
+In Dired they are the marked files; elsewhere the region, else the whole
+buffer, under a name read, the buffer's by default."
+  (if (derived-mode-p 'dired-mode)
+      (mapcar #'remoto-gist--dired-file (dired-get-marked-files))
+    (let ((default (file-name-nondirectory (or buffer-file-name (buffer-name)))))
+      (list (cons (read-string (format-prompt "Name of the file in the gist" default)
+                               nil nil default)
+                  (if (use-region-p)
+                      (buffer-substring-no-properties (region-beginning) (region-end))
+                    (buffer-substring-no-properties (point-min) (point-max))))))))
+
+(defun remoto-gist--of (name)
+  "Return (OWNER . ID) of the gist that NAME, its line, Dired or file, is of."
+  (when-let* ((parsed (and name (remoto--parse name)))
+              ((remoto-gist-p (remoto-path-forge parsed))))
+    (or (remoto--bare-repo-parts name)
+        (when-let* ((tree (remoto--canonical-tree parsed)))
+          (cons (remoto-path-owner tree) (remoto-path-repo tree))))))
+
+(defun remoto-gist--at-point ()
+  "Return (OWNER . ID) of the gist of the Dired line, the Dired or the file here."
+  (let ((dired (derived-mode-p 'dired-mode)))
+    (seq-some #'remoto-gist--of
+              (list (and dired (dired-get-filename nil t))
+                    buffer-file-name
+                    (and dired (if (consp dired-directory)
+                                   (car dired-directory)
+                                 dired-directory))))))
 
 ;;;; Listings
 
@@ -675,7 +883,7 @@ latest."
 
 ;; Made anew at each load, as `remoto--github' is.
 (defconst remoto--gist
-  (let ((forge (remoto-gist-create :name 'gist :prefixes '("gist") :host "github.com")))
+  (let ((forge (remoto-gist--create :name 'gist :prefixes '("gist") :host "github.com")))
     (remoto-register-forge forge)
     forge)
   "GitHub's gists, at /gist:.")
@@ -683,6 +891,50 @@ latest."
 ;; A /gist: path at a file prompt loads remoto before the mode is on, as a
 ;; remote path loads TRAMP.
 ;;;###autoload (add-to-list 'file-name-handler-alist '("\\`/gist:" . remoto-autoload-file-name-handler))
+
+;;;; Commands
+
+;;;###autoload
+(defun remoto-gist-create (files description public)
+  "Make a gist of FILES, each (NAME . TEXT), under DESCRIPTION, in one POST.
+PUBLIC non-nil makes it public, else secret.  Interactively FILES are the
+marked files of a Dired, else the region or the buffer under a name read.
+The URL of the gist goes to the kill ring; return it."
+  (interactive (cons (remoto-gist--files-to-share) (remoto-gist--ask)))
+  (let* ((owner (remoto-gist--account remoto--gist))
+         (id (remoto--forge-create-repo
+              remoto--gist owner
+              (mapcar (lambda (file)
+                        (cons (car file) (if (multibyte-string-p (cdr file))
+                                             (encode-coding-string (cdr file) 'utf-8 t)
+                                           (cdr file))))
+                      files)
+              description public))
+         (url (remoto--url remoto--gist 'repo (list :owner owner :repo id))))
+    (kill-new url)
+    (message "Remoto: copied the URL of the new gist, %s" url)
+    url))
+
+(defun remoto-gist--description-args ()
+  "Return (OWNER ID DESCRIPTION) of the gist here, DESCRIPTION read anew.
+The current description fills the prompt in."
+  (pcase-let ((`(,owner . ,id) (or (remoto-gist--at-point)
+                                   (user-error "Remoto: no gist here"))))
+    (list owner id
+          (read-string "Description of the gist: "
+                       (or (alist-get 'description (remoto-gist--known remoto--gist owner id))
+                           "")))))
+
+;;;###autoload
+(defun remoto-gist-edit-description (owner id description)
+  "Make DESCRIPTION the description of the gist ID of OWNER, in one PATCH.
+Interactively the gist is the one at point: its line in a listing, its
+Dired or one of its files, and the current description fills the prompt."
+  (interactive (remoto-gist--description-args))
+  (unless (remoto-gist--mine-p remoto--gist owner)
+    (user-error "Remoto: only its owner describes a gist, and %s owns %s" owner id))
+  (remoto-gist--patch remoto--gist id `((description . ,description)))
+  (message "Remoto: the gist %s says %S now" id description))
 
 (provide 'remoto-gist)
 

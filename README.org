@@ -144,7 +144,13 @@ If the file changed on GitHub since you opened it, remoto asks before the save g
 
 ~C-x C-f~ a new name in your gist and the first save adds the file; ~C-x C-w~ writes any buffer into a gist. Dired's ~C~ copies files in, from a local directory or any repository, ~R~ and ~C-x x r~ rename, and ~D~ deletes a file, which stays in the gist's revisions. wdired edits the names in a gist's Dired. A rename to another gist, or to or from a local directory, is a copy and a deletion.
 
-A gist keeps UTF-8 text only: a binary file stays read-only, and a buffer in another coding system asks for ~C-x RET f utf-8~ first. A gist is flat and holds no blank file, since GitHub would delete it: a name with a slash, a directory and an empty file are refused. GitHub keeps the last file of a gist.
+A gist keeps UTF-8 text only: a binary file stays read-only, and a buffer in another coding system asks for ~C-x RET f utf-8~ first. A gist is flat and holds no blank file, since GitHub would delete it: a name with a slash, a directory and an empty file are refused.
+
+*** Making and deleting gists
+
+~C-x C-f /gist:YOU/NAME~ opens the file NAME of your gist that holds it. When none does, the buffer is a new gist, and its first save makes it: remoto asks for a description, and for secret or public. ~C-x C-w /gist:YOU/new:/NAME~ saves any buffer as a new gist and goes on editing it there. ~M-x remoto-gist-create~ makes a gist of the region, the buffer, or the files marked in Dired, and copies its URL.
+
+~D~ on a gist's line in ~/gist:~ or ~/gist:YOU/~ deletes the gist, history and all, after one question that names it; marked lines get one question for all of them. Deleting the last file of a gist deletes the gist, since GitHub keeps no empty gist. ~M-x remoto-gist-edit-description~ edits the description of the gist at point.
 
 #+HTML: </details>
 
@@ -237,7 +243,7 @@ We can only imagine a world where git's transport layer gives you a browsable fi
 
 ** Limitations
 
-- Repositories are read-only: no commits, no pushes, no file modifications. You still can copy files out. The files of your own gists are the exception (see Gists).
+- Repositories are read-only: no commits, no pushes, no file modifications. You still can copy files out. Your own gists are the exception (see Gists).
 - No git operations (log, blame, diff).
 - No programs run against a repository: grep, ripgrep, compile and ~project-find-regexp~ need a clone. In-buffer search (isearch, occur) works on opened files.
 - Timestamps in a repository's Dired are synthetic (the tree API has no timestamps); a listing of repositories shows their last push.

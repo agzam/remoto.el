@@ -45,6 +45,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'dired)
 (require 'files-x)
 (require 'format-spec)
 (require 'ghub)
@@ -1976,11 +1977,30 @@ visits both in one buffer, so each canonical name gets its own number."
     (or (gethash name remoto--inodes)
         (puthash name (1+ (hash-table-count remoto--inodes)) remoto--inodes))))
 
+(defun remoto--deletable-line (filename)
+  "Return the root of the repository FILENAME is a line of, when deletable.
+Dired's D deletes a directory with `delete-directory', so the line of a
+repository the user may delete answers the attributes of its root."
+  (when-let* (((remoto--bare-repo-parts filename))
+              (repo (remoto--repo-of filename))
+              ((eq t (apply #'remoto--forge-deletable-p repo))))
+    (remoto--parse (concat filename ":/"))))
+
+(defun remoto--file-entry (filename)
+  "Return (PARSED . ENTRY): the tree path of FILENAME and its entry, or nil.
+The line of a repository the user may delete answers its root."
+  (if-let* ((line (remoto--deletable-line filename)))
+      (cons line remoto--dir-entry)
+    (when-let* ((parsed (remoto--canonical-tree (remoto--parse filename)))
+                (entry (remoto--tree-entry parsed)))
+      (cons parsed entry))))
+
 (defun remoto--handle-file-attributes (filename &optional _id-format)
   "Return file attributes for FILENAME.
 Synthesized from tree cache - timestamps are epoch 0."
-  (when-let* ((parsed (remoto--canonical-tree (remoto--parse filename)))
-              (entry (remoto--tree-entry parsed)))
+  (when-let* ((found (remoto--file-entry filename))
+              (parsed (car found))
+              (entry (cdr found)))
     (let* ((dir? (equal "tree" (alist-get 'type entry)))
            (size (or (alist-get 'size entry) 0))
            (mode-str (or (alist-get 'mode entry) "100644"))
@@ -3210,7 +3230,7 @@ Where the user may write, the forge says why it keeps no directory."
   (unless (and (remoto--handle-file-directory-p dir)
                (remoto--handle-file-exists-p dir))
     (remoto--check-directory dir)
-    (user-error "Remoto: repository is read-only")))
+    (remoto--refuse-write dir)))
 
 (defun remoto--handle-abbreviate-file-name (filename)
   "Return FILENAME as-is - no abbreviation for remote paths."
@@ -3281,6 +3301,14 @@ word of the command line after its -c."
   "Signal that remote repos are read-only."
   (user-error "Remoto: repository is read-only"))
 
+(defun remoto--refuse-write (filename)
+  "Refuse a write to FILENAME, with the hint of its forge where it has one."
+  (if-let* ((parts (remoto--bare-repo-parts filename))
+            (hint (remoto--forge-new-repo-hint (remoto-path-forge (remoto--parse filename))
+                                               (car parts) (cdr parts))))
+      (user-error "%s" hint)
+    (remoto--read-only)))
+
 (cl-defgeneric remoto--forge-writable-p (_forge _owner _repo _ref _path)
   "Return non-nil when the user may write PATH of OWNER/REPO at REF on FORGE.
 PATH is relative to the root of the repository, \"\" for the root.  Saves
@@ -3308,6 +3336,40 @@ non-nil for a repository anyone may find."
 (cl-defgeneric remoto--forge-delete-repo (_forge _owner _repo)
   "Delete the repository OWNER/REPO of FORGE and every file in it."
   (remoto--read-only))
+
+(cl-defgeneric remoto--forge-deletable-p (_forge _owner _repo)
+  "Return t when the user may delete OWNER/REPO of FORGE, or a refusal to say.
+Nil leaves a line of REPO to Dired as it is.  Dired's D on the only file
+of a deletable REPO deletes REPO, as a gist keeps its last file."
+  nil)
+
+(cl-defgeneric remoto--forge-describe-repo (_forge _owner repo)
+  "Return how the question before a deletion names REPO of OWNER on FORGE."
+  repo)
+
+(cl-defgeneric remoto--forge-rename-repo (_forge _owner _repo _newname)
+  "Rename the repository OWNER/REPO of FORGE to NEWNAME."
+  (remoto--read-only))
+
+(cl-defgeneric remoto--forge-new-repo-p (_forge _repo)
+  "Return non-nil when REPO stands for a repository of FORGE still to make.
+A visit of a file in it opens a new file; its first save makes the
+repository, see `remoto--save-new-repo'."
+  nil)
+
+(cl-defgeneric remoto--forge-new-repo (_forge _owner _path _bytes)
+  "Make a repository of OWNER on FORGE with BYTES as its file PATH.
+Ask what the forge needs to know; return the name of the repository."
+  (remoto--read-only))
+
+(cl-defgeneric remoto--forge-new-repo-hint (_forge _owner _name)
+  "Return the text that refuses a new directory NAME of OWNER on FORGE, or nil."
+  nil)
+
+(cl-defgeneric remoto--forge-visit-name (_forge _owner _name)
+  "Return the file that a visit of the bare NAME of OWNER on FORGE opens, or nil.
+Nil goes on as for any other name: NAME is a repository, or a query."
+  nil)
 
 (cl-defgeneric remoto--forge-check-write (_forge _owner _repo _ref _path _bytes)
   "Signal a `user-error' when FORGE cannot keep BYTES as PATH of OWNER/REPO.
@@ -3398,7 +3460,7 @@ buffer read them, or gone, a question first."
   "Write START to END into FILENAME, a file the user may write.
 APPEND, VISIT and MUSTBENEW as `write-region' takes them.  A save of the
 visited file checks the forge's text first; elsewhere the write refuses."
-  (let ((target (or (remoto--write-target filename) (remoto--read-only)))
+  (let ((target (or (remoto--write-target filename) (remoto--refuse-write filename)))
         (visiting (or (eq visit t) (stringp visit))))
     (when (and (eq mustbenew 'excl) (file-exists-p filename))
       (signal 'file-already-exists (list "File already exists" filename)))
@@ -3416,6 +3478,30 @@ visited file checks the forge's text first; elsewhere the write refuses."
                                  (secure-hash 'sha1 bytes))))
       nil)))
 
+(defvar recentf-list)
+
+(defun remoto--save-new-repo ()
+  "Save a buffer that visits a file of a repository still to make, making it.
+A member of `write-file-functions': the forge asks what it needs, then the
+buffer visits the file in the new repository.  Return t once saved."
+  (when-let* ((file buffer-file-name)
+              ((string-match-p remoto--handler-regexp file))
+              (target (remoto--write-target file))
+              ((remoto--forge-new-repo-p (car target) (nth 2 target))))
+    (pcase-let* ((`(,forge ,owner ,_ ,_ ,path) target)
+                 (bytes (remoto--region-bytes nil nil file nil))
+                 (_ (apply #'remoto--forge-check-write (append target (list bytes))))
+                 (repo (remoto--forge-new-repo forge owner path bytes))
+                 (name (concat (remoto--repo-id forge owner repo) ":/" path)))
+      (set-visited-file-name name t t)
+      (set-buffer-modified-p nil)
+      (setq remoto--base (cons name (secure-hash 'sha1 bytes)))
+      (when (boundp 'recentf-list)
+        (setq recentf-list (delete file recentf-list)))
+      (unless noninteractive
+        (message "Wrote %s (%s)" name (remoto--url forge 'repo (list :owner owner :repo repo))))
+      t)))
+
 (defun remoto--handle-delete-file (filename &optional _trash)
   "Delete FILENAME, a file the user may write, else refuse.
 A forge keeps no trash, so TRASH changes nothing."
@@ -3423,16 +3509,122 @@ A forge keeps no trash, so TRASH changes nothing."
                                                        (remoto--read-only))))
     (remoto--forge-delete forge owner repo ref path)))
 
+(defvar remoto--deletion-agreed nil
+  "The repositories the user agreed to delete, each (FORGE OWNER REPO), or t.
+A command binds it once it asked; t agrees to every deletion.")
+
+(defun remoto--agree-to-delete (repos)
+  "Ask once whether to delete REPOS, each (FORGE OWNER REPO), and all they hold.
+The question names each as its forge describes it, since Dired's would
+name an id.  A no signals a `user-error'."
+  (or (eq remoto--deletion-agreed t)
+      (seq-every-p (lambda (repo) (member repo remoto--deletion-agreed)) repos)
+      (yes-or-no-p (format "Delete %s, history and all? "
+                           (mapconcat (lambda (repo) (apply #'remoto--forge-describe-repo repo))
+                                      repos ", ")))
+      (user-error "Remoto: nothing deleted")))
+
+(defun remoto--offer-to-kill (forge owner repo)
+  "Offer to kill the unmodified buffers of OWNER/REPO of FORGE, now deleted.
+A modified buffer stays: its next save says the repository is gone.  The
+current buffer goes once the command is over, which may still run in it."
+  (let* ((name (remoto--repo-id forge owner repo))
+         (buffers (seq-filter
+                   (lambda (buffer)
+                     (with-current-buffer buffer
+                       (when-let* (((not (buffer-modified-p)))
+                                   (file (or buffer-file-name
+                                             (and (derived-mode-p 'dired-mode) default-directory))))
+                         (string-prefix-p (concat name ":") file t))))
+                   (buffer-list))))
+    (when (and buffers
+               (y-or-n-p (format (ngettext "Kill the %d buffer of %s too? "
+                                           "Kill the %d buffers of %s too? "
+                                           (length buffers))
+                                 (length buffers) name)))
+      (dolist (buffer buffers)
+        (if (eq buffer (current-buffer))
+            (run-at-time 0 nil #'kill-buffer buffer)
+          (kill-buffer buffer))))))
+
+(defun remoto--repo-of (filename)
+  "Return (FORGE OWNER REPO) when FILENAME is a repository's line or its root."
+  (if-let* ((parts (remoto--bare-repo-parts filename)))
+      (list (remoto-path-forge (remoto--parse filename)) (car parts) (cdr parts))
+    (when-let* ((parsed (remoto--canonical-tree (remoto--parse filename)))
+                ((string-empty-p (remoto--tree-lookup-key (remoto-path-path parsed)))))
+      (list (remoto-path-forge parsed) (remoto-path-owner parsed) (remoto-path-repo parsed)))))
+
+(defun remoto--delete-repo (repo)
+  "Delete REPO, (FORGE OWNER REPO), once the user agreed, and offer its buffers."
+  (remoto--agree-to-delete (list repo))
+  (apply #'remoto--forge-delete-repo repo)
+  (apply #'remoto--offer-to-kill repo))
+
 (defun remoto--handle-delete-directory (directory &optional recursive _trash)
-  "Delete DIRECTORY, a repository the user may delete, under RECURSIVE.
-A repository holds files, so without RECURSIVE it is not empty.  Any other
-directory refuses, as a repository of a forge does."
-  (pcase (remoto--write-target directory)
-    (`(,forge ,owner ,repo ,_ "")
-     (if recursive
-         (remoto--forge-delete-repo forge owner repo)
-       (signal 'file-error (list "Removing directory" "Directory not empty" directory))))
-    (_ (remoto--read-only))))
+  "Delete DIRECTORY, a repository the user may delete, after one question.
+A root holds files, so without RECURSIVE it is not empty; a line of a
+listing, which Dired takes for empty, needs none.  Elsewhere it refuses."
+  (let* ((repo (remoto--repo-of directory))
+         (deletable (and repo (apply #'remoto--forge-deletable-p repo))))
+    (cond ((stringp deletable) (user-error "%s" deletable))
+          ((not deletable) (remoto--read-only))
+          ((and (not recursive) (not (remoto--bare-repo-parts directory)))
+           (signal 'file-error (list "Removing directory" "Directory not empty" directory)))
+          (t (remoto--delete-repo repo)))))
+
+(defun remoto--only-file-p (parsed)
+  "Return non-nil when PARSED, a canonical tree path, is the only file of its tree."
+  (equal (mapcar #'car (remoto--tree-children
+                        (remoto--parse (concat (remoto--tree-prefix parsed) "/"))))
+         (list (remoto--tree-lookup-key (remoto-path-path parsed)))))
+
+(defun remoto--deletion-repo (file)
+  "Return (FORGE OWNER REPO) when deleting FILE deletes that repository.
+FILE is its line in a listing or its only file, and the forge lets the
+user delete it.  A forge that refuses signals its refusal."
+  (let* ((line (remoto--repo-of file))
+         (tree (and (not line) (remoto--canonical-tree (remoto--parse file))))
+         (repo (or line (and tree (list (remoto-path-forge tree) (remoto-path-owner tree)
+                                        (remoto-path-repo tree)))))
+         (deletable (and repo (apply #'remoto--forge-deletable-p repo))))
+    (cond ((not (and deletable (or line (remoto--only-file-p tree)))) nil)
+          ((stringp deletable) (user-error "%s" deletable))
+          (t repo))))
+
+(defun remoto--dired-delete (command files arg)
+  "Run the Dired deletion COMMAND with ARG on FILES, repositories among them.
+Those go after one question, which names each as its forge does; Dired's
+own would name ids.  Dired asks too when FILES hold more than those."
+  (if-let* ((repos (seq-keep #'remoto--deletion-repo files)))
+      (progn
+        (remoto--agree-to-delete repos)
+        (let ((remoto--deletion-agreed repos)
+              (dired-deletion-confirmer (if (length= files (length repos))
+                                            #'always
+                                          dired-deletion-confirmer)))
+          (funcall command arg)))
+    (funcall command arg)))
+
+(defun remoto-dired-do-delete (&optional arg)
+  "Delete the marked files, or the next ARG, as `dired-do-delete' does.
+A repository among them, a line of a listing or its only file, goes
+after one question that names them all."
+  (interactive "P" dired-mode)
+  (remoto--dired-delete #'dired-do-delete (dired-get-marked-files nil arg) arg))
+
+(defun remoto-dired-do-flagged-delete (&optional nomessage)
+  "Delete the files flagged for deletion, as `dired-do-flagged-delete' does.
+NOMESSAGE as it takes it.  A repository among them goes after one
+question that names them all."
+  (interactive nil dired-mode)
+  (remoto--dired-delete #'dired-do-flagged-delete
+                        (let ((dired-marker-char dired-del-marker))
+                          (and (save-excursion
+                                 (goto-char (point-min))
+                                 (re-search-forward (dired-marker-regexp) nil t))
+                               (dired-get-marked-files)))
+                        nomessage))
 
 (defun remoto--check-directory (dir)
   "Ask the forge of DIR, a name where the user may write, to refuse a directory."
@@ -3472,6 +3664,9 @@ move is a copy and a deletion.  Elsewhere it refuses."
           ((and (or from (not (remoto--parse file)))
                 (or to (not (remoto--parse newname))))
            (remoto--move file newname ok-if-already-exists))
+          ((remoto--bare-repo-parts file)
+           (apply #'remoto--forge-rename-repo
+                  (append (remoto--repo-of file) (list (file-name-nondirectory newname)))))
           (t (remoto--read-only)))))
 
 (defun remoto--copy-in (file newname target ok-if-already-exists)
@@ -4619,6 +4814,13 @@ The root of a tree opens at the file its forge answers, see
       (concat (remoto--tree-prefix parsed) "/" file)
     name))
 
+(defun remoto--visit-name (filename)
+  "Return what a visit of FILENAME, a bare name below an owner, opens, or nil.
+Its forge answers, see `remoto--forge-visit-name'."
+  (when-let* ((parts (remoto--bare-repo-parts filename)))
+    (remoto--forge-visit-name (remoto-path-forge (remoto--parse filename))
+                              (car parts) (cdr parts))))
+
 (defun remoto--find-file-around-a (orig-fn filename &rest args)
   "Rewrite GitHub URLs to canonical remoto paths for `find-file'.
 Intercepts #NUM patterns to display issues instead of file operations.
@@ -4636,7 +4838,8 @@ nothing opens a Dired of its matches; a root opens at its `remoto--root-file'."
         (progn
           (remoto--require-topic)
           (remoto-topic-display (cdr topic) (car topic)))
-      (let ((target (remoto--name-or-matches filename)))
+      (let ((target (or (remoto--visit-name filename)
+                        (remoto--name-or-matches filename))))
         (if (consp target)
             (dired-noselect target)
           (apply orig-fn (remoto--visited-name target) args))))))
@@ -4814,10 +5017,12 @@ every line added.  Return the buffer of the diff."
     (define-key map [remap dired-jump] #'remoto-dired-jump)
     (define-key map [remap dired-jump-other-window] #'remoto-dired-jump-other-window)
     (define-key map [remap diff-buffer-with-file] #'remoto-diff-buffer-with-file)
+    (define-key map [remap dired-do-delete] #'remoto-dired-do-delete)
+    (define-key map [remap dired-do-flagged-delete] #'remoto-dired-do-flagged-delete)
     map)
   "Keymap for `remoto-mode'.
-It binds no key: it remaps the Dired commands that go up a level, and
-`diff-buffer-with-file', to remoto's.  Bind the variable
+It binds no key: it remaps the Dired commands that go up a level or
+delete, and `diff-buffer-with-file', to remoto's.  Bind the variable
 `remoto-command-map' to a prefix key in it for the URL commands.")
 
 ;;;###autoload
@@ -5080,7 +5285,10 @@ tree.  A project found before the mode is on turns it on."
   ;; DIR can carry a completion candidate's text properties, and project.el
   ;; writes the root to `project-list-file'.
   (when-let* ((parsed (remoto--parse-path
-                       (remoto--normalize-shorthand (substring-no-properties dir)))))
+                       (remoto--normalize-shorthand (substring-no-properties dir))))
+              ;; project.el would remember a root that its first save renames.
+              ((not (remoto--forge-new-repo-p (remoto-path-forge parsed)
+                                              (remoto-path-repo parsed)))))
     (remoto--ensure-global-mode)
     (cons 'remoto (concat (remoto--tree-prefix parsed) "/"))))
 
@@ -5480,6 +5688,7 @@ Each step is idempotent, so a second call while on is a no-op."
   (add-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
   ;; `write-file' into a forge makes a remoto buffer that no visit made.
   (add-hook 'after-set-visited-file-name-hook #'remoto--maybe-enable-mode)
+  (add-hook 'write-file-functions #'remoto--save-new-repo)
   ;; Clear the fetch indicator and reset in-flight state whenever a
   ;; minibuffer exits.
   (add-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
@@ -5501,6 +5710,7 @@ Each step is idempotent, so a second call while on is a no-op."
   (remove-hook 'find-file-hook #'remoto--maybe-enable-mode)
   (remove-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
   (remove-hook 'after-set-visited-file-name-hook #'remoto--maybe-enable-mode)
+  (remove-hook 'write-file-functions #'remoto--save-new-repo)
   (remove-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
   (when (timerp remoto--warm-auth-timer)
     (cancel-timer remoto--warm-auth-timer))

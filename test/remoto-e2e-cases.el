@@ -198,13 +198,20 @@ character or a raw byte, and Embark's annotations line up."
                         (seq-take (remoto-e2e--stray-lines) 2))
               (remoto-e2e--embark-problems)))))
 
-(defun remoto-e2e-goto (name)
-  "Move to the Dired line of NAME, as a person would look for it."
-  (interactive "sLine: ")
+(defun remoto-e2e--goto-line (pred)
+  "Move to the first Dired line whose name PRED accepts; return nil without one."
   (goto-char (point-min))
-  (while (and (not (eobp)) (not (equal name (remoto-e2e--line-name))))
+  (while (and (not (eobp)) (not (funcall pred (remoto-e2e--line-name))))
     (forward-line 1))
-  (when (eobp)
+  (not (eobp)))
+
+(defun remoto-e2e-goto (name)
+  "Move to the Dired line of NAME, as a person would look for it.
+The line of a gist of one file holds ID/NAME, its id out of sight."
+  (interactive "sLine: ")
+  (unless (or (remoto-e2e--goto-line (lambda (line) (equal name line)))
+              (remoto-e2e--goto-line (lambda (line)
+                                       (and line (string-suffix-p (concat "/" name) line)))))
     (user-error "No line %s" name)))
 
 (defun remoto-e2e--read-states (file)
@@ -310,6 +317,25 @@ An ex command line ends with RET whatever completes the file prompts."
                  ;; technomancy/sokobelt's description spans lines.
                  (remoto-e2e--embark-buffer-cases
                   '("/cb:technomancy/" "/cb:forgejo/forgejo#" "/cb:forgejo/docs@next:/docs/")))))))
+
+(defun remoto-e2e--gist-cases (profile login name)
+  "Return the cases of PROFILE that make a secret gist of LOGIN by its file NAME.
+The first opens the name, types a line and saves; the second deletes the
+gist with D on its line.  Live only: they write to GitHub."
+  (let ((file (format "/gist:%s/%s" login name))
+        (ret (kbd "RET")))
+    (remoto-e2e--selected
+     `((,(concat "gist new " name) nil
+        ,@(if (member profile '("evil" "evil-vertico" "full"))
+              `(,(kbd ": e SPC") ,file ,ret pause "i" "made by remoto-keys" ,(kbd "ESC")
+                ,(kbd ": w RET"))
+            `(,(kbd "C-x C-f") ,file submit "made by remoto-keys" ,(kbd "C-x C-s")))
+        pause "remoto-keys" ,ret pause "s" pause)
+       ;; ido's C-x d opens no listing of gists; the run deletes that gist at its end.
+       ,@(unless (equal profile "ido")
+           `((,(concat "gist D " name) nil
+              ,@(remoto-e2e--in (format "/gist:%s/" login) 'goto name ret "D" 'pause "yes" ret
+                                'pause))))))))
 
 (defun remoto-e2e--tab-cases ()
   "Return the cases that complete a name with TAB."

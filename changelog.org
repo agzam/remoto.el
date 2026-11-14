@@ -10,10 +10,15 @@ Changes to the project, following Keep a Changelog conventions.
 - a save asks before it goes over a change made on GitHub since you opened the file: overwrite, diff or quit
 - adds ~remoto-diff-buffer-with-file~ - the buffer against the text the forge holds now; in remoto buffers a key bound to ~diff-buffer-with-file~ runs it
 - in your own gist a new name at ~C-x C-f~ opens a new file, ~C-x C-w~ writes a buffer in, and Dired's ~C~, ~R~ and ~D~, wdired, ~copy-file~, ~rename-file~ and ~delete-file~ add, rename and delete its files; a move to another gist or a local directory is a copy and a deletion
+- ~C-x C-f /gist:YOU/NAME~ opens your gist that holds the file NAME, else a new gist that its first save makes, after asking a description and secret or public; ~C-x C-w /gist:YOU/new:/NAME~ saves a buffer as a new gist
+- adds ~remoto-gist-create~ - a gist of the region, the buffer or the marked files of a Dired, its URL in the kill ring
+- ~D~ on a gist's line deletes the gist after one question that names it, and so does deleting its last file
+- adds ~remoto-gist-edit-description~
 
 ** Changed
 - ~file-modes~ on a remoto file answers the modes its Dired line shows, such as 644 or 755, instead of nil
 - ~revert-buffer~ in a file of your own gist reads it from GitHub anew, and so does a visit once remoto's copy is 10 seconds old
+- for source authors: ~remoto-gist-create~ is the command now; the constructor of the gist forge is ~remoto-gist--create~
 
 * [2.8.0] - 2026-11-14
 

@@ -195,6 +195,83 @@
       (expect (car (last (assoc "ex /cb:forgejo/docs" cases))) :to-equal (kbd "RET"))
       (expect (car (last (assoc "ff /cb:forgejo/docs" cases))) :to-equal 'submit))))
 
+(describe "remoto-e2e--gist-cases"
+  (it "make a gist at the profile's file prompt, or with ex and :w under Evil, then D deletes it"
+    (let ((vanilla (remoto-e2e--gist-cases "vanilla" "someone" "n.txt"))
+          (evil (remoto-e2e--gist-cases "evil" "someone" "n.txt")))
+      (expect (mapcar #'car vanilla) :to-equal '("gist new n.txt" "gist D n.txt"))
+      (expect (seq-take (cddr (car vanilla)) 3)
+              :to-equal (list (kbd "C-x C-f") "/gist:someone/n.txt" 'submit))
+      (expect (seq-take (cddr (car evil)) 3)
+              :to-equal (list (kbd ": e SPC") "/gist:someone/n.txt" (kbd "RET")))
+      (expect (member (kbd ": w RET") (car evil)) :to-be-truthy)
+      (expect (cddr (cadr vanilla))
+              :to-equal (list (kbd "C-x d") "/gist:someone/" 'submit 'goto "n.txt" (kbd "RET")
+                              "D" 'pause "yes" (kbd "RET") 'pause))))
+  (it "leave out D under ido, whose C-x d opens no listing of gists"
+    (expect (mapcar #'car (remoto-e2e--gist-cases "ido" "someone" "n.txt"))
+            :to-equal '("gist new n.txt"))))
+
+(describe "remoto-keys--checks of the gist cases"
+  (it "fail a save that made no gist, and a line that D left"
+    (expect (remoto-keys--checks "gist new k.txt" '(:file "/gist:someone/0a1b2c:/k.txt") nil nil)
+            :to-be nil)
+    (expect (remoto-keys--checks "gist new k.txt" '(:file "/gist:someone/new:/k.txt") nil nil)
+            :to-equal '("the save made no gist: the buffer visits /gist:someone/new:/k.txt"))
+    (expect (remoto-keys--checks "gist D k.txt" '(:dired "/gist:someone/" :names ("0a1b/k.txt"))
+                                 nil nil)
+            :to-equal '("the line of k.txt is still there"))
+    (expect (remoto-keys--checks "gist D k.txt" '(:dired "/gist:someone/" :names ("0c3d/o.txt"))
+                                 nil nil)
+            :to-be nil)
+    (expect (remoto-keys--checks "gist D k.txt" '(:buffer "*scratch*") nil nil)
+            :to-equal '("D ran in no listing of gists"))))
+
+(describe "the gists of a keys run"
+  (it "come with a token that may write gists, one each profile"
+    (let ((remoto-keys--token "not-a-token")
+          (remoto-keys--github-login "someone")
+          (remoto-keys--gist-names nil))
+      (spy-on 'remoto-keys--curl-p :and-return-value t)
+      (spy-on 'princ)
+      (pcase-dolist (`(,headers . ,cases)
+                     '(("x-oauth-scopes: read:org, repo\r\n" . 0)
+                       ("x-oauth-scopes: gist, read:org, repo\r\n" . 2)
+                       ("x-github-request-id: 1\r\n" . 2)))
+        (let ((remoto-keys--gist-writes 'unknown))
+          (spy-on 'remoto-keys--curl :and-return-value (cons 0 (concat "HTTP/2 200\r\n" headers)))
+          (expect (length (remoto-keys--gist-cases "vanilla")) :to-equal cases)))
+      (expect (length remoto-keys--gist-names) :to-equal 2)))
+
+  (it "that a case left go at the end of the run, and no other gist"
+    (let ((remoto-keys--token "not-a-token")
+          (remoto-keys--github-login "someone")
+          (remoto-keys--gist-names '("remoto-keys-vanilla-1.txt"))
+          (calls nil))
+      (spy-on 'remoto-keys--json :and-return-value
+              (vector '((id . "0a1b") (files (remoto-keys-vanilla-1.txt (size . 1))))
+                      '((id . "0c3d") (files (other.txt (size . 1))))))
+      (spy-on 'remoto-keys--curl :and-call-fake (lambda (address &rest args)
+                                                  (push (cons address args) calls)
+                                                  '(0 . "")))
+      (spy-on 'princ)
+      (remoto-keys--delete-gists)
+      (expect calls :to-equal '(("https://api.github.com/gists/0a1b" "not-a-token" "-X" "DELETE"))))))
+
+(describe "remoto-e2e-goto"
+  (it "goes to the line of a name, or of a gist's file behind its hidden id"
+    (with-temp-buffer
+      (insert "  /gist:someone/:\n")
+      (dolist (name '("0a1b/n.txt" "m.txt"))
+        (insert "  -rw-r--r--  1 github github 0 Jan  1  2000 "
+                (propertize name 'dired-filename t) "\n"))
+      (dired-mode)
+      (remoto-e2e-goto "n.txt")
+      (expect (remoto-e2e--line-name) :to-equal "0a1b/n.txt")
+      (remoto-e2e-goto "m.txt")
+      (expect (remoto-e2e--line-name) :to-equal "m.txt")
+      (expect (remoto-e2e-goto "zz.txt") :to-throw 'user-error))))
+
 (describe "remoto-e2e--buffer-problems"
   (it "finds a Dired line that is no entry and a control character"
     (with-temp-buffer

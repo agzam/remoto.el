@@ -257,6 +257,51 @@ no account for its token, as `remoto-keys--account' does."
     (princ (format "  [search budget %d, waiting]\n" (car left)))
     (sleep-for (max 1 (min 60 (- (cdr left) (float-time)))))))
 
+;;; Gists
+
+(defvar remoto-keys--gist-writes 'unknown
+  "Whether the run's token may write gists: t, nil, or `unknown' until asked.")
+
+(defvar remoto-keys--gist-names nil
+  "The file names of the gists the run makes, one per profile.")
+
+(defun remoto-keys--gist-writes-p ()
+  "Non-nil when the run's token may write gists, asked once.
+A token whose scopes GitHub lists needs gist among them."
+  (when (eq remoto-keys--gist-writes 'unknown)
+    (setq remoto-keys--gist-writes
+          (and remoto-keys--token remoto-keys--github-login (remoto-keys--curl-p)
+               (pcase-let ((`(,exit . ,output) (remoto-keys--curl "https://api.github.com/user"
+                                                                 remoto-keys--token "-I")))
+                 (and (eql exit 0)
+                      (let ((case-fold-search t))
+                        (or (not (string-match "^x-oauth-scopes:\\(.*\\)$" output))
+                            (string-match-p "\\bgist\\b" (match-string 1 output))))))))
+    (princ (if remoto-keys--gist-writes
+               "Gist cases: each profile makes a secret gist and deletes it\n"
+             "No gist cases: they need a GitHub token that may write gists\n")))
+  remoto-keys--gist-writes)
+
+(defun remoto-keys--gist-cases (profile)
+  "Return the gist cases of PROFILE, or nil when the token may write no gist."
+  (when (remoto-keys--gist-writes-p)
+    (let ((name (format "remoto-keys-%s-%s.txt" profile (format-time-string "%H%M%S"))))
+      (push name remoto-keys--gist-names)
+      (remoto-e2e--gist-cases profile remoto-keys--github-login name))))
+
+(defun remoto-keys--delete-gists ()
+  "Delete the gists of the token's account that hold a file the run named.
+A case that failed leaves its gist behind; none outlives the run."
+  (when remoto-keys--gist-names
+    (seq-doseq (gist (remoto-keys--json (format "https://api.github.com/users/%s/gists?per_page=100"
+                                                remoto-keys--github-login)
+                                        remoto-keys--token))
+      (when (seq-some (lambda (file) (member (symbol-name (car file)) remoto-keys--gist-names))
+                      (alist-get 'files gist))
+        (remoto-keys--curl (concat "https://api.github.com/gists/" (alist-get 'id gist))
+                           remoto-keys--token "-X" "DELETE")
+        (princ (format "CLEANUP gist %s, which a case left, deleted\n" (alist-get 'id gist)))))))
+
 ;;; Packages
 
 (defun remoto-keys--header (file field)
@@ -731,6 +776,17 @@ clean Dired and Embark lines, no raw HTTP text, few requests, live URLs."
       (push "Embark's y copied nothing" failures))
     (when (and (string-match-p "\\bembark b on\\b" label) (not (plist-get state :browsed)))
       (push "Embark's b browsed nothing" failures))
+    (pcase label
+      ((rx bos "gist new " (let name (+ nonl)))
+       (unless (string-match-p (concat "\\`/gist:[^/]+/[0-9a-f]+:/" (regexp-quote name) "\\'")
+                               (or (plist-get state :file) ""))
+         (push (format "the save made no gist: the buffer visits %s" (plist-get state :file))
+               failures)))
+      ((rx bos "gist D " (let name (+ nonl)))
+       (cond ((not (string-match-p "\\`/gist:[^/]+/\\'" (or (plist-get state :dired) "")))
+              (push "D ran in no listing of gists" failures))
+             ((seq-some (lambda (line) (string-suffix-p (concat "/" name) line)) names)
+              (push (format "the line of %s is still there" name) failures)))))
     (when (< remoto-keys--max-requests requests)
       (push (format "%d requests, more than %d" requests remoto-keys--max-requests) failures))
     (when (< remoto-keys--max-requests annotations)
@@ -751,7 +807,8 @@ EXPECTED is the replay's state of the case, or nil."
 (defun remoto-keys--profile (profile elpa-branch elpa-main)
   "Run the cases of PROFILE under the remoto in ELPA-BRANCH.
 With ELPA-MAIN, run each GitHub case also under origin/main's remoto
-there; Codeberg cases run on the branch only, main has no Codeberg.
+there; Codeberg and gist cases run on the branch only, main has no
+Codeberg and writes no gist.
 Return a plist of the cases run, the checks failed, the DIFFs with main.
 An Emacs that cannot start stops the profile with a failure that says
 why; the results so far are written all the same."
@@ -769,7 +826,9 @@ why; the results so far are written all the same."
               (dolist (case (append (mapcar (lambda (c) (cons 'github c))
                                             (remoto-e2e--cases profile))
                                     (mapcar (lambda (c) (cons 'codeberg c))
-                                            (remoto-e2e--codeberg-cases profile))))
+                                            (remoto-e2e--codeberg-cases profile))
+                                    (mapcar (lambda (c) (cons 'gist c))
+                                            (remoto-keys--gist-cases profile))))
                 (let ((forge (car case)) (case (cdr case)))
                   (if (nth 1 case)
                       (princ (format "%-16s %-58s skip: needs the replay's fake answers\n"
@@ -839,11 +898,13 @@ A batch Emacs exits 255 on an error nothing catches, before any results."
                      (string-trim (remoto-keys--sh "git" "-C" remoto-keys--root
                                                    "log" "-1" "--format=%h %s" "origin/main"))
                      (remoto-keys--install (remoto-keys--main-source) elpa-main))))
-    (dolist (profile remoto-keys--profiles)
-      (let ((counts (remoto-keys--profile profile elpa-branch elpa-main)))
-        (cl-incf cases (plist-get counts :cases))
-        (cl-incf failed (plist-get counts :failed))
-        (cl-incf differ (plist-get counts :differ))))
+    (unwind-protect
+        (dolist (profile remoto-keys--profiles)
+          (let ((counts (remoto-keys--profile profile elpa-branch elpa-main)))
+            (cl-incf cases (plist-get counts :cases))
+            (cl-incf failed (plist-get counts :failed))
+            (cl-incf differ (plist-get counts :differ))))
+      (remoto-keys--delete-gists))
     (princ (format "remoto-keys %s: %d cases, %d failed%s, %.0f s, results in %s\n"
                    (string-join remoto-keys--profiles " ") cases failed
                    (if elpa-main (format ", %d differ from origin/main" differ) "")
