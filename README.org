@@ -15,7 +15,11 @@ Wouldn't it be nice to be able to ~C-x C-f~ and just browse any remote repo?
 
 It registers a virtual filesystem via ~file-name-handler-alist~ that translates standard file operations into calls to remote API. ~find-file~, ~dired~, tab-completion, ~dired-subtree~ - etc. seamlessly work against a remote repository.
 
-First time it was [[https://youtu.be/YV1kyVE6SvU][demoed]] at [[https://www.meetup.com/emacsatx/][Emacs ATX Meetup]] of July 2026.
+** Videos
+
+- Emacs Conf 2026 [[https://www.youtube.com/watch?v=BDn8ak-8yIs][demo]]
+
+- First time [[https://youtu.be/YV1kyVE6SvU][announcement]] of the package at [[https://www.meetup.com/emacsatx/][Emacs Central Meetup]] of July 2026.
 
 * Why
 
@@ -123,7 +127,7 @@ Public gists need no setup. ~/gist:~ itself, which lists your gists and the ones
 *** Usage Examples
 
 #+begin_example
-C-x C-f /gist: TAB                      -> your gists, then the ones you starred
+C-x C-f /gist: TAB                      -> the owners, then your gists and the ones you starred
 C-x C-f /gist:agzam/ TAB                -> the gists of an account, by description
 C-x C-f /gist:agzam/197a63b37ce827bb95761069ffc85b3c RET -> a gist of one file opens at its file
 C-x d   /gist:agzam/1b484c2fcb109d19e2964da7282442b7 RET -> the files of a gist
@@ -138,19 +142,20 @@ A gist opens at its latest revision; revisions, comments and search stay on the 
 
 *** Editing your gists
 
-The files of your own gists open writable; the gists of other accounts, starred ones included, stay read-only. ~C-x C-s~ (or ~:w~) saves the file to GitHub. The echo area says "(public gist)" after a save to a public gist: each of its saves is a public revision.
+The files of your own gists open writable; ~C-x C-s~ (or ~:w~) saves the file to GitHub. 
 
-If the file changed on GitHub since you opened it, remoto asks before the save goes over it: overwrite, see the diff, or quit. ~M-x remoto-diff-buffer-with-file~ shows the buffer against the text GitHub holds now, and in remoto buffers a key bound to ~diff-buffer-with-file~ runs it. ~revert-buffer~ reads the file from GitHub anew.
+If the file changed on GitHub since you opened it, remoto asks before the save goes over it: overwrite, see the diff, or quit. ~diff-buffer-with-file~ shows it against what on GitHub. ~revert-buffer~ reads the file from GitHub anew.
 
-~C-x C-f~ a new name in your gist and the first save adds the file; ~C-x C-w~ writes any buffer into a gist. Dired's ~C~ copies files in, from a local directory or any repository, ~R~ and ~C-x x r~ rename, and ~D~ deletes a file, which stays in the gist's revisions. wdired edits the names in a gist's Dired. A rename to another gist, or to or from a local directory, is a copy and a deletion.
+Pretty much everything you can do locally - crete new, renaming, deletions work seamlessly, with making changes to gists on remote.
+
+~C-x C-f~ with a new name adds a file; ~C-x C-w~ writes a buffer into a gist. Dired's ~C~ copies files in, ~R~ and ~C-x x r~ rename, ~D~ deletes, which adds a gist revision. 
 
 A gist keeps UTF-8 text only: a binary file stays read-only, and a buffer in another coding system asks for ~C-x RET f utf-8~ first. A gist is flat and holds no blank file, since GitHub would delete it: a name with a slash, a directory and an empty file are refused.
 
-*** Making and deleting gists
+*** Some useful commands
 
-~C-x C-f /gist:YOU/NAME~ opens the file NAME of your gist that holds it. When none does, the buffer is a new gist, and its first save makes it: remoto asks for a description, and for secret or public. ~C-x C-w /gist:YOU/new:/NAME~ saves any buffer as a new gist and goes on editing it there. ~M-x remoto-gist-create~ makes a gist of the region, the buffer, or the files marked in Dired, and copies its URL.
-
-~D~ on a gist's line in ~/gist:~ or ~/gist:YOU/~ deletes the gist, history and all, after one question that names it; marked lines get one question for all of them. Deleting the last file of a gist deletes the gist, since GitHub keeps no empty gist. ~M-x remoto-gist-edit-description~ edits the description of the gist at point.
+- ~remoto-gist-create~ makes a gist of the region, the buffer, or the files marked in Dired, and copies its URL.
+- ~remoto-gist-edit-description~ edits the description of the gist at point.
 
 #+HTML: </details>
 
