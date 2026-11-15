@@ -1942,11 +1942,24 @@ A scenario that spends GitHub's requests without a token runs only by name."
   "Save what the cases touch, log remoto's requests, and say how to submit a prompt.")
 
 (defconst remoto-keys--live-reset
-  '(let ((saved remoto-keys--live-saved))
+  '(let ((saved remoto-keys--live-saved)
+         (tmp (file-truename temporary-file-directory)))
      (dolist (buffer (buffer-list))
        (unless (or (memq buffer (plist-get saved :buffers))
                    (string-prefix-p " " (buffer-name buffer))
-                   (equal (buffer-name buffer) "*remoto-keys*"))
+                   (equal (buffer-name buffer) "*remoto-keys*")
+                   ;; Other programs make buffers in this Emacs too: only what a case opens goes.
+                   (with-current-buffer buffer
+                     (let ((place (or buffer-file-name
+                                      (and (derived-mode-p 'dired-mode)
+                                           (format "%s" default-directory)))))
+                       (not (or (string-match-p
+                                 "\\`\\*\\(?:Embark\\|remoto\\|Remoto\\|Completions\\)"
+                                 (buffer-name))
+                                (and place (boundp 'remoto--handler-regexp)
+                                     (string-match-p remoto--handler-regexp place))
+                                (and place (not (file-remote-p place))
+                                     (string-prefix-p tmp (file-truename place))))))))
          (with-current-buffer buffer (set-buffer-modified-p nil))
          (let ((kill-buffer-query-functions nil))
            (kill-buffer buffer))))

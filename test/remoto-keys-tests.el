@@ -446,6 +446,27 @@
       (spy-on 'princ)
       (expect (remoto-keys--delete-gists) :to-equal 1))))
 
+(describe "remoto-keys--live-reset"
+  (it "kills the buffers a case opens, and none that another program made meanwhile"
+    (let ((other (generate-new-buffer "another program's buffer"))
+          (local (generate-new-buffer "remoto-keys-case.txt"))
+          (embark (generate-new-buffer "*Embark Collect: x*")))
+      (setq remoto-keys--live-saved
+            (list :buffers (seq-remove (lambda (b) (memq b (list other local embark))) (buffer-list))
+                  :windows (current-window-configuration)))
+      (with-current-buffer local
+        (setq buffer-file-name (expand-file-name "remoto-keys-case.txt" temporary-file-directory)))
+      (unwind-protect
+          (progn
+            (eval remoto-keys--live-reset t)
+            (expect (buffer-live-p other) :to-be t)
+            (expect (buffer-live-p local) :to-be nil)
+            (expect (buffer-live-p embark) :to-be nil))
+        (makunbound 'remoto-keys--live-saved)
+        (makunbound 'remoto-keys--live-calls)
+        (when (buffer-live-p other) (kill-buffer other))
+        (when (get-buffer "*remoto-keys*") (kill-buffer "*remoto-keys*"))))))
+
 (describe "remoto-e2e-goto"
   (it "goes to the line of a name, or of a gist's file behind its hidden id"
     (with-temp-buffer
