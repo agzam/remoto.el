@@ -1028,19 +1028,21 @@ The timer comes back while the reply grows, so only silence ends a request."
   (when (eq (remoto--request-status req) 'pending)
     (setf (remoto--request-timer req)
           (run-at-time remoto-request-timeout nil #'remoto--request-check
-                       req (remoto--request-progress req)))))
+                       req (remoto--request-progress req) remoto-request-timeout))))
 
 (defconst remoto--no-reply " sent nothing for "
   "What the `user-error' of a request ended by its deadline says after the host.
 A write looks for it: the forge may have done what it got.")
 
-(defun remoto--request-check (req seen)
-  "End REQ when its reply is where SEEN found it, else watch it on."
+(defun remoto--request-check (req seen &optional seconds)
+  "End REQ when its reply is where SEEN found it SECONDS ago, else watch it on.
+SECONDS is the deadline its timer had; a timer that an older remoto set
+passes none."
   (if (equal seen (remoto--request-progress req))
       (remoto--request-abort
        req (list 'user-error (format "Remoto: %s%s%g seconds"
                                      (remoto--request-host req) remoto--no-reply
-                                     remoto-request-timeout)))
+                                     (or seconds remoto-request-timeout))))
     (remoto--request-watch req)))
 
 (defun remoto--request-send (forge resource auth &optional then method payload)
@@ -3525,6 +3527,7 @@ visited file checks the forge's text first; elsewhere the write refuses."
       nil)))
 
 (defvar recentf-list)
+(declare-function recentf-add-file "recentf")
 
 (defun remoto--save-new-repo ()
   "Save a buffer that visits a file of a repository still to make, making it.
@@ -3542,8 +3545,12 @@ buffer visits the file in the new repository.  Return t once saved."
       (set-visited-file-name name t t)
       (set-buffer-modified-p nil)
       (setq remoto--base (cons name (secure-hash 'sha1 bytes)))
+      ;; recentf saw the name of the repository still to make; the new one's
+      ;; name takes its place.
       (when (boundp 'recentf-list)
-        (setq recentf-list (delete file recentf-list)))
+        (setq recentf-list (delete file recentf-list))
+        (when (bound-and-true-p recentf-mode)
+          (recentf-add-file name)))
       (unless noninteractive
         (message "Wrote %s (%s)" name (remoto--url forge 'repo (list :owner owner :repo repo))))
       t)))
@@ -4390,20 +4397,26 @@ DIR is what `remoto--listing-dir' returns."
   "Return the name of DIR's listing in the messages: its owner, or DIR."
   (or (remoto-path-owner (remoto--parse dir)) dir))
 
-(defun remoto--add-listing-page (listing entries next)
+(defun remoto--add-listing-page (listing entries next &optional _items)
   "Add ENTRIES, one page, to LISTING, up to `remoto-listing-cap'.
 NEXT is the continuation of the page after, nil after the last.  A name
 already there, such as the line that `remoto-dired-up-directory' adds,
 gives way to the page's own."
-  (let ((all (append (seq-remove (lambda (entry) (assoc-string (car entry) entries t))
-                                 (remoto--listing-entries listing))
-                     entries)))
-    (setf (remoto--listing-entries listing) (seq-take all remoto-listing-cap)
-          (remoto--listing-state listing)
-          (cond ((< remoto-listing-cap (length all)) 'capped)
-                ((null next) nil)
-                ((< (length all) remoto-listing-cap) 'fetching)
-                (t 'capped)))))
+  (if (stringp entries)
+      ;; A fetch of an older remoto, still running after an in-session upgrade,
+      ;; passes LISTING DIR OWNER ITEMS: it stops there, and the revert of DIR
+      ;; that it ends with lists DIR anew.
+      (progn (remhash entries remoto--listing-cache)
+             (setf (remoto--listing-state listing) 'failed))
+    (let ((all (append (seq-remove (lambda (entry) (assoc-string (car entry) entries t))
+                                   (remoto--listing-entries listing))
+                       entries)))
+      (setf (remoto--listing-entries listing) (seq-take all remoto-listing-cap)
+            (remoto--listing-state listing)
+            (cond ((< remoto-listing-cap (length all)) 'capped)
+                  ((null next) nil)
+                  ((< (length all) remoto-listing-cap) 'fetching)
+                  (t 'capped))))))
 
 (defun remoto--fetch-listing (forge dir)
   "Fetch the first page of the listing DIR of FORGE and cache the listing.
@@ -5061,9 +5074,10 @@ Emacs looks for --label in its --help, which the diff of macOS leaves out."
   (when (eq remoto--diff-labels 'unknown)
     (setq remoto--diff-labels
           (let ((default-directory temporary-file-directory))
-            (eql 0 (ignore-errors
-                     (call-process diff-command nil nil nil "--label" "a" "--label" "b"
-                                   null-device null-device))))))
+            (eql 0 (condition-case nil
+                       (call-process diff-command nil nil nil "--label" "a" "--label" "b"
+                                     null-device null-device)
+                     (file-error nil))))))
   remoto--diff-labels)
 
 ;;;###autoload

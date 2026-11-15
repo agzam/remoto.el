@@ -3501,6 +3501,15 @@ SENTINEL hears."
       (expect (process-live-p remoto-test--process) :to-be nil)
       (expect (buffer-live-p remoto-test--buffer) :to-be nil)))
 
+  (it "names the deadline its timer had, though the option changed while it waited"
+    ;; A session that loads another remoto, with another default, does that.
+    (let ((remoto-request-timeout 0.05)
+          (throw-on-input 'remoto-test-input))
+      (remoto-test--request-in 'remoto-test--buffer)
+      (run-at-time 0.01 nil (lambda () (setq remoto-request-timeout 30)))
+      (expect (remoto-test--within 2 (remoto-test--ghub-get-message))
+              :to-equal "Remoto: api.github.com sent nothing for 0.05 seconds")))
+
   (it "drops the idle connections url.el keeps to that host, and no other"
     ;; What silenced one connection, a sleep or a change of network, killed
     ;; the rest; each would cost a later request a deadline of its own.
@@ -7685,7 +7694,24 @@ b050 is on the second page of big's listing, which the specs hand over."
       (remoto--add-listing-page listing (list '("b" (note . "b")) '("older" (note . "page")))
                                 nil)
       (expect (remoto--listing-entries listing)
-              :to-equal '(("a" (note . "a")) ("b" (note . "b")) ("older" (note . "page")))))))
+              :to-equal '(("a" (note . "a")) ("b" (note . "b")) ("older" (note . "page"))))))
+
+  (it "ends the fetch of an older remoto that an upgrade left running, and lists anew"
+    ;; The callback of that fetch, as remoto 2.7.0 wrote it, with its page in.
+    (remoto-test-with-cache
+      (let* ((dir "/github:o/")
+             (listing (puthash dir (remoto--listing-create :entries (list '("a")) :state 'fetching)
+                               remoto--listing-cache)))
+        (spy-on 'remoto--fetch-listing-page)
+        (spy-on 'remoto--listing-done)
+        (when (eq listing (gethash dir remoto--listing-cache))
+          (remoto--add-listing-page listing dir "o" (vector '((name . "b"))))
+          (if (eq (remoto--listing-state listing) 'fetching)
+              (remoto--fetch-listing-page remoto--github dir listing "o" "users/o/repos" 3)
+            (remoto--listing-done dir listing "o")))
+        (expect 'remoto--fetch-listing-page :not :to-have-been-called)
+        (expect 'remoto--listing-done :to-have-been-called-with dir listing "o")
+        (expect (gethash dir remoto--listing-cache) :to-be nil)))))
 
 (describe "the default ref of a forge with GitHub's API"
   (it "remembers the repository's Dired line from the same answer"
@@ -14283,6 +14309,18 @@ buffers are killed after."
       (expect (directory-files "/gist:me/0a1b:/" nil directory-files-no-dot-files-regexp)
               :to-equal '("a.sh" "b.sh" "c.sh")))))
 
+(describe "remoto--diff-labels-p"
+  (it "asks diff-command once, and takes a diff it cannot run for one without labels"
+    (let ((remoto--diff-labels 'unknown)
+          (diff-command "remoto-test-no-such-diff"))
+      (expect (remoto--diff-labels-p) :to-be nil)
+      (expect remoto--diff-labels :to-be nil))
+    (let ((remoto--diff-labels 'unknown))
+      (spy-on 'call-process :and-return-value 0)
+      (expect (remoto--diff-labels-p) :to-be t)
+      (expect (remoto--diff-labels-p) :to-be t)
+      (expect 'call-process :to-have-been-called-times 1))))
+
 (describe "remoto-diff-buffer-with-file"
   (it "shows the buffer against the text GitHub holds now, the headers naming both"
     (remoto-test-with-store
@@ -14659,7 +14697,21 @@ buffers are killed after."
         (with-current-buffer (find-file-noselect "/gist:me/idea.md")
           (insert "x\n")
           (save-buffer))
-        (expect recentf-list :to-equal '("/tmp/other"))))))
+        (expect recentf-list :to-equal '("/tmp/other")))))
+
+  (it "puts its name among the recent files at its first save, where recentf is on"
+    (require 'recentf)
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b")
+      (spy-on 'read-string :and-return-value "")
+      (spy-on 'read-multiple-choice :and-return-value '(?s "secret"))
+      (let ((recentf-mode t)
+            (recentf-list (list "/gist:me/new:/idea.md" "/tmp/other")))
+        (with-current-buffer (find-file-noselect "/gist:me/idea.md")
+          (insert "x\n")
+          (save-buffer)
+          (expect recentf-list :to-equal (list buffer-file-name "/tmp/other"))
+          (expect buffer-file-name :to-match "\\`/gist:me/0f[0-9]+:/idea\\.md\\'"))))))
 
 (describe "a gist deleted"
   (it "goes with D on its line, after one question that names it, and leaves the listings"
