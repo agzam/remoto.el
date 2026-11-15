@@ -11495,6 +11495,8 @@ of `completion-all-completions'; Vertico inserts a candidate as
     (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be-truthy)
     (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be-truthy)
     (expect (memq 'remoto--maybe-enable-mode after-set-visited-file-name-hook) :to-be-truthy)
+    (expect (memq 'remoto--save-new-repo write-file-functions) :to-be-truthy)
+    (expect (memq 'remoto--refuse-missing-save write-file-functions) :to-be-truthy)
     (expect (memq 'remoto--minibuffer-exit-cleanup minibuffer-exit-hook)
             :to-be-truthy))
 
@@ -11518,6 +11520,8 @@ of `completion-all-completions'; Vertico inserts a candidate as
           (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be nil)
           (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be nil)
           (expect (memq 'remoto--maybe-enable-mode after-set-visited-file-name-hook) :to-be nil)
+          (expect (memq 'remoto--save-new-repo write-file-functions) :to-be nil)
+          (expect (memq 'remoto--refuse-missing-save write-file-functions) :to-be nil)
           (expect (memq 'remoto--minibuffer-exit-cleanup minibuffer-exit-hook)
                   :to-be nil))
       (global-remoto-mode 1)))
@@ -14889,6 +14893,20 @@ buffers are killed after."
         (expect (mapcar #'cdr (spy-calls-all-args 'remoto--api-write))
                 :to-equal '(("DELETE" "gists/0a1b"))))))
 
+  (it "says so at a save of a buffer it kept, where Emacs would call its gist write-protected"
+    (remoto-test-with-store
+      (spy-on 'yes-or-no-p :and-return-value t)
+      (spy-on 'y-or-n-p :and-return-value nil)
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+        (delete-directory "/gist:me/0a1b:/" t)
+        (goto-char (point-max))
+        (insert "x\n")
+        (expect (condition-case err (progn (save-buffer) 'saved) (error (error-message-string err)))
+                :to-equal "Remoto: the gist 0a1b is deleted")
+        (expect (buffer-modified-p) :to-be t)
+        (expect (mapcar #'cdr (spy-calls-all-args 'remoto--api-write))
+                :to-equal '(("DELETE" "gists/0a1b"))))))
+
   (it "kills the buffer the deletion runs in once the command is over"
     (remoto-test-with-store
       (spy-on 'yes-or-no-p :and-return-value t)
@@ -15048,6 +15066,18 @@ buffers are killed after."
           (re-search-forward "s\\.txt")
           (expect (condition-case err (call-interactively (command-remapping 'dired-do-delete))
                     (user-error (cadr err)))
+                  :to-match "no gist scope"))
+        (expect 'remoto--api-write :not :to-have-been-called))))
+
+  (it "says why at a save of a new name in one's own gist"
+    (remoto-test-with-store
+      (let ((remoto--token-scopes (make-hash-table :test 'equal))
+            (remoto--told-read-only nil))
+        (puthash (secure-hash 'sha1 "ghp_me") '("repo") remoto--token-scopes)
+        (spy-on 'yes-or-no-p :and-return-value t)
+        (with-current-buffer (find-file-noselect "/gist:me/0a1b:/new.txt")
+          (let ((inhibit-read-only t)) (insert "x\n"))
+          (expect (condition-case err (progn (save-buffer) "saved") (error (error-message-string err)))
                   :to-match "no gist scope"))
         (expect 'remoto--api-write :not :to-have-been-called))))
 

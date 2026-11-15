@@ -3561,6 +3561,16 @@ buffer visits the file in the new repository.  Return t once saved."
         (message "Wrote %s (%s)" name (remoto--url forge 'repo (list :owner owner :repo repo))))
       t)))
 
+(defun remoto--refuse-missing-save ()
+  "Refuse to save a missing file with the reason its forge takes no write.
+A member of `write-file-functions', which run before Emacs would say only
+that the directory, such as a gist remoto deleted, is write-protected."
+  (when-let* ((file buffer-file-name)
+              ((string-match-p remoto--handler-regexp file))
+              (why (remoto--read-only-why file))
+              ((not (file-exists-p file))))
+    (user-error "%s" why)))
+
 (defun remoto--handle-delete-file (filename &optional _trash)
   "Delete FILENAME, a file the user may write, else refuse.
 A forge keeps no trash, so TRASH changes nothing."
@@ -5796,6 +5806,7 @@ Each step is idempotent, so a second call while on is a no-op."
   ;; `write-file' into a forge makes a remoto buffer that no visit made.
   (add-hook 'after-set-visited-file-name-hook #'remoto--maybe-enable-mode)
   (add-hook 'write-file-functions #'remoto--save-new-repo)
+  (add-hook 'write-file-functions #'remoto--refuse-missing-save)
   ;; Clear the fetch indicator and reset in-flight state whenever a
   ;; minibuffer exits.
   (add-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
@@ -5818,6 +5829,7 @@ Each step is idempotent, so a second call while on is a no-op."
   (remove-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
   (remove-hook 'after-set-visited-file-name-hook #'remoto--maybe-enable-mode)
   (remove-hook 'write-file-functions #'remoto--save-new-repo)
+  (remove-hook 'write-file-functions #'remoto--refuse-missing-save)
   (remove-hook 'minibuffer-exit-hook #'remoto--minibuffer-exit-cleanup)
   (when (timerp remoto--warm-auth-timer)
     (cancel-timer remoto--warm-auth-timer))
