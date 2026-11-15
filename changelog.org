@@ -3,6 +3,11 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [2.9.1] - 2026-11-15
+
+** Fixed
+- two typos in the README's gist section
+
 * [2.9.0] - 2026-11-15
 
 ** Added
