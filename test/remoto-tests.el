@@ -3510,6 +3510,26 @@ SENTINEL hears."
       (expect (remoto-test--within 2 (remoto-test--ghub-get-message))
               :to-equal "Remoto: api.github.com sent nothing for 0.05 seconds")))
 
+  (it "gives a request an older remoto left in flight this version's deadline at load"
+    ;; That remoto's timer passes no deadline, and the option may change after it.
+    (let* ((remoto--pending-requests (make-hash-table :test 'equal))
+           (req (remoto--request-create :host "api.github.com" :resource "/r"))
+           (remoto-request-timeout 0.05)
+           (old (run-at-time 30 nil #'remoto--request-check req (remoto--request-progress req))))
+      (unwind-protect
+          (progn
+            (setf (remoto--request-timer req) old)
+            (puthash '("api.github.com" "/r" none) req remoto--pending-requests)
+            (remoto--forget-stale-requests)
+            (setq remoto-request-timeout 30)
+            (let ((end (+ (float-time) 2)))
+              (while (and (eq (remoto--request-status req) 'pending) (< (float-time) end))
+                (accept-process-output nil 0.01)))
+            (expect (remoto--request-status req) :to-be 'error)
+            (expect (remoto--request-value req)
+                    :to-equal '(user-error "Remoto: api.github.com sent nothing for 0.05 seconds")))
+        (cancel-timer old))))
+
   (it "drops the idle connections url.el keeps to that host, and no other"
     ;; What silenced one connection, a sleep or a change of network, killed
     ;; the rest; each would cost a later request a deadline of its own.

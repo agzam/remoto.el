@@ -945,13 +945,15 @@ retries.")
 
 (defun remoto--forget-stale-requests ()
   "Forget the requests an older remoto left, which lack this one's slots.
-Loading remoto again in a running Emacs, as an upgrade does, keeps them."
+Loading remoto again in a running Emacs, as an upgrade does, keeps them.
+A request kept gets this version's deadline: an older timer names none."
   (maphash (lambda (key req)
-             (unless (ignore-errors (or (remoto--request-timer req) t))
-               (remhash key remoto--pending-requests)))
+             (if (not (ignore-errors (or (remoto--request-timer req) t)))
+                 (remhash key remoto--pending-requests)
+               (when (timerp (remoto--request-timer req))
+                 (cancel-timer (remoto--request-timer req))
+                 (remoto--request-watch req))))
            remoto--pending-requests))
-
-(remoto--forget-stale-requests)
 
 (defun remoto--request-condition (err host resource)
   "Turn ERR, as ghub hands it to an errorback, into the condition ghub signals.
@@ -1044,6 +1046,10 @@ passes none."
                                      (remoto--request-host req) remoto--no-reply
                                      (or seconds remoto-request-timeout))))
     (remoto--request-watch req)))
+
+;; After the watch it calls: a load in a session that has requests in flight
+;; gives each this version's timer.
+(remoto--forget-stale-requests)
 
 (defun remoto--request-send (forge resource auth &optional then method payload)
   "Send METHOD for RESOURCE of FORGE with AUTH by callback; return the request.
