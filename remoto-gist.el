@@ -740,25 +740,36 @@ CONTINUATION is (ENDPOINT . PAGE); CALLBACK takes a page in the background."
       (remoto--path-prefix path)
     (format "%s%s/" (remoto--path-prefix path) (remoto-path-owner path))))
 
+(defun remoto-gist--owners (entries)
+  "Return the owners of the gists of ENTRIES, root lines, as candidates.
+Each comes once, in the group of its first gist.  ido enters the first
+candidate that a typed OWNER/ matches, which has to be OWNER itself."
+  (seq-uniq (mapcar (lambda (entry)
+                      (let-alist (cdr entry)
+                        (propertize .gist-owner 'remoto-group .gist-group)))
+                    entries)))
+
 (defun remoto-gist--candidates (path fetch)
   "Return the gists of the listing at PATH as candidates.
-Each carries the label shown for its id, and the annotation after it.
-The cached listing answers; FETCH fetches it when there is none."
+Each carries the label shown for its id, and the annotation after it; the
+root offers their owners first.  The cached listing answers; FETCH
+fetches it when there is none."
   (let* ((dir (remoto-gist--listing-dir path))
          (root (eq (remoto-path-level path) 'root))
-         (listing (if fetch (remoto--listing dir) (gethash dir remoto--listing-cache))))
-    (when listing
-      (mapcar (lambda (entry)
-                (let-alist (cdr entry)
-                  (if root
-                      (propertize (concat .gist-owner "/" .gist-id)
-                                  'remoto-group .gist-group
-                                  'remoto-label .gist-label
-                                  'remoto-acct-desc .gist-annotation)
-                    (propertize .gist-id
-                                'remoto-label .gist-label
-                                'remoto-repo-desc .gist-annotation))))
-              (remoto--listing-entries listing)))))
+         (listing (if fetch (remoto--listing dir) (gethash dir remoto--listing-cache)))
+         (entries (and listing (remoto--listing-entries listing))))
+    (append (and root (remoto-gist--owners entries))
+            (mapcar (lambda (entry)
+                      (let-alist (cdr entry)
+                        (if root
+                            (propertize (concat .gist-owner "/" .gist-id)
+                                        'remoto-group .gist-group
+                                        'remoto-label .gist-label
+                                        'remoto-acct-desc .gist-annotation)
+                          (propertize .gist-id
+                                      'remoto-label .gist-label
+                                      'remoto-repo-desc .gist-annotation))))
+                    entries))))
 
 (cl-defmethod remoto--keeps-order-p ((_forge remoto-gist))
   "Gists come newest first, and their ids sort by nothing a reader sees."
@@ -780,8 +791,11 @@ fetched only with WAIT.  The prefetch, a nil QUERY, asks nothing."
   (cond
    ((null query) nil)
    ((eq (remoto-path-level path) 'root)
-    (append (and (remoto--known-user forge) (remoto-gist--candidates path t))
-            (and (not (string-empty-p query)) (remoto-gist--users query))))
+    (let ((listed (and (remoto--known-user forge) (remoto-gist--candidates path t))))
+      (append listed
+              (and (not (string-empty-p query))
+                   (seq-remove (lambda (user) (member user listed))
+                               (remoto-gist--users query))))))
    (t (remoto-gist--candidates path wait))))
 
 ;;;; Web URLs

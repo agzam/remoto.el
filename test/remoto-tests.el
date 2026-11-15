@@ -13598,19 +13598,41 @@ The root lists two gists of me and a starred one, /gist:me/ lists two."
              (meta (remoto--completion-metadata "/gist:"))
              (triples (funcall (alist-get 'affixation-function meta) candidates)))
         (expect (mapcar #'substring-no-properties candidates)
-                :to-equal '("me/0a1b/" "me/0c2d/" "nikku/0e6f/"))
+                :to-equal '("me/" "nikku/" "me/0a1b/" "me/0c2d/" "nikku/0e6f/"))
         (expect (mapcar (lambda (triple) (get-text-property 0 'display (car triple))) triples)
-                :to-equal '("Kitty themes" "vimium.json" "Gif utility"))
+                :to-equal '(nil nil "Kitty themes" "vimium.json" "Gif utility"))
         (expect (mapcar (lambda (triple) (substring-no-properties (car triple))) triples)
-                :to-equal '("me/0a1b/" "me/0c2d/" "nikku/0e6f/"))
+                :to-equal '("me/" "nikku/" "me/0a1b/" "me/0c2d/" "nikku/0e6f/"))
         (expect (mapcar (lambda (triple) (substring-no-properties (nth 2 triple))) triples)
-                :to-equal '(" public  kitty.sh" " public" " public  nikku/capture.md"))
+                :to-equal '("" "" " public  kitty.sh" " public" " public  nikku/capture.md"))
         (expect (mapcar (lambda (triple)
                           (funcall (alist-get 'group-function meta) (car triple) nil))
                         triples)
-                :to-equal '("Your gists" "Your gists" "Starred"))
+                :to-equal '("Your gists" "Starred" "Your gists" "Your gists" "Starred"))
         (expect (alist-get 'display-sort-function meta) :to-be #'identity)
         (expect (alist-get 'cycle-sort-function meta) :to-be #'identity))))
+
+  (it "offer each owner at the root before its gists, its own directory"
+    ;; ido enters the first candidate that OWNER/ matches once more is typed:
+    ;; that has to be the owner, not a gist of it, where a new name would land.
+    (remoto-test-with-gists
+      (let* ((candidates (remoto--handle-file-name-all-completions "" "/gist:"))
+             (matching (seq-filter (lambda (c) (string-prefix-p "me/" c)) candidates)))
+        (expect (substring-no-properties
+                 (car (sort (copy-sequence matching) #'string-lessp)))
+                :to-equal "me/")
+        (expect (get-text-property 0 'remoto-target (car candidates)) :to-equal "/gist:me")
+        (expect (seq-count (lambda (c) (equal (substring-no-properties c) "nikku/")) candidates)
+                :to-be 1))))
+
+  (it "name a user that the typed text finds once, as the owner it lists already"
+    (remoto-test-with-gists
+      (spy-on 'remoto--search-users
+              :and-return-value (list (propertize "nikku" 'remoto-acct-type "User")
+                                      (propertize "nikkuu" 'remoto-acct-type "User")))
+      (expect (mapcar #'substring-no-properties
+                      (remoto--handle-file-name-all-completions "nik" "/gist:"))
+              :to-equal '("nikku/" "nikku/0e6f/" "nikkuu/"))))
 
   (it "show their labels at an owner, in the order listed"
     (remoto-test-with-gists
@@ -13687,12 +13709,14 @@ Buffers BODY creates are killed afterwards."
 (describe "a gist of one file"
   (it "opens at its file from its candidate at the root and at an owner"
     (remoto-test-with-gist-answers
+      ;; The root offers the owners too, which are directories.
       (expect (mapcar (lambda (candidate)
                         (thread-last (substring-no-properties candidate)
                                      (concat "/gist:")
                                      find-file-noselect
                                      buffer-file-name))
-                      (remoto--handle-file-name-all-completions "" "/gist:"))
+                      (seq-filter (lambda (candidate) (string-match-p "\\`[^/]+/[^/]+/\\'" candidate))
+                                  (remoto--handle-file-name-all-completions "" "/gist:")))
               :to-equal '("/gist:me/0a1b:/kitty.sh" "/gist:me/0c2d:/vimium.json"
                           "/gist:nikku/0e6f:/capture.md"))
       (with-current-buffer (thread-last (remoto--handle-file-name-all-completions "" "/gist:me/")
