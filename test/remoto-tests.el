@@ -2229,6 +2229,26 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
       (expect (local-variable-p 'file-precious-flag) :to-be nil)
       (expect (local-variable-p 'auto-save-visited-mode) :to-be nil)))
 
+  (it "puts this version's remaps into the map a load finds, keeping its other bindings"
+    (let ((map (make-sparse-keymap)))
+      (define-key map [remap dired-up-directory] #'remoto-dired-up-directory)
+      (define-key map (kbd "C-c g") #'ignore)
+      (remoto--add-remaps map)
+      (pcase-dolist (`(,command . ,own) remoto--remaps)
+        (expect (lookup-key map (vector 'remap command)) :to-be own))
+      (expect (lookup-key map (kbd "C-c g")) :to-be #'ignore)
+      (expect (lookup-key remoto-mode-map [remap dired-do-delete])
+              :to-be #'remoto-dired-do-delete)))
+
+  (it "installs this version's hooks when it loads with the mode on, and only then"
+    (spy-on 'remoto--install)
+    (let ((global-remoto-mode nil))
+      (remoto--reinstall))
+    (expect 'remoto--install :not :to-have-been-called)
+    (let ((global-remoto-mode t))
+      (remoto--reinstall))
+    (expect 'remoto--install :to-have-been-called-times 1))
+
   (it "binds no key in remoto-mode-map (no reserved C-c LETTER bindings)"
     (expect (keymapp remoto-mode-map) :to-be-truthy)
     (let ((events nil))

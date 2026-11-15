@@ -5077,19 +5077,29 @@ every line added.  Return the buffer of the diff."
       (display-buffer diff)
       diff)))
 
-(defvar remoto-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map [remap dired-up-directory] #'remoto-dired-up-directory)
-    (define-key map [remap dired-jump] #'remoto-dired-jump)
-    (define-key map [remap dired-jump-other-window] #'remoto-dired-jump-other-window)
-    (define-key map [remap diff-buffer-with-file] #'remoto-diff-buffer-with-file)
-    (define-key map [remap dired-do-delete] #'remoto-dired-do-delete)
-    (define-key map [remap dired-do-flagged-delete] #'remoto-dired-do-flagged-delete)
-    map)
+(defconst remoto--remaps
+  '((dired-up-directory . remoto-dired-up-directory)
+    (dired-jump . remoto-dired-jump)
+    (dired-jump-other-window . remoto-dired-jump-other-window)
+    (diff-buffer-with-file . remoto-diff-buffer-with-file)
+    (dired-do-delete . remoto-dired-do-delete)
+    (dired-do-flagged-delete . remoto-dired-do-flagged-delete))
+  "The commands that `remoto-mode' remaps, each to remoto's own.")
+
+(defun remoto--add-remaps (map)
+  "Remap in MAP each command of `remoto--remaps' to remoto's own."
+  (pcase-dolist (`(,command . ,own) remoto--remaps)
+    (define-key map (vector 'remap command) own)))
+
+(defvar remoto-mode-map (make-sparse-keymap)
   "Keymap for `remoto-mode'.
 It binds no key: it remaps the Dired commands that go up a level or
 delete, and `diff-buffer-with-file', to remoto's.  Bind the variable
 `remoto-command-map' to a prefix key in it for the URL commands.")
+
+;; A load in a session that has the map, as an in-session upgrade, keeps
+;; the old map: the remaps of this version go into it.
+(remoto--add-remaps remoto-mode-map)
 
 ;;;###autoload
 (define-minor-mode remoto-mode
@@ -6217,5 +6227,14 @@ A forge file reloads the core of its own directory unless this names it:
          (expand-file-name "remoto-forgejo" (file-name-directory (macroexp-file-name))))
 (require 'remoto-gist
          (expand-file-name "remoto-gist" (file-name-directory (macroexp-file-name))))
+
+(defun remoto--reinstall ()
+  "Install this version's handler, advice and hooks when the mode is on.
+A load of this file with the mode on, as an in-session upgrade, would
+leave those of the version it replaces, without any it adds."
+  (when (bound-and-true-p global-remoto-mode)
+    (remoto--install)))
+
+(remoto--reinstall)
 
 ;;; remoto.el ends here
