@@ -1448,6 +1448,275 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
       (expect (make-directory "/github:me/newrepo") :to-throw 'user-error)
       (expect (make-directory "/github:me/zeta") :not :to-throw))))
 
+;;; Writes
+
+(defvar remoto-test--writes nil
+  "The writes the forge /writer: got, the latest first.")
+
+(cl-defstruct (remoto-test-writer (:include remoto-forge)
+                                  (:constructor remoto-test-writer-create)
+                                  (:copier nil))
+  "A source without refs whose account me may write its own repositories.")
+
+(cl-defmethod remoto-forge-default-ref ((_forge remoto-test-writer) _owner _repo)
+  "No refs."
+  nil)
+
+(cl-defmethod remoto--api-host ((_forge remoto-test-writer))
+  "The host its login is kept under."
+  "writer.example")
+
+(cl-defmethod remoto-forge-tree ((_forge remoto-test-writer) _owner _repo _ref)
+  "One flat tree of two files."
+  (let ((table (make-hash-table :test 'equal)))
+    (puthash "" remoto--dir-entry table)
+    (puthash "/" remoto--dir-entry table)
+    (dolist (name '("a.txt" "b.txt") table)
+      (puthash name '((type . "blob") (size . 3) (sha . "") (mode . "100644")) table))))
+
+(cl-defmethod remoto-forge-content ((_forge remoto-test-writer) _owner _repo _ref _path)
+  "Each file holds one line."
+  "hi\n")
+
+(cl-defmethod remoto--forge-writable-p ((_forge remoto-test-writer) owner _repo _ref _path)
+  "The repositories of me are writable."
+  (equal owner "me"))
+
+(cl-defmethod remoto--forge-write ((_forge remoto-test-writer) owner repo ref path bytes)
+  "Record the write of BYTES to PATH of OWNER/REPO at REF."
+  (push (list 'write owner repo ref path bytes) remoto-test--writes)
+  nil)
+
+(cl-defmethod remoto--forge-delete ((_forge remoto-test-writer) owner repo ref path)
+  "Record the deletion of PATH of OWNER/REPO at REF."
+  (push (list 'delete owner repo ref path) remoto-test--writes)
+  nil)
+
+(cl-defmethod remoto--forge-rename ((_forge remoto-test-writer) owner repo ref path newpath)
+  "Record the rename of PATH of OWNER/REPO at REF to NEWPATH."
+  (push (list 'rename owner repo ref path newpath) remoto-test--writes)
+  nil)
+
+(cl-defmethod remoto--forge-delete-repo ((_forge remoto-test-writer) owner repo)
+  "Record the deletion of OWNER/REPO."
+  (push (list 'delete-repo owner repo) remoto-test--writes)
+  nil)
+
+(cl-defmethod remoto--forge-deletable-p ((_forge remoto-test-writer) owner _repo)
+  "The repositories of me may be deleted."
+  (equal owner "me"))
+
+(defmacro remoto-test-with-writer (&rest body)
+  "Run BODY with the forge /writer: registered, its writes in `remoto-test--writes'."
+  (declare (indent 0))
+  `(let ((remoto--forges (copy-alist remoto--forges))
+         (remoto--handler-regexp remoto--handler-regexp)
+         (file-name-handler-alist (copy-alist file-name-handler-alist))
+         (remoto-test--writes nil))
+     (remoto-test-with-cache
+       (remoto-register-forge (remoto-test-writer-create :name 'writer :prefixes '("writer")
+                                                         :host "writer.example"))
+       ,@body)))
+
+(describe "the writes of the forge contract"
+  :var ((fake (remoto-forge-create :name 'fake :prefixes '("fake") :delimiters '(?@))))
+
+  (it "refuse every write with the read-only message by default"
+    (dolist (call (list (lambda () (remoto--forge-write fake "o" "r" nil "a" "x"))
+                        (lambda () (remoto--forge-delete fake "o" "r" nil "a"))
+                        (lambda () (remoto--forge-rename fake "o" "r" nil "a" "b"))
+                        (lambda () (remoto--forge-create-repo fake "o" '(("a" . "x")) "" nil))
+                        (lambda () (remoto--forge-delete-repo fake "o" "r"))))
+      (expect (condition-case err (funcall call) (user-error (cadr err)))
+              :to-equal "Remoto: repository is read-only")))
+
+  (it "let the user write nothing by default, on every forge that comes with remoto"
+    (dolist (forge (list fake remoto--github remoto--codeberg remoto--gist))
+      (expect (remoto--forge-writable-p forge "me" "r" nil "a") :to-be nil)
+      (expect (remoto--forge-writable-p forge "me" "r" nil "") :to-be nil))))
+
+(describe "writes through the file handler"
+  (it "refuse in a repository of GitHub, of Codeberg and in another's gist, its owner's to delete"
+    (remoto-test-with-gist-answers
+      (puthash "/codeberg:o/r@main" (gethash "/github:testowner/testrepo@main" remoto--tree-cache)
+               remoto--tree-cache)
+      (pcase-dolist (`(,name . ,deletion)
+                     '(("/github:testowner/testrepo@main:/README.md"
+                        . "Remoto: repository is read-only")
+                       ("/codeberg:o/r@main:/README.md" . "Remoto: repository is read-only")
+                       ("/gist:nikku/0e6f:/capture.md"
+                        . "Remoto: only its owner deletes a gist, and nikku owns 0e6f")))
+        (dolist (call (list (lambda () (write-region "x" nil name))
+                            (lambda () (delete-file name))
+                            (lambda () (rename-file name (concat name ".bak")))
+                            (lambda () (set-file-modes name #o600))
+                            (lambda () (set-file-times name))))
+          (expect (condition-case err (funcall call) (user-error (cadr err)))
+                  :to-equal "Remoto: repository is read-only"))
+        (expect (condition-case err (delete-directory (file-name-directory name) t)
+                  (user-error (cadr err)))
+                :to-equal deletion))))
+
+  (it "hand a writable forge the bytes of a string, a region or a buffer"
+    (remoto-test-with-writer
+      (let ((coding-system-for-write 'utf-8-unix))
+        (write-region "héllo\n" nil "/writer:me/r:/a.txt")
+        (expect last-coding-system-used :to-be 'utf-8-unix)
+        (with-temp-buffer
+          (insert "one\ntwo\n")
+          (write-region 5 (point-max) "/writer:me/r:/b.txt")
+          (write-region nil nil "/writer:me/r:/c.txt")))
+      (expect (reverse remoto-test--writes)
+              :to-equal `((write "me" "r" nil "a.txt" ,(encode-coding-string "héllo\n" 'utf-8))
+                          (write "me" "r" nil "b.txt" "two\n")
+                          (write "me" "r" nil "c.txt" "one\ntwo\n")))
+      (expect (seq-some (lambda (write) (multibyte-string-p (nth 5 write))) remoto-test--writes)
+              :to-be nil)))
+
+  (it "append to what the file holds, and keep an existing file under excl"
+    (remoto-test-with-writer
+      (let ((coding-system-for-write 'utf-8-unix))
+        (write-region "more\n" nil "/writer:me/r:/a.txt" t)
+        (expect (write-region "x" nil "/writer:me/r:/b.txt" nil nil nil 'excl)
+                :to-throw 'file-already-exists))
+      (expect remoto-test--writes :to-equal '((write "me" "r" nil "a.txt" "hi\nmore\n")))))
+
+  (it "hand a writable forge the file to delete, the names of a rename, the repository"
+    (remoto-test-with-writer
+      (delete-file "/writer:me/r:/a.txt")
+      (rename-file "/writer:me/r:/a.txt" "/writer:me/r:/c.txt")
+      (rename-file "/writer:me/r:/a.txt" "/writer:me/r:/b.txt" t)
+      (let ((remoto--deletion-agreed t))
+        (delete-directory "/writer:me/r:/" t))
+      (expect (reverse remoto-test--writes)
+              :to-equal '((delete "me" "r" nil "a.txt")
+                          (rename "me" "r" nil "a.txt" "c.txt")
+                          (rename "me" "r" nil "a.txt" "b.txt")
+                          (delete-repo "me" "r")))))
+
+  (it "keep a rename off a name the repository holds, unless told to overwrite it"
+    (remoto-test-with-writer
+      (spy-on 'yes-or-no-p :and-return-value nil)
+      (expect (rename-file "/writer:me/r:/a.txt" "/writer:me/r:/b.txt")
+              :to-throw 'file-already-exists)
+      (expect 'yes-or-no-p :not :to-have-been-called)
+      (expect (rename-file "/writer:me/r:/a.txt" "/writer:me/r:/b.txt" 1)
+              :to-throw 'file-already-exists)
+      (expect 'yes-or-no-p :to-have-been-called-with
+              "File /writer:me/r:/b.txt already exists; rename to it anyway? ")
+      (expect remoto-test--writes :to-be nil)))
+
+  (it "refuse a rename with an end the user may not write"
+    (remoto-test-with-writer
+      (dolist (names '(("/writer:other/r:/a.txt" "/writer:other/r:/c.txt")
+                       ("/writer:other/r:/a.txt" "/writer:me/r:/a.txt")
+                       ("/writer:me/r:/a.txt" "/writer:other/s:/a.txt")
+                       ("/github:testowner/testrepo@main:/README.md" "/tmp/remoto-test-a.txt")))
+        (expect (condition-case err (apply #'rename-file names) (user-error (cadr err)))
+                :to-equal "Remoto: repository is read-only"))
+      (expect remoto-test--writes :to-be nil)))
+
+  (it "move a file between repositories as a write there and a deletion here"
+    (remoto-test-with-writer
+      (spy-on 'remoto-forge-content :and-return-value "hi\n")
+      (rename-file "/writer:me/r:/a.txt" "/writer:me/s:/c.txt")
+      (expect (reverse remoto-test--writes)
+              :to-equal '((write "me" "s" nil "c.txt" "hi\n")
+                          (delete "me" "r" nil "a.txt")))))
+
+  (it "delete a repository only when told to delete what it holds"
+    (remoto-test-with-writer
+      (expect (delete-directory "/writer:me/r:/") :to-throw 'file-error)
+      (expect (condition-case err (delete-directory "/writer:other/r:/" t)
+                (user-error (cadr err)))
+              :to-equal "Remoto: repository is read-only")
+      (expect remoto-test--writes :to-be nil)))
+
+  (it "let a writable repository keep its modes and times, quietly"
+    (remoto-test-with-writer
+      (expect (set-file-modes "/writer:me/r:/a.txt" #o755) :to-be nil)
+      (expect (set-file-times "/writer:me/r:/a.txt") :to-be nil)
+      (expect (condition-case err (set-file-modes "/writer:other/r:/a.txt" #o755)
+                (user-error (cadr err)))
+              :to-equal "Remoto: repository is read-only")
+      (expect remoto-test--writes :to-be nil)))
+
+  (it "refuse a write to another's repository, or above a repository"
+    (remoto-test-with-writer
+      (dolist (name '("/writer:other/r:/a.txt" "/writer:me/" "/writer:"))
+        (expect (condition-case err (write-region "x" nil name) (user-error (cadr err)))
+                :to-equal "Remoto: repository is read-only"))
+      (expect remoto-test--writes :to-be nil))))
+
+(describe "a file the forge lets the user write"
+  (before-each
+    (spy-on 'remoto-forge-content :and-return-value "hi\n"))
+
+  (it "is writable as the forge answers, and nothing above a repository is"
+    (remoto-test-with-writer
+      (expect (file-writable-p "/writer:me/r:/a.txt") :to-be t)
+      (expect (file-writable-p "/writer:me/r:/new.txt") :to-be t)
+      (expect (file-writable-p "/writer:me/r:/") :to-be t)
+      (expect (file-writable-p "/writer:other/r:/a.txt") :to-be nil)
+      (expect (file-writable-p "/writer:me/") :to-be nil)
+      (expect (file-writable-p "/writer:") :to-be nil)
+      (expect (file-writable-p "/codeberg:o/r:/README.md") :to-be nil)
+      (expect (file-writable-p "/gist:me/0a1b:/kitty.sh") :to-be nil)))
+
+  (it "opens writable, and GitHub's file read-only with the note of after-find-file"
+    (remoto-test-with-writer
+      (spy-on 'message)
+      (remoto-test-as-command
+        (let ((writable (find-file-noselect "/writer:me/r:/a.txt"))
+              (github (find-file-noselect "/github:testowner/testrepo@main:/README.md")))
+          (unwind-protect
+              (progn
+                (expect (buffer-local-value 'buffer-read-only writable) :to-be nil)
+                (expect (buffer-local-value 'buffer-read-only github) :to-be t)
+                (expect 'message :to-have-been-called-with "%s" "Note: file is write protected"))
+            (kill-buffer writable)
+            (kill-buffer github))))))
+
+  (it "opens literally as it opens otherwise, though after-find-file skips that visit"
+    (remoto-test-with-writer
+      (let ((writable (find-file-noselect "/writer:me/r:/a.txt" nil t))
+            (github (find-file-noselect "/github:testowner/testrepo@main:/README.md" nil t)))
+        (unwind-protect
+            (progn
+              (expect (buffer-local-value 'buffer-read-only writable) :to-be nil)
+              (expect (buffer-local-value 'buffer-read-only github) :to-be t))
+          (kill-buffer writable)
+          (kill-buffer github)))))
+
+  (it "is not what a starred gist of another account is: it opens read-only"
+    (remoto-test-with-gist-answers
+      (with-current-buffer (find-file-noselect "/gist:nikku/0e6f:/capture.md")
+        (expect buffer-read-only :to-be t)))))
+
+(describe "the handlers a save runs"
+  (it "lock, unlock and test a lock with no lock file, local or remote"
+    (remoto-test-with-cache
+      (let ((create-lockfiles t)
+            (name "/github:testowner/testrepo@main:/README.md"))
+        (spy-on 'make-lock-file-name :and-call-through)
+        (expect (lock-file name) :to-be nil)
+        (expect (file-locked-p name) :to-be nil)
+        (expect (unlock-file name) :to-be nil)
+        (expect 'make-lock-file-name :not :to-have-been-called))))
+
+  (it "name no backup file, so a save makes none"
+    (remoto-test-with-cache
+      (expect (find-backup-file-name "/github:testowner/testrepo@main:/README.md")
+              :to-be nil)))
+
+  (it "answer the modes of a file that its Dired line shows, nil for no file"
+    (remoto-test-with-cache
+      (expect (file-modes "/github:testowner/testrepo@main:/README.md") :to-equal #o644)
+      (expect (file-modes "/github:testowner/testrepo@main:/bin/run") :to-equal #o755)
+      (expect (file-modes "/github:testowner/testrepo@main:/src") :to-equal #o755)
+      (expect (file-modes "/github:testowner/testrepo@main:/nope.txt") :to-be nil)
+      (expect (file-modes "/github:testowner/") :to-be nil))))
+
 ;;; copy-file
 
 (describe "copy-file"
@@ -1942,6 +2211,43 @@ CURRENT and ALTERNATE stand for the files that `%' and `#' name."
       (setq-local buffer-file-name "/home/me/x.el")
       (remoto--maybe-enable-mode)
       (expect remoto-mode :to-be nil)))
+
+  (it "keeps a save of a remoto file off a temporary file and off the idle timer"
+    (with-temp-buffer
+      (setq-local buffer-file-name "/github:o/r@main:/x.el")
+      (remoto--maybe-enable-mode)
+      (expect (local-variable-p 'file-precious-flag) :to-be t)
+      (expect file-precious-flag :to-be nil)
+      (expect (local-variable-p 'auto-save-visited-mode) :to-be t)
+      (expect auto-save-visited-mode :to-be nil)
+      (remoto-mode -1)))
+
+  (it "leaves the saves of a local file as they are"
+    (with-temp-buffer
+      (setq-local buffer-file-name "/home/me/x.el")
+      (remoto--maybe-enable-mode)
+      (expect (local-variable-p 'file-precious-flag) :to-be nil)
+      (expect (local-variable-p 'auto-save-visited-mode) :to-be nil)))
+
+  (it "puts this version's remaps into the map a load finds, keeping its other bindings"
+    (let ((map (make-sparse-keymap)))
+      (define-key map [remap dired-up-directory] #'remoto-dired-up-directory)
+      (define-key map (kbd "C-c g") #'ignore)
+      (remoto--add-remaps map)
+      (pcase-dolist (`(,command . ,own) remoto--remaps)
+        (expect (lookup-key map (vector 'remap command)) :to-be own))
+      (expect (lookup-key map (kbd "C-c g")) :to-be #'ignore)
+      (expect (lookup-key remoto-mode-map [remap dired-do-delete])
+              :to-be #'remoto-dired-do-delete)))
+
+  (it "installs this version's hooks when it loads with the mode on, and only then"
+    (spy-on 'remoto--install)
+    (let ((global-remoto-mode nil))
+      (remoto--reinstall))
+    (expect 'remoto--install :not :to-have-been-called)
+    (let ((global-remoto-mode t))
+      (remoto--reinstall))
+    (expect 'remoto--install :to-have-been-called-times 1))
 
   (it "binds no key in remoto-mode-map (no reserved C-c LETTER bindings)"
     (expect (keymapp remoto-mode-map) :to-be-truthy)
@@ -3195,6 +3501,35 @@ SENTINEL hears."
       (expect (process-live-p remoto-test--process) :to-be nil)
       (expect (buffer-live-p remoto-test--buffer) :to-be nil)))
 
+  (it "names the deadline its timer had, though the option changed while it waited"
+    ;; A session that loads another remoto, with another default, does that.
+    (let ((remoto-request-timeout 0.05)
+          (throw-on-input 'remoto-test-input))
+      (remoto-test--request-in 'remoto-test--buffer)
+      (run-at-time 0.01 nil (lambda () (setq remoto-request-timeout 30)))
+      (expect (remoto-test--within 2 (remoto-test--ghub-get-message))
+              :to-equal "Remoto: api.github.com sent nothing for 0.05 seconds")))
+
+  (it "gives a request an older remoto left in flight this version's deadline at load"
+    ;; That remoto's timer passes no deadline, and the option may change after it.
+    (let* ((remoto--pending-requests (make-hash-table :test 'equal))
+           (req (remoto--request-create :host "api.github.com" :resource "/r"))
+           (remoto-request-timeout 0.05)
+           (old (run-at-time 30 nil #'remoto--request-check req (remoto--request-progress req))))
+      (unwind-protect
+          (progn
+            (setf (remoto--request-timer req) old)
+            (puthash '("api.github.com" "/r" none) req remoto--pending-requests)
+            (remoto--forget-stale-requests)
+            (setq remoto-request-timeout 30)
+            (let ((end (+ (float-time) 2)))
+              (while (and (eq (remoto--request-status req) 'pending) (< (float-time) end))
+                (accept-process-output nil 0.01)))
+            (expect (remoto--request-status req) :to-be 'error)
+            (expect (remoto--request-value req)
+                    :to-equal '(user-error "Remoto: api.github.com sent nothing for 0.05 seconds")))
+        (cancel-timer old))))
+
   (it "drops the idle connections url.el keeps to that host, and no other"
     ;; What silenced one connection, a sleep or a change of network, killed
     ;; the rest; each would cost a later request a deadline of its own.
@@ -3547,6 +3882,195 @@ using unauthenticated access until M-x remoto-reset-auth")
         (remoto--api remoto--github "repos/o/r"))
       (expect 'y-or-n-p :to-have-been-called-with "GitHub refused the token. Log in again? ")
       (expect (remoto--login-failed (remoto-test--github-login)) :to-be t))))
+
+(defun remoto-test--ghub-writes (answer)
+  "Fake `ghub-request' as a write that ANSWER answers before it returns.
+ANSWER is the value, or a function of the arguments of `ghub-request' that
+returns it or signals; a `ghub-http-error' reaches the errorback."
+  (spy-on 'ghub-request :and-call-fake
+          (lambda (&rest args)
+            (let ((keys (nthcdr 3 args)))
+              (condition-case err
+                  (funcall (plist-get keys :callback)
+                           (if (functionp answer) (apply answer args) answer)
+                           ghub-response-headers)
+                (ghub-http-error
+                 (funcall (plist-get keys :errorback)
+                          `(error http ,(nth 1 err) ,(nth 4 err)) ghub-response-headers)))
+              nil))))
+
+(defun remoto-test--write-fails-with (code &optional payload headers)
+  "Make `ghub-request' fail as ghub does for an answer of status CODE.
+PAYLOAD is the body that came with it and HEADERS the headers."
+  (spy-on 'ghub-request :and-call-fake
+          (lambda (_method _resource _params &rest args)
+            (funcall (plist-get args :errorback) `(error http ,code ,payload) headers)
+            nil)))
+
+(defun remoto-test--write-in-flight ()
+  "Fake `ghub-request' as a write that never answers; keep its callbacks."
+  (spy-on 'ghub-request :and-call-fake
+          (lambda (_method _resource _params &rest args)
+            (setq remoto-test--reply (list (plist-get args :callback)
+                                           (plist-get args :errorback)))
+            (generate-new-buffer " *remoto-test-http*"))))
+
+(defun remoto-test--write-message ()
+  "The `user-error' text of a PATCH of gists/abc, or the answer when none came."
+  (condition-case err
+      (remoto--api-write remoto--gist "PATCH" "gists/abc" '((description . "d")))
+    (user-error (error-message-string err))))
+
+(describe "a write to a forge"
+  (before-each
+    (remoto-test--requests-begin)
+    (spy-on 'message)
+    (spy-on 'y-or-n-p))
+
+  (after-each (remoto-test--requests-end))
+
+  (it "sends the method, the payload and the token, with no header of its own"
+    ;; GitHub answers 400 to a conditional header on a PATCH.
+    (let ((remoto--logins (remoto-test--logins :token "ghp_ok")))
+      (remoto-test--ghub-writes '((id . "abc")))
+      (expect (remoto-test--write-message) :to-equal '((id . "abc")))
+      (let ((args (spy-calls-args-for 'ghub-request 0)))
+        (expect (seq-take args 3) :to-equal '("PATCH" "/gists/abc" nil))
+        (expect (plist-get (nthcdr 3 args) :payload) :to-equal '((description . "d")))
+        (expect (plist-get (nthcdr 3 args) :auth) :to-equal "ghp_ok")
+        (expect (plist-get (nthcdr 3 args) :host) :to-equal "api.github.com")
+        (expect (plist-get (nthcdr 3 args) :headers) :to-be nil))))
+
+  (it "refuses without a token, names remoto-login, and sends nothing"
+    (let ((remoto--logins (remoto-test--logins :failed t)))
+      (spy-on 'ghub-request)
+      (spy-on 'ghub-get)
+      (expect (remoto-test--write-message)
+              :to-equal "Remoto: a write to GitHub Gist needs a token. M-x remoto-login")
+      (expect 'ghub-request :not :to-have-been-called)
+      (expect 'ghub-get :not :to-have-been-called)))
+
+  (it "waits under while-no-input too, where input would end a read"
+    (let ((remoto--logins (remoto-test--logins :token "ghp_ok"))
+          (throw-on-input 'remoto-test-input)
+          (seen 'unset))
+      (spy-on 'remoto--ghub-get-interruptible)
+      (remoto-test--ghub-writes (lambda (&rest _) (setq seen throw-on-input) '((id . "abc"))))
+      (expect (remoto-test--write-message) :to-equal '((id . "abc")))
+      (expect seen :to-be nil)
+      (expect 'remoto--ghub-get-interruptible :not :to-have-been-called)
+      (expect (hash-table-count remoto--pending-requests) :to-equal 0)))
+
+  (it "goes again once with the next token when the forge refuses one"
+    (let ((remoto--logins (remoto-test--logins))
+          (remoto-github-auth nil)
+          (auths nil))
+      (spy-on 'ghub--username :and-return-value nil)
+      (remoto-test--auth-rows '(("api.github.com" "other^ghub" "t-other")
+                                ("api.github.com" "alice^ghub" "t-alice")))
+      (remoto-test--ghub-writes
+       (lambda (_method _resource _params &rest args)
+         (push (plist-get args :auth) auths)
+         (if (equal (plist-get args :auth) "t-other")
+             (signal 'ghub-http-error (list 401 "Unauthorized" "https://api.github.com/x" nil))
+           '((id . "abc")))))
+      (expect (remoto-test--write-message) :to-equal '((id . "abc")))
+      (expect (nreverse auths) :to-equal '("t-other" "t-alice"))))
+
+  (it "stops at a refused token with no other in place, and never writes without one"
+    (let ((remoto--logins (remoto-test--logins))
+          (remoto-github-auth nil)
+          (auths nil))
+      (spy-on 'ghub--username :and-return-value nil)
+      (spy-on 'ghub-get)
+      (remoto-test--auth-rows '(("api.github.com" "alice^ghub" "t-alice")))
+      (remoto-test--ghub-writes
+       (lambda (_method _resource _params &rest args)
+         (push (plist-get args :auth) auths)
+         (signal 'ghub-http-error (list 401 "Unauthorized" "https://api.github.com/x" nil))))
+      (expect (remoto-test--write-message)
+              :to-match "\\`Remoto: authentication failed for api\\.github\\.com\\.")
+      (expect auths :to-equal '("t-alice"))
+      (expect 'ghub-get :not :to-have-been-called)))
+
+  (it "goes again only once when the next token is refused too"
+    (let ((remoto--logins (remoto-test--logins))
+          (remoto-github-auth nil)
+          (auths nil))
+      (spy-on 'ghub--username :and-return-value nil)
+      (remoto-test--auth-rows '(("api.github.com" "other^ghub" "t-other")
+                                ("api.github.com" "alice^ghub" "t-alice")
+                                ("api.github.com" "bob^ghub" "t-bob")))
+      (remoto-test--ghub-writes
+       (lambda (_method _resource _params &rest args)
+         (push (plist-get args :auth) auths)
+         (signal 'ghub-http-error (list 401 "Unauthorized" "https://api.github.com/x" nil))))
+      (expect (remoto-test--write-message)
+              :to-match "\\`Remoto: authentication failed for api\\.github\\.com\\.")
+      (expect (length auths) :to-equal 2)))
+
+  (it "puts GitHub's message and errors into the text of a refused write"
+    (let ((remoto--logins (remoto-test--logins :token "ghp_ok")))
+      (remoto-test--write-fails-with
+       422 '((message . "Validation Failed")
+             (errors ((resource . "Gist") (code . "missing_field") (field . "files")))))
+      (expect (remoto-test--write-message)
+              :to-equal "Remoto: api.github.com answered 422 to PATCH gists/abc: \
+Validation Failed (files: missing_field)")
+      (remoto-test--write-fails-with
+       400 '((message . "Bad Request")
+             (errors "Conditional request headers are not allowed in unsafe requests")))
+      (expect (remoto-test--write-message)
+              :to-equal "Remoto: api.github.com answered 400 to PATCH gists/abc: \
+Bad Request (Conditional request headers are not allowed in unsafe requests)")
+      (remoto-test--write-fails-with
+       422 '((message . "Validation Failed")
+             (errors ((code . "custom") (message . "a")) ((code . "invalid")))))
+      (expect (remoto-test--write-message)
+              :to-equal "Remoto: api.github.com answered 422 to PATCH gists/abc: \
+Validation Failed (a; invalid)")
+      (remoto-test--write-fails-with 404 '((message . "Not Found")))
+      (expect (remoto-test--write-message)
+              :to-equal "Remoto: api.github.com answered 404 to PATCH gists/abc: Not Found")
+      (remoto-test--write-fails-with
+       403 '((message . "Resource not accessible by personal access token")))
+      (expect (remoto-test--write-message)
+              :to-equal "Remoto: api.github.com answered 403 to PATCH gists/abc: \
+Resource not accessible by personal access token")
+      (remoto-test--write-fails-with 500)
+      (expect (remoto-test--write-message)
+              :to-equal "Remoto: api.github.com answered 500 to PATCH gists/abc: \
+Internal server error")))
+
+  (it "says until when the forge limits writes"
+    (let ((remoto--logins (remoto-test--logins :token "ghp_ok"))
+          (reset (+ (truncate (float-time)) 1800)))
+      (remoto-test--write-fails-with
+       403 '((message . "You have exceeded a secondary rate limit"))
+       `(("x-ratelimit-remaining" . "0") ("x-ratelimit-reset" . ,(number-to-string reset))))
+      (expect (remoto-test--write-message)
+              :to-equal (format "Remoto: GitHub Gist rate limited until %s"
+                                (format-time-string "%H:%M" reset)))))
+
+  (it "says the write may have gone through when the forge sends nothing until the deadline"
+    (let ((remoto--logins (remoto-test--logins :token "ghp_ok"))
+          (remoto-request-timeout 0.05))
+      (remoto-test--write-in-flight)
+      (expect (remoto-test--within 2 (remoto-test--write-message))
+              :to-equal "Remoto: api.github.com sent nothing for 0.05 seconds; \
+PATCH gists/abc may have gone through")))
+
+  (it "says the write may have gone through after a quit, and ends the request"
+    (let ((remoto--logins (remoto-test--logins :token "ghp_ok")))
+      (remoto-test--write-in-flight)
+      (run-at-time 0.01 nil (lambda () (signal 'quit nil)))
+      (expect (remoto-test--within 2 (remoto-test--write-message))
+              :to-equal "Remoto: quit before api.github.com answered; \
+PATCH gists/abc may have gone through")
+      (expect (seq-filter (lambda (buffer)
+                            (string-prefix-p " *remoto-test-http*" (buffer-name buffer)))
+                          (buffer-list))
+              :to-be nil))))
 
 (describe "a login of an older remoto"
   (it "is forgotten, so an upgrade in a running Emacs looks its token up again"
@@ -6311,6 +6835,21 @@ At the level of OWNER, or at the root without OWNER."
     (remoto--handle-file-name-all-completions "tor" "/github:")
     (expect 'remoto--prefetch-owner-repos :to-have-been-called-with remoto--github "torvalds"))
 
+  (it "drops a pre-fetch whose owner lookup fails, with no error in its timer"
+    ;; Forgejo asks users/OWNER for the id before the search; Codeberg answered 502.
+    (let ((remoto--prefetch-timer nil)
+          (remoto-forgejo--accounts (make-hash-table :test 'equal))
+          (timer-fn nil))
+      (spy-on 'run-with-idle-timer :and-call-fake
+              (lambda (_secs _repeat fn &rest _) (setq timer-fn fn) 'timer))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (&rest _) (user-error "Remoto: codeberg.org/api/v1 answered 502 Bad gateway for users/forgejo")))
+      (spy-on 'remoto--api-async)
+      (remoto--prefetch-owner-repos remoto--codeberg "forgejo")
+      (expect (funcall timer-fn) :to-be nil)
+      (expect 'remoto--api-async :not :to-have-been-called)
+      (expect remoto--prefetch-timer :to-be nil)))
+
   (it "returns nil for empty user query"
     (spy-on 'run-with-idle-timer)
     (let* ((remoto--logins (remoto-test--logins))
@@ -7190,7 +7729,24 @@ b050 is on the second page of big's listing, which the specs hand over."
       (remoto--add-listing-page listing (list '("b" (note . "b")) '("older" (note . "page")))
                                 nil)
       (expect (remoto--listing-entries listing)
-              :to-equal '(("a" (note . "a")) ("b" (note . "b")) ("older" (note . "page")))))))
+              :to-equal '(("a" (note . "a")) ("b" (note . "b")) ("older" (note . "page"))))))
+
+  (it "ends the fetch of an older remoto that an upgrade left running, and lists anew"
+    ;; The callback of that fetch, as remoto 2.7.0 wrote it, with its page in.
+    (remoto-test-with-cache
+      (let* ((dir "/github:o/")
+             (listing (puthash dir (remoto--listing-create :entries (list '("a")) :state 'fetching)
+                               remoto--listing-cache)))
+        (spy-on 'remoto--fetch-listing-page)
+        (spy-on 'remoto--listing-done)
+        (when (eq listing (gethash dir remoto--listing-cache))
+          (remoto--add-listing-page listing dir "o" (vector '((name . "b"))))
+          (if (eq (remoto--listing-state listing) 'fetching)
+              (remoto--fetch-listing-page remoto--github dir listing "o" "users/o/repos" 3)
+            (remoto--listing-done dir listing "o")))
+        (expect 'remoto--fetch-listing-page :not :to-have-been-called)
+        (expect 'remoto--listing-done :to-have-been-called-with dir listing "o")
+        (expect (gethash dir remoto--listing-cache) :to-be nil)))))
 
 (describe "the default ref of a forge with GitHub's API"
   (it "remembers the repository's Dired line from the same answer"
@@ -10938,6 +11494,9 @@ of `completion-all-completions'; Vertico inserts a candidate as
             :to-be-truthy)
     (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be-truthy)
     (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be-truthy)
+    (expect (memq 'remoto--maybe-enable-mode after-set-visited-file-name-hook) :to-be-truthy)
+    (expect (memq 'remoto--save-new-repo write-file-functions) :to-be-truthy)
+    (expect (memq 'remoto--refuse-missing-save write-file-functions) :to-be-truthy)
     (expect (memq 'remoto--minibuffer-exit-cleanup minibuffer-exit-hook)
             :to-be-truthy))
 
@@ -10960,6 +11519,9 @@ of `completion-all-completions'; Vertico inserts a candidate as
                   :to-be nil)
           (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be nil)
           (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be nil)
+          (expect (memq 'remoto--maybe-enable-mode after-set-visited-file-name-hook) :to-be nil)
+          (expect (memq 'remoto--save-new-repo write-file-functions) :to-be nil)
+          (expect (memq 'remoto--refuse-missing-save write-file-functions) :to-be nil)
           (expect (memq 'remoto--minibuffer-exit-cleanup minibuffer-exit-hook)
                   :to-be nil))
       (global-remoto-mode 1)))
@@ -13066,6 +13628,7 @@ The root lists two gists of me and a starred one, /gist:me/ lists two."
   `(let ((remoto--listing-cache (make-hash-table :test 'equal))
          (remoto--entry-cache (make-hash-table :test 'equal))
          (remoto-gist--listed (make-hash-table :test 'equal))
+         (remoto-gist--fetched (make-hash-table :test 'equal))
          (remoto--logins (remoto-test--logins :user "me")))
      (remoto-test--cache-gists)
      ,@body))
@@ -13120,19 +13683,41 @@ The root lists two gists of me and a starred one, /gist:me/ lists two."
              (meta (remoto--completion-metadata "/gist:"))
              (triples (funcall (alist-get 'affixation-function meta) candidates)))
         (expect (mapcar #'substring-no-properties candidates)
-                :to-equal '("me/0a1b/" "me/0c2d/" "nikku/0e6f/"))
+                :to-equal '("me/" "nikku/" "me/0a1b/" "me/0c2d/" "nikku/0e6f/"))
         (expect (mapcar (lambda (triple) (get-text-property 0 'display (car triple))) triples)
-                :to-equal '("Kitty themes" "vimium.json" "Gif utility"))
+                :to-equal '(nil nil "Kitty themes" "vimium.json" "Gif utility"))
         (expect (mapcar (lambda (triple) (substring-no-properties (car triple))) triples)
-                :to-equal '("me/0a1b/" "me/0c2d/" "nikku/0e6f/"))
+                :to-equal '("me/" "nikku/" "me/0a1b/" "me/0c2d/" "nikku/0e6f/"))
         (expect (mapcar (lambda (triple) (substring-no-properties (nth 2 triple))) triples)
-                :to-equal '(" public  kitty.sh" " public" " public  nikku/capture.md"))
+                :to-equal '("" "" " public  kitty.sh" " public" " public  nikku/capture.md"))
         (expect (mapcar (lambda (triple)
                           (funcall (alist-get 'group-function meta) (car triple) nil))
                         triples)
-                :to-equal '("Your gists" "Your gists" "Starred"))
+                :to-equal '("Your gists" "Starred" "Your gists" "Your gists" "Starred"))
         (expect (alist-get 'display-sort-function meta) :to-be #'identity)
         (expect (alist-get 'cycle-sort-function meta) :to-be #'identity))))
+
+  (it "offer each owner at the root before its gists, its own directory"
+    ;; ido enters the first candidate that OWNER/ matches once more is typed:
+    ;; that has to be the owner, not a gist of it, where a new name would land.
+    (remoto-test-with-gists
+      (let* ((candidates (remoto--handle-file-name-all-completions "" "/gist:"))
+             (matching (seq-filter (lambda (c) (string-prefix-p "me/" c)) candidates)))
+        (expect (substring-no-properties
+                 (car (sort (copy-sequence matching) #'string-lessp)))
+                :to-equal "me/")
+        (expect (get-text-property 0 'remoto-target (car candidates)) :to-equal "/gist:me")
+        (expect (seq-count (lambda (c) (equal (substring-no-properties c) "nikku/")) candidates)
+                :to-be 1))))
+
+  (it "name a user that the typed text finds once, as the owner it lists already"
+    (remoto-test-with-gists
+      (spy-on 'remoto--search-users
+              :and-return-value (list (propertize "nikku" 'remoto-acct-type "User")
+                                      (propertize "nikkuu" 'remoto-acct-type "User")))
+      (expect (mapcar #'substring-no-properties
+                      (remoto--handle-file-name-all-completions "nik" "/gist:"))
+              :to-equal '("nikku/" "nikku/0e6f/" "nikkuu/"))))
 
   (it "show their labels at an owner, in the order listed"
     (remoto-test-with-gists
@@ -13209,12 +13794,14 @@ Buffers BODY creates are killed afterwards."
 (describe "a gist of one file"
   (it "opens at its file from its candidate at the root and at an owner"
     (remoto-test-with-gist-answers
+      ;; The root offers the owners too, which are directories.
       (expect (mapcar (lambda (candidate)
                         (thread-last (substring-no-properties candidate)
                                      (concat "/gist:")
                                      find-file-noselect
                                      buffer-file-name))
-                      (remoto--handle-file-name-all-completions "" "/gist:"))
+                      (seq-filter (lambda (candidate) (string-match-p "\\`[^/]+/[^/]+/\\'" candidate))
+                                  (remoto--handle-file-name-all-completions "" "/gist:")))
               :to-equal '("/gist:me/0a1b:/kitty.sh" "/gist:me/0c2d:/vimium.json"
                           "/gist:nikku/0e6f:/capture.md"))
       (with-current-buffer (thread-last (remoto--handle-file-name-all-completions "" "/gist:me/")
@@ -13432,6 +14019,1148 @@ Its buffer, which url.el leaves to the callback, goes to `remoto-test--buffer'."
       (with-temp-buffer
         (insert-file-contents "/gist:me/0a1b:/kitty.sh"))
       (expect (remoto-test--api-calls "") :to-equal '("gists/0a1b")))))
+
+;;; Writes to gists
+
+(defvar remoto-test--store nil
+  "The gists of the write specs as GitHub holds them, by id.")
+
+(defun remoto-test--stored-file (name text)
+  "Return the file NAME holding TEXT, as gists/ID answers it."
+  `(,(intern name) (filename . ,name) (size . ,(string-bytes text))
+    (encoding . "utf-8") (content . ,text)))
+
+(defun remoto-test--stored-gist (id owner public &rest files)
+  "Put the gist ID of OWNER into `remoto-test--store' at revision rev1.
+PUBLIC is t for a public gist; FILES alternate the names and the texts."
+  (puthash id `((id . ,id) (owner (login . ,owner)) (description . "Scratch")
+                (public . ,public) (updated_at . "2026-01-02T03:04:05Z")
+                (history ((version . "rev1")))
+                (files ,@(cl-loop for (name text) on files by #'cddr
+                                  collect (remoto-test--stored-file name text))))
+           remoto-test--store))
+
+(defun remoto-test--store-api (_forge endpoint)
+  "Answer ENDPOINT from `remoto-test--store' as GitHub does.
+A gists/ID gives the gist, a page of users/OWNER/gists the gists of OWNER
+with their files named, their content left out."
+  (if (string-match "\\`users/\\([^/]+\\)/gists" endpoint)
+      (let ((owner (match-string 1 endpoint)))
+        (seq-keep (lambda (gist)
+                    (when (equal owner (remoto-gist--owner gist))
+                      (cons `(files ,@(mapcar (lambda (file)
+                                                (seq-remove (lambda (field)
+                                                              (eq (car-safe field) 'content))
+                                                            file))
+                                              (alist-get 'files gist)))
+                            (copy-tree gist))))
+                  (hash-table-values remoto-test--store)))
+    (if-let* ((gist (gethash (string-remove-prefix "gists/" endpoint) remoto-test--store)))
+        (copy-tree gist)
+      (user-error "%s%s" remoto--not-found endpoint))))
+
+(defun remoto-test--patched (files changes)
+  "Return FILES, those of a gist, after CHANGES, the files of a PATCH."
+  (seq-reduce (lambda (files change)
+                (pcase-let ((`(,key . ,value) change))
+                  (if (eq value :null)
+                      (assq-delete-all key (copy-alist files))
+                    (let ((name (or (alist-get 'filename value) (symbol-name key)))
+                          (text (or (alist-get 'content value)
+                                    (alist-get 'content (alist-get key files)))))
+                      (append (assq-delete-all key (copy-alist files))
+                              (list (remoto-test--stored-file name text)))))))
+              changes files))
+
+(defun remoto-test--store-write (_forge method endpoint &optional payload)
+  "Do METHOD with PAYLOAD to the gist of ENDPOINT in `remoto-test--store'.
+A PATCH changes, adds, renames and deletes the files it names, makes a
+revision and answers the gist, as GitHub does."
+  (if (equal method "POST")
+      (let ((id (format "0f%02d" (hash-table-count remoto-test--store))))
+        (apply #'remoto-test--stored-gist id "me" (alist-get 'public payload)
+               (seq-mapcat (lambda (file) (list (symbol-name (car file))
+                                                (alist-get 'content (cdr file))))
+                           (alist-get 'files payload)))
+        ;; The stored gist shares its constant conses with every other one.
+        (puthash id `((description . ,(alist-get 'description payload))
+                      ,@(assq-delete-all 'description
+                                         (copy-alist (gethash id remoto-test--store))))
+                 remoto-test--store)
+        (copy-tree (gethash id remoto-test--store)))
+    (let* ((id (string-remove-prefix "gists/" endpoint))
+           (gist (or (gethash id remoto-test--store)
+                     (user-error "Remoto: api.github.com answered 404 to %s %s" method endpoint)))
+           (history (alist-get 'history gist)))
+      (pcase method
+        ("DELETE" (remhash id remoto-test--store) nil)
+        ("PATCH"
+         (puthash id `((files ,@(remoto-test--patched (alist-get 'files gist)
+                                                     (alist-get 'files payload)))
+                       (history ((version . ,(format "rev%d" (1+ (length history)))))
+                                ,@history)
+                       (description . ,(if (assq 'description payload)
+                                           (alist-get 'description payload)
+                                         (alist-get 'description gist)))
+                       ,@(seq-remove (lambda (field) (memq (car field) '(files history description)))
+                                     gist))
+                  remoto-test--store)
+         (copy-tree (gethash id remoto-test--store)))))))
+
+(defun remoto-test--list-store (&rest ids)
+  "Cache the listings of /gist: and /gist:me/ as their pages make them of IDS."
+  (let ((items (mapcar (lambda (id) (gethash id remoto-test--store)) ids)))
+    (puthash "/gist:me/"
+             (remoto--listing-create
+              :entries (car (remoto-gist--page remoto--gist (remoto--path-at remoto--gist 'owner "me")
+                                               "users/me/gists" 1 items)))
+             remoto--listing-cache)
+    (puthash "/gist:"
+             (remoto--listing-create
+              :entries (car (remoto-gist--page remoto--gist (remoto--path-at remoto--gist 'root)
+                                               "gists" 1 items)))
+             remoto--listing-cache)))
+
+(defun remoto-test--github-edits (id name text)
+  "Make TEXT the file NAME of the stored gist ID, or delete it for nil, as on GitHub."
+  (remoto-test--store-write remoto--gist "PATCH" (concat "gists/" id)
+                            `((files (,(intern name) . ,(if text `((content . ,text)) :null))))))
+
+(defun remoto-test--stored-text (id name)
+  "Return the text of the file NAME of the stored gist ID, or nil."
+  (alist-get 'content (alist-get (intern name) (alist-get 'files (gethash id remoto-test--store)))))
+
+(defun remoto-test--gets (id)
+  "Return how many times `remoto--api' was asked for the gist ID."
+  (length (remoto-test--api-calls (concat "\\`gists/" id "\\'"))))
+
+(defmacro remoto-test-with-store (&rest body)
+  "Run BODY as the token of me against `remoto-test--store'.
+0a1b of me, public, holds a.sh and b.sh; 0c3d of me is secret; 0e6f of
+nikku holds x.md.  The fake API answers gists/ID and writes; BODY's
+buffers are killed after."
+  (declare (indent 0))
+  (let ((before (make-symbol "before")))
+    `(remoto-test-with-cache
+       (let ((remoto-test--store (make-hash-table :test 'equal))
+             (remoto-gist--gists (make-hash-table :test 'equal))
+             (remoto-gist--listed (make-hash-table :test 'equal))
+             (remoto-gist--fetched (make-hash-table :test 'equal))
+             (remoto-gist--gone (make-hash-table :test 'equal))
+             (remoto--logins (remoto-test--logins :user "me" :token "ghp_me"))
+             (,before (buffer-list)))
+         (remoto-test--stored-gist "0a1b" "me" t "a.sh" "echo a\n" "b.sh" "echo b\n")
+         (remoto-test--stored-gist "0c3d" "me" nil "s.txt" "secret\n")
+         (remoto-test--stored-gist "0e6f" "nikku" t "x.md" "# x\n")
+         (spy-on 'remoto--api :and-call-fake #'remoto-test--store-api)
+         (spy-on 'remoto--api-write :and-call-fake #'remoto-test--store-write)
+         (spy-on 'remoto--api-async)
+         (unwind-protect (progn ,@body)
+           (dolist (buffer (buffer-list))
+             (unless (memq buffer ,before)
+               (with-current-buffer buffer (set-buffer-modified-p nil))
+               (kill-buffer buffer))))))))
+
+(defun remoto-test--answers (spy &rest answers)
+  "Make SPY return ANSWERS one after another, one each call."
+  (spy-on spy :and-call-fake (lambda (&rest _) (pop answers))))
+
+(describe "a save to one's own gist"
+  (it "opens a file of one's own gist writable, and another's read-only"
+    (remoto-test-with-store
+      (expect (buffer-local-value 'buffer-read-only (find-file-noselect "/gist:me/0a1b:/a.sh"))
+              :to-be nil)
+      (expect (buffer-local-value 'buffer-read-only (find-file-noselect "/gist:nikku/0e6f:/x.md"))
+              :to-be t)
+      (expect (file-writable-p "/gist:me/0a1b:/") :to-be t)
+      (expect (file-writable-p "/gist:me/") :to-be nil)
+      (expect (file-writable-p "/gist:") :to-be nil)))
+
+  (it "sends that file alone, in one PATCH, and leaves the buffer saved"
+    (remoto-test-with-store
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+        (erase-buffer)
+        (insert "echo A\n")
+        (save-buffer)
+        (expect (buffer-modified-p) :to-be nil)
+        (expect (mapcar #'cdr (spy-calls-all-args 'remoto--api-write))
+                :to-equal '(("PATCH" "gists/0a1b" ((files (a.sh (content . "echo A\n")))))))
+        (expect (remoto-test--stored-text "0a1b" "a.sh") :to-equal "echo A\n")
+        (expect (remoto-test--stored-text "0a1b" "b.sh") :to-equal "echo b\n"))))
+
+  (it "says Wrote, and that the gist is public when it is"
+    (remoto-test-with-store
+      (spy-on 'message)
+      (let ((noninteractive nil))
+        (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+          (insert "x")
+          (save-buffer))
+        (with-current-buffer (find-file-noselect "/gist:me/0c3d:/s.txt")
+          (insert "x")
+          (save-buffer)))
+      (expect 'message :to-have-been-called-with
+              "Wrote %s%s" "/gist:me/0a1b:/a.sh" " (public gist)")
+      (expect 'message :to-have-been-called-with "Wrote %s%s" "/gist:me/0c3d:/s.txt" "")))
+
+  (it "takes GitHub's answer into the caches: the tree, the listing line, the Dired"
+    (remoto-test-with-store
+      (puthash "/gist:me/"
+               (remoto--listing-create
+                :entries (car (remoto-gist--page remoto--gist (remoto--path-at remoto--gist 'owner "me")
+                                                 "users/me/gists" 1
+                                                 (list (gethash "0a1b" remoto-test--store)))))
+               remoto--listing-cache)
+      (let ((dired (dired-noselect "/gist:me/0a1b:/")))
+        (write-region "echo c\n" nil "/gist:me/0a1b:/c.sh")
+        (expect (gethash "/gist:me/0a1b@HEAD" remoto--tree-cache) :to-be nil)
+        (expect (directory-files "/gist:me/0a1b:/" nil directory-files-no-dot-files-regexp)
+                :to-equal '("a.sh" "b.sh" "c.sh"))
+        (expect (alist-get 'links (cdar (remoto--listing-entries
+                                         (gethash "/gist:me/" remoto--listing-cache))))
+                :to-equal 3)
+        (accept-process-output nil 0.05)
+        (expect (with-current-buffer dired (remoto-test--dired-names))
+                :to-equal '("." ".." "a.sh" "b.sh" "c.sh")))))
+
+  (it "asks before it saves over a change made on GitHub since the buffer read it"
+    (remoto-test-with-store
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+        (remoto-test--github-edits "0a1b" "a.sh" "echo theirs\n")
+        (spy-calls-reset 'remoto--api-write)
+        (goto-char (point-max))
+        (insert "echo mine\n")
+        (remoto-test--answers 'read-multiple-choice '(?q "quit") '(?o "overwrite"))
+        (expect (save-buffer) :to-throw 'user-error)
+        (expect 'remoto--api-write :not :to-have-been-called)
+        (expect (buffer-modified-p) :to-be-truthy)
+        (save-buffer)
+        (expect (remoto-test--stored-text "0a1b" "a.sh") :to-equal "echo a\necho mine\n")
+        (expect (buffer-modified-p) :to-be nil))))
+
+  (it "shows the diff when asked, then asks again"
+    (remoto-test-with-store
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+        (remoto-test--github-edits "0a1b" "a.sh" "echo theirs\n")
+        (insert "x")
+        (spy-on 'remoto-diff-buffer-with-file)
+        (remoto-test--answers 'read-multiple-choice '(?d "diff") '(?o "overwrite"))
+        (save-buffer)
+        (expect 'remoto-diff-buffer-with-file :to-have-been-called-times 1)
+        (expect (spy-calls-count 'read-multiple-choice) :to-equal 2)
+        (expect (remoto-test--stored-text "0a1b" "a.sh") :to-equal "xecho a\n"))))
+
+  (it "asks nothing when another file of the gist changed"
+    (remoto-test-with-store
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+        (remoto-test--github-edits "0a1b" "b.sh" "echo B\n")
+        (spy-on 'read-multiple-choice)
+        (insert "x")
+        (save-buffer)
+        (expect 'read-multiple-choice :not :to-have-been-called)
+        (expect (remoto-test--stored-text "0a1b" "a.sh") :to-equal "xecho a\n")
+        (expect (remoto-test--stored-text "0a1b" "b.sh") :to-equal "echo B\n"))))
+
+  (it "marks the buffer saved with no write when GitHub holds its text already"
+    (remoto-test-with-store
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+        (remoto-test--github-edits "0a1b" "a.sh" "xecho a\n")
+        (spy-calls-reset 'remoto--api-write)
+        (insert "x")
+        (save-buffer)
+        (expect 'remoto--api-write :not :to-have-been-called)
+        (expect (buffer-modified-p) :to-be nil))))
+
+  (it "asks before it adds again a file deleted on GitHub since the buffer read it"
+    (remoto-test-with-store
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+        (remoto-test--github-edits "0a1b" "a.sh" nil)
+        (spy-calls-reset 'remoto--api-write)
+        (insert "x")
+        (remoto-test--answers 'y-or-n-p nil t)
+        (expect (save-buffer) :to-throw 'user-error)
+        (expect 'remoto--api-write :not :to-have-been-called)
+        (save-buffer)
+        (expect (remoto-test--stored-text "0a1b" "a.sh") :to-equal "xecho a\n"))))
+
+  (it "refuses a blank buffer, names Dired's D, and asks GitHub nothing"
+    (remoto-test-with-store
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+        (let ((gets (remoto-test--gets "0a1b")))
+          (erase-buffer)
+          (insert " \n\t\n")
+          (expect (condition-case err (save-buffer) (user-error (cadr err)))
+                  :to-match "cannot be blank; D in the Dired of the gist deletes a\\.sh")
+          (expect (remoto-test--gets "0a1b") :to-equal gets)
+          (expect 'remoto--api-write :not :to-have-been-called)))))
+
+  (it "keeps a binary file of the gist read-only"
+    (remoto-test-with-store
+      (puthash "0b1c" `((id . "0b1c") (owner (login . "me")) (public . t)
+                        (history ((version . "rev1")))
+                        (files (blob.bin (filename . "blob.bin") (size . 2)
+                                         (encoding . "base64")
+                                         (content . ,(base64-encode-string "\377\330")))))
+               remoto-test--store)
+      (expect (buffer-local-value 'buffer-read-only (find-file-noselect "/gist:me/0b1c:/blob.bin"))
+              :to-be t)))
+
+  (it "refuses bytes that are no UTF-8, and names the command that sets the coding"
+    (remoto-test-with-store
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+        (set-buffer-file-coding-system 'latin-1)
+        (insert "é")
+        (expect (condition-case err (save-buffer) (user-error (cadr err)))
+                :to-match "UTF-8 text only, so not a\\.sh; C-x RET f utf-8")
+        (expect 'remoto--api-write :not :to-have-been-called))))
+
+  (it "reads GitHub anew on a revert"
+    (remoto-test-with-store
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+        (remoto-test--github-edits "0a1b" "a.sh" "echo theirs\n")
+        (revert-buffer t t)
+        (expect (buffer-string) :to-equal "echo theirs\n"))))
+
+  (it "auto-saves to a local file and keeps no backup"
+    (remoto-test-with-store
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+        (expect (file-remote-p (make-auto-save-file-name)) :to-be nil)
+        (expect (find-backup-file-name buffer-file-name) :to-be nil))))
+
+  (it "reads a visit anew once its cached gist is older than the window, and not within it"
+    (remoto-test-with-store
+      (kill-buffer (find-file-noselect "/gist:me/0a1b:/a.sh"))
+      (let ((gets (remoto-test--gets "0a1b")))
+        (kill-buffer (find-file-noselect "/gist:me/0a1b:/a.sh"))
+        (expect (remoto-test--gets "0a1b") :to-equal gets)
+        (puthash "0a1b" (- (float-time) 60) remoto-gist--fetched)
+        (remoto-test--github-edits "0a1b" "a.sh" "echo theirs\n")
+        (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+          (expect (buffer-string) :to-equal "echo theirs\n"))
+        (expect (remoto-test--gets "0a1b") :to-equal (1+ gets)))))
+
+  (it "drops the gist's tree when GitHub answers with another revision"
+    (remoto-test-with-store
+      (kill-buffer (find-file-noselect "/gist:me/0a1b:/a.sh"))
+      (expect (gethash "/gist:me/0a1b@HEAD" remoto--tree-cache) :to-be-truthy)
+      (remoto-test--github-edits "0a1b" "c.sh" "echo c\n")
+      (puthash "0a1b" (- (float-time) 60) remoto-gist--fetched)
+      (kill-buffer (find-file-noselect "/gist:me/0a1b:/b.sh"))
+      (expect (directory-files "/gist:me/0a1b:/" nil directory-files-no-dot-files-regexp)
+              :to-equal '("a.sh" "b.sh" "c.sh")))))
+
+(describe "remoto--diff-labels-p"
+  (it "asks diff-command once, and takes a diff it cannot run for one without labels"
+    (let ((remoto--diff-labels 'unknown)
+          (diff-command "remoto-test-no-such-diff"))
+      (expect (remoto--diff-labels-p) :to-be nil)
+      (expect remoto--diff-labels :to-be nil))
+    (let ((remoto--diff-labels 'unknown))
+      (spy-on 'call-process :and-return-value 0)
+      (expect (remoto--diff-labels-p) :to-be t)
+      (expect (remoto--diff-labels-p) :to-be t)
+      (expect 'call-process :to-have-been-called-times 1))))
+
+(describe "remoto-diff-buffer-with-file"
+  (it "shows the buffer against the text GitHub holds now, the headers naming both"
+    (remoto-test-with-store
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+        (remoto-test--github-edits "0a1b" "a.sh" "echo theirs\n")
+        (goto-char (point-max))
+        (insert "echo mine\n")
+        (with-current-buffer (remoto-diff-buffer-with-file)
+          (let ((text (buffer-string)))
+            (expect text :to-match "^--- /gist:me/0a1b:/a\\.sh")
+            (expect text :to-match "^\\+\\+\\+ #<buffer a\\.sh>")
+            (expect text :to-match "^-echo theirs$")
+            (expect text :to-match "^\\+echo mine$"))
+          (expect (local-variable-p 'diff-use-labels) :to-be t)))))
+
+  (it "shows every line added for a file GitHub lacks yet"
+    (remoto-test-with-store
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/new.sh")
+        (insert "echo new\n")
+        (with-current-buffer (remoto-diff-buffer-with-file)
+          (expect (buffer-string) :to-match "^\\+echo new$")))))
+
+  (it "stands for diff-buffer-with-file while remoto-mode is on"
+    (with-temp-buffer
+      (remoto-mode 1)
+      (expect (command-remapping 'diff-buffer-with-file) :to-be 'remoto-diff-buffer-with-file)
+      (remoto-mode -1))))
+
+(describe "the files of one's own gist"
+  (it "opens a missing name as a new file, not as a Dired of the names that match"
+    (remoto-test-with-store
+      (spy-on 'message)
+      (let ((noninteractive nil))
+        (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a")
+          (expect buffer-file-name :to-equal "/gist:me/0a1b:/a")
+          (expect buffer-read-only :to-be nil)))
+      (expect 'message :to-have-been-called-with "%s" "(New file)")
+      (expect (buffer-local-value 'dired-directory (find-file-noselect "/gist:nikku/0e6f:/x"))
+              :to-equal '("/gist:nikku/0e6f:/" "x.md"))))
+
+  (it "adds the new file at its first save"
+    (remoto-test-with-store
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/c.sh")
+        (insert "echo c\n")
+        (save-buffer))
+      (expect (remoto-test--stored-text "0a1b" "c.sh") :to-equal "echo c\n")))
+
+  (it "takes a copy from a local file and from another forge, once per file"
+    (remoto-test-with-store
+      (let ((local (make-temp-file "remoto-test-" nil ".txt" "local\n")))
+        (unwind-protect
+            (progn
+              (copy-file local "/gist:me/0a1b:/l.txt")
+              (spy-on 'remoto-forge-content :and-return-value "readme\n")
+              (copy-file "/github:testowner/testrepo@main:/README.md" "/gist:me/0a1b:/r.md"))
+          (delete-file local)))
+      (expect (remoto-test--stored-text "0a1b" "l.txt") :to-equal "local\n")
+      (expect (remoto-test--stored-text "0a1b" "r.md") :to-equal "readme\n")
+      (expect (spy-calls-count 'remoto--api-write) :to-equal 2)))
+
+  (it "asks before a copy goes over a file the gist holds, as copy-file asks"
+    (remoto-test-with-store
+      (let ((local (make-temp-file "remoto-test-" nil ".sh" "new\n")))
+        (unwind-protect
+            (progn
+              (expect (copy-file local "/gist:me/0a1b:/a.sh") :to-throw 'file-already-exists)
+              (copy-file local "/gist:me/0a1b:/a.sh" t))
+          (delete-file local)))
+      (expect (remoto-test--stored-text "0a1b" "a.sh") :to-equal "new\n")))
+
+  (it "refuses a binary or an empty file by its name, and a directory"
+    (remoto-test-with-store
+      (let ((binary (make-temp-file "remoto-test-" nil ".bin"))
+            (empty (make-temp-file "remoto-test-" nil ".txt"))
+            (dir (make-temp-file "remoto-test-" t)))
+        (unwind-protect
+            (progn
+              (let ((coding-system-for-write 'no-conversion))
+                (write-region (unibyte-string #xff #xfe 0) nil binary))
+              (expect (condition-case err (copy-file binary "/gist:me/0a1b:/b.bin")
+                        (user-error (cadr err)))
+                      :to-match "UTF-8 text only, so not b\\.bin")
+              (expect (condition-case err (copy-file empty "/gist:me/0a1b:/e.txt")
+                        (user-error (cadr err)))
+                      :to-match "cannot be blank, so e\\.txt needs text first")
+              (expect (condition-case err (copy-file dir "/gist:me/0a1b:/d")
+                        (user-error (cadr err)))
+                      :to-match "no directories, so no d/"))
+          (delete-file binary)
+          (delete-file empty)
+          (delete-directory dir)))
+      (expect 'remoto--api-write :not :to-have-been-called)))
+
+  (it "writes a buffer into the gist with C-x C-w, which then visits it"
+    (remoto-test-with-store
+      (with-temp-buffer
+        (insert "echo w\n")
+        (write-file "/gist:me/0a1b:/w.sh")
+        (expect buffer-file-name :to-equal "/gist:me/0a1b:/w.sh")
+        (expect remoto-mode :to-be-truthy)
+        (set-visited-file-name nil))
+      (expect (remoto-test--stored-text "0a1b" "w.sh") :to-equal "echo w\n")))
+
+  (it "refuses a directory and an empty file with what to do"
+    (remoto-test-with-store
+      (expect (condition-case err (make-directory "/gist:me/0a1b:/dir")
+                (user-error (cadr err)))
+              :to-match "no directories, so no dir/")
+      (expect (condition-case err (make-empty-file "/gist:me/0a1b:/e.txt")
+                (user-error (cadr err)))
+              :to-match "cannot be blank, so e\\.txt needs text first")
+      (expect 'remoto--api-write :not :to-have-been-called)))
+
+  (it "renames a file in one PATCH that keeps its text"
+    (remoto-test-with-store
+      (rename-file "/gist:me/0a1b:/a.sh" "/gist:me/0a1b:/c.sh")
+      (expect (mapcar #'cdr (spy-calls-all-args 'remoto--api-write))
+              :to-equal '(("PATCH" "gists/0a1b" ((files (a.sh (filename . "c.sh")))))))
+      (expect (remoto-test--stored-text "0a1b" "a.sh") :to-be nil)
+      (expect (remoto-test--stored-text "0a1b" "c.sh") :to-equal "echo a\n")))
+
+  (it "renames over a name the gist holds as the text under it, the old name gone"
+    (remoto-test-with-store
+      (expect (rename-file "/gist:me/0a1b:/a.sh" "/gist:me/0a1b:/b.sh")
+              :to-throw 'file-already-exists)
+      (rename-file "/gist:me/0a1b:/a.sh" "/gist:me/0a1b:/b.sh" t)
+      (expect (mapcar #'cdr (spy-calls-all-args 'remoto--api-write))
+              :to-equal '(("PATCH" "gists/0a1b"
+                           ((files (b.sh (content . "echo a\n")) (a.sh . :null))))))
+      (expect (remoto-test--stored-text "0a1b" "b.sh") :to-equal "echo a\n")
+      (expect (remoto-test--stored-text "0a1b" "a.sh") :to-be nil)))
+
+  (it "refuses a name with a slash, a gist being flat, before any request"
+    (remoto-test-with-store
+      (expect (condition-case err (rename-file "/gist:me/0a1b:/a.sh" "/gist:me/0a1b:/d/a.sh")
+                (user-error (cadr err)))
+              :to-match "no directories, so no d/a\\.sh")
+      (expect 'remoto--api-write :not :to-have-been-called)))
+
+  (it "keeps the base of a renamed visiting buffer, so its next save still checks"
+    (remoto-test-with-store
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+        (rename-file buffer-file-name "/gist:me/0a1b:/c.sh")
+        (set-visited-file-name "/gist:me/0a1b:/c.sh" t t)
+        (remoto-test--github-edits "0a1b" "c.sh" "echo theirs\n")
+        (insert "x")
+        (spy-on 'read-multiple-choice :and-return-value '(?q "quit"))
+        (expect (save-buffer) :to-throw 'user-error)
+        (expect 'read-multiple-choice :to-have-been-called))))
+
+  (it "moves a file to another gist, and to and from a local file, as a copy and a deletion"
+    (remoto-test-with-store
+      (let ((local (make-temp-file "remoto-test-" nil ".sh")))
+        (delete-file local)
+        (unwind-protect
+            (progn
+              (rename-file "/gist:me/0a1b:/a.sh" "/gist:me/0c3d:/a.sh")
+              (expect (remoto-test--stored-text "0c3d" "a.sh") :to-equal "echo a\n")
+              (expect (remoto-test--stored-text "0a1b" "a.sh") :to-be nil)
+              (rename-file "/gist:me/0c3d:/a.sh" local)
+              (expect (with-temp-buffer (insert-file-contents local) (buffer-string))
+                      :to-equal "echo a\n")
+              (expect (remoto-test--stored-text "0c3d" "a.sh") :to-be nil)
+              (rename-file local "/gist:me/0a1b:/c.sh")
+              (expect (remoto-test--stored-text "0a1b" "c.sh") :to-equal "echo a\n")
+              (expect (file-exists-p local) :to-be nil))
+          (when (file-exists-p local) (delete-file local))))))
+
+  (it "says a move that failed after its copy left the file in both places"
+    (remoto-test-with-store
+      (spy-on 'remoto--forge-delete :and-call-fake
+              (lambda (&rest _) (user-error "Remoto: api.github.com answered 500")))
+      (expect (condition-case err (rename-file "/gist:me/0a1b:/a.sh" "/gist:me/0c3d:/a.sh")
+                (user-error (cadr err)))
+              :to-match "copied .* but /gist:me/0a1b:/a\\.sh stays")))
+
+  (it "refuses a rename of another's file"
+    (remoto-test-with-store
+      (dolist (names '(("/gist:nikku/0e6f:/x.md" "/gist:nikku/0e6f:/y.md")))
+        (expect (condition-case err (apply #'rename-file names) (user-error (cadr err)))
+                :to-equal "Remoto: repository is read-only"))
+      (expect 'remoto--api-write :not :to-have-been-called)))
+
+  (it "deletes a file in one PATCH, and a missing one with none"
+    (remoto-test-with-store
+      (delete-file "/gist:me/0a1b:/a.sh")
+      (delete-file "/gist:me/0a1b:/gone.sh")
+      (expect (mapcar #'cdr (spy-calls-all-args 'remoto--api-write))
+              :to-equal '(("PATCH" "gists/0a1b" ((files (a.sh . :null))))))
+      (expect (remoto-test--stored-text "0a1b" "b.sh") :to-equal "echo b\n")))
+
+  (it "deletes a file from the gist's Dired with D"
+    (remoto-test-with-store
+      (with-current-buffer (dired-noselect "/gist:me/0a1b:/")
+        (dired-goto-file "/gist:me/0a1b:/a.sh")
+        (let ((dired-deletion-confirmer #'always))
+          (dired-do-delete))
+        (accept-process-output nil 0.05)
+        (expect (remoto-test--dired-names) :to-equal '("." ".." "b.sh")))
+      (expect (remoto-test--stored-text "0a1b" "a.sh") :to-be nil))))
+
+(defun remoto-test--made-gist ()
+  "Return the id of the one gist of the store that the specs did not make."
+  (seq-find (lambda (id) (string-prefix-p "0f" id)) (hash-table-keys remoto-test--store)))
+
+(describe "a gist made by remoto"
+  (it "makes a gist of the files given, secret or public, in one POST, its URL in the kill ring"
+    (remoto-test-with-store
+      (let ((kill-ring nil))
+        (spy-on 'message)
+        (expect (remoto-gist-create '(("a.sh" . "echo a\n")) "Mine" nil)
+                :to-match "\\`https://gist\\.github\\.com/me/0f")
+        (let ((id (remoto-test--made-gist)))
+          (expect (mapcar #'cdr (spy-calls-all-args 'remoto--api-write))
+                  :to-equal '(("POST" "gists" ((description . "Mine") (public)
+                                               (files (a.sh (content . "echo a\n")))))))
+          (expect (car kill-ring) :to-equal (format "https://gist.github.com/me/%s" id))
+          (expect (remoto-test--stored-text id "a.sh") :to-equal "echo a\n")))))
+
+  (it "takes the region, else the whole buffer, under the name the user gives"
+    (remoto-test-with-store
+      (with-temp-buffer
+        (insert "one\ntwo\n")
+        (spy-on 'read-string :and-return-value "notes.txt")
+        (expect (remoto-gist--files-to-share) :to-equal '(("notes.txt" . "one\ntwo\n")))
+        (set-mark 1)
+        (goto-char 5)
+        (transient-mark-mode 1)
+        (activate-mark)
+        (expect (remoto-gist--files-to-share) :to-equal '(("notes.txt" . "one\n"))))))
+
+  (it "takes the marked files of a Dired, one gist of them all"
+    (remoto-test-with-store
+      (let ((dir (make-temp-file "remoto-test-" t)))
+        (unwind-protect
+            (progn
+              (write-region "a\n" nil (expand-file-name "a.txt" dir))
+              (write-region "b\n" nil (expand-file-name "b.txt" dir))
+              (with-current-buffer (dired-noselect dir)
+                (dired-mark-files-regexp "\\.txt\\'")
+                (expect (remoto-gist--files-to-share)
+                        :to-equal '(("a.txt" . "a\n") ("b.txt" . "b\n")))
+                (kill-buffer)))
+          (delete-directory dir t)))))
+
+  (it "asks the description and secret or public, with no default"
+    (remoto-test-with-store
+      (spy-on 'read-string :and-return-value "Desc")
+      (spy-on 'read-multiple-choice :and-return-value '(?p "public"))
+      (expect (remoto-gist--ask) :to-equal '("Desc" t))
+      (expect (mapcar #'car (nth 1 (spy-calls-args-for 'read-multiple-choice 0)))
+              :to-equal '(?s ?p))))
+
+  (it "refuses a blank or binary file by its name before any request"
+    (remoto-test-with-store
+      (expect (condition-case err (remoto-gist-create '(("e.txt" . " \n")) "" nil)
+                (user-error (cadr err)))
+              :to-match "e\\.txt needs text first")
+      (expect 'remoto--api-write :not :to-have-been-called))))
+
+(describe "a new gist from a name"
+  (it "opens the file of the one gist of mine that holds the name"
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b" "0c3d")
+      (expect (buffer-file-name (find-file-noselect "/gist:me/s.txt"))
+              :to-equal "/gist:me/0c3d:/s.txt")))
+
+  (it "refuses a name that several gists of mine hold, and counts them"
+    (remoto-test-with-store
+      (remoto-test--github-edits "0c3d" "a.sh" "echo other\n")
+      (remoto-test--list-store "0a1b" "0c3d")
+      (expect (condition-case err (find-file-noselect "/gist:me/a.sh") (user-error (cadr err)))
+              :to-match "2 gists of me hold a\\.sh")))
+
+  (it "opens a new gist at a name no gist of mine holds, asking nothing of GitHub"
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b" "0c3d")
+      (with-current-buffer (find-file-noselect "/gist:me/idea.md")
+        (expect buffer-file-name :to-equal "/gist:me/new:/idea.md")
+        (expect buffer-read-only :to-be nil))
+      (expect (remoto-test--api-calls "gists/new") :to-be nil)))
+
+  (it "makes the gist at the first save, which asks, and then visits its file"
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b" "0c3d")
+      (spy-on 'read-string :and-return-value "An idea")
+      (spy-on 'read-multiple-choice :and-return-value '(?s "secret"))
+      (with-current-buffer (find-file-noselect "/gist:me/idea.md")
+        (insert "# idea\n")
+        (save-buffer)
+        (let ((id (remoto-test--made-gist)))
+          (expect buffer-file-name :to-equal (format "/gist:me/%s:/idea.md" id))
+          (expect (buffer-modified-p) :to-be nil)
+          (expect (remoto-test--stored-text id "idea.md") :to-equal "# idea\n")
+          (expect (alist-get 'public (gethash id remoto-test--store)) :to-be nil)
+          (insert "more\n")
+          (save-buffer)
+          (expect (remoto-test--stored-text id "idea.md") :to-equal "# idea\nmore\n")
+          (with-current-buffer (find-file-noselect (format "/gist:me/%s:/second.md" id))
+            (insert "two\n")
+            (save-buffer))
+          (expect (remoto-test--stored-text id "second.md") :to-equal "two\n")
+          (expect (seq-filter (lambda (id) (string-prefix-p "0f" id))
+                              (hash-table-keys remoto-test--store))
+                  :to-equal (list id))))))
+
+  (it "writes a buffer as a new gist with C-x C-w"
+    (remoto-test-with-store
+      (spy-on 'read-string :and-return-value "")
+      (spy-on 'read-multiple-choice :and-return-value '(?p "public"))
+      (with-temp-buffer
+        (insert "echo w\n")
+        (write-file "/gist:me/new:/w.sh")
+        (let ((id (remoto-test--made-gist)))
+          (expect buffer-file-name :to-equal (format "/gist:me/%s:/w.sh" id))
+          (expect (alist-get 'public (gethash id remoto-test--store)) :to-be t))
+        (set-visited-file-name nil))))
+
+  (it "refuses a write to the new name outside a visiting save"
+    (remoto-test-with-store
+      (expect (condition-case err (write-region "x\n" nil "/gist:me/new:/x.txt")
+                (user-error (cadr err)))
+              :to-match "remoto-gist-create")))
+
+  (it "says that no gist of another account holds a name"
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b")
+      (expect (condition-case err (find-file-noselect "/gist:nikku/zz.md") (user-error (cadr err)))
+              :to-match "no gist of nikku has a file zz\\.md")))
+
+  (it "opens the file of a gist of another account that holds the name"
+    (remoto-test-with-store
+      (expect (buffer-file-name (find-file-noselect "/gist:nikku/x.md"))
+              :to-equal "/gist:nikku/0e6f:/x.md")))
+
+  (it "asks before a new gist while the listing of mine is not whole"
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b")
+      (setf (remoto--listing-state (gethash "/gist:me/" remoto--listing-cache)) 'fetching)
+      (remoto-test--answers 'y-or-n-p nil t)
+      (let ((remoto-gist--listing-wait 0))
+        (expect (find-file-noselect "/gist:me/idea.md") :to-throw 'user-error)
+        (expect (buffer-file-name (find-file-noselect "/gist:me/idea.md"))
+                :to-equal "/gist:me/new:/idea.md"))))
+
+  (it "waits for the later pages of the listing, which may hold the name"
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b")
+      (let ((listing (gethash "/gist:me/" remoto--listing-cache)))
+        (setf (remoto--listing-state listing) 'fetching)
+        (spy-on 'y-or-n-p)
+        (spy-on 'accept-process-output :and-call-fake
+                (lambda (&rest _)
+                  (remoto--add-listing-page
+                   listing
+                   (car (remoto-gist--page remoto--gist (remoto--path-at remoto--gist 'owner "me")
+                                           "users/me/gists" 2
+                                           (list (gethash "0c3d" remoto-test--store))))
+                   nil)))
+        (expect (buffer-file-name (find-file-noselect "/gist:me/s.txt"))
+                :to-equal "/gist:me/0c3d:/s.txt")
+        (expect 'accept-process-output :to-have-been-called-times 1)
+        (expect 'y-or-n-p :not :to-have-been-called))))
+
+  (it "is no project before its first save, and drops its name from the recent files then"
+    (require 'recentf)
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b")
+      (spy-on 'read-string :and-return-value "")
+      (spy-on 'read-multiple-choice :and-return-value '(?s "secret"))
+      (expect (remoto--project "/gist:me/new:/") :to-be nil)
+      (expect (remoto--project "/gist:me/0a1b:/") :to-equal '(remoto . "/gist:me/0a1b:/"))
+      (let ((recentf-list (list "/gist:me/new:/idea.md" "/tmp/other")))
+        (with-current-buffer (find-file-noselect "/gist:me/idea.md")
+          (insert "x\n")
+          (save-buffer))
+        (expect recentf-list :to-equal '("/tmp/other")))))
+
+  (it "puts its name among the recent files at its first save, where recentf is on"
+    (require 'recentf)
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b")
+      (spy-on 'read-string :and-return-value "")
+      (spy-on 'read-multiple-choice :and-return-value '(?s "secret"))
+      (let ((recentf-mode t)
+            (recentf-list (list "/gist:me/new:/idea.md" "/tmp/other")))
+        (with-current-buffer (find-file-noselect "/gist:me/idea.md")
+          (insert "x\n")
+          (save-buffer)
+          (expect recentf-list :to-equal (list buffer-file-name "/tmp/other"))
+          (expect buffer-file-name :to-match "\\`/gist:me/0f[0-9]+:/idea\\.md\\'"))))))
+
+(describe "a gist deleted"
+  (it "goes with D on its line, after one question that names it, and leaves the listings"
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b" "0c3d")
+      (spy-on 'yes-or-no-p :and-return-value t)
+      (with-current-buffer (dired-noselect "/gist:me/")
+        (remoto-mode 1)
+        (goto-char (point-min))
+        (re-search-forward "s\\.txt")
+        (call-interactively (command-remapping 'dired-do-delete))
+        (expect (spy-calls-count 'yes-or-no-p) :to-equal 1)
+        (expect (car (spy-calls-args-for 'yes-or-no-p 0))
+                :to-match "Delete the secret gist \"Scratch\" (s\\.txt), history and all\\? ")
+        (expect (gethash "0c3d" remoto-test--store) :to-be nil)
+        (expect (mapcar (lambda (entry) (alist-get 'gist-id (cdr entry)))
+                        (remoto--listing-entries (gethash "/gist:me/" remoto--listing-cache)))
+                :to-equal '("0a1b")))))
+
+  (it "goes for good, as Dired says, where Emacs moves deleted files to the trash"
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b" "0c3d")
+      (spy-on 'yes-or-no-p :and-return-value t)
+      (spy-on 'make-progress-reporter :and-call-through)
+      (let ((delete-by-moving-to-trash t))
+        (with-current-buffer (dired-noselect "/gist:me/")
+          (remoto-mode 1)
+          (goto-char (point-min))
+          (re-search-forward "s\\.txt")
+          (call-interactively (command-remapping 'dired-do-delete))))
+      (expect (gethash "0c3d" remoto-test--store) :to-be nil)
+      (expect (mapcar #'car (spy-calls-all-args 'make-progress-reporter))
+              :to-contain "Deleting...")
+      (expect (mapcar #'car (spy-calls-all-args 'make-progress-reporter))
+              :not :to-contain "Trashing...")))
+
+  (it "goes, several of them, after one question that lists them all"
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b" "0c3d")
+      (spy-on 'yes-or-no-p :and-return-value t)
+      (with-current-buffer (dired-noselect "/gist:me/")
+        (remoto-mode 1)
+        (dired-mark-files-regexp ".")
+        (call-interactively (command-remapping 'dired-do-delete))
+        (expect (spy-calls-count 'yes-or-no-p) :to-equal 1)
+        (expect (car (spy-calls-args-for 'yes-or-no-p 0)) :to-match "a\\.sh, b\\.sh.*s\\.txt")
+        (expect (gethash "0a1b" remoto-test--store) :to-be nil)
+        (expect (gethash "0c3d" remoto-test--store) :to-be nil))))
+
+  (it "stays when the answer is no"
+    (remoto-test-with-store
+      (remoto-test--list-store "0c3d")
+      (spy-on 'yes-or-no-p :and-return-value nil)
+      (with-current-buffer (dired-noselect "/gist:me/")
+        (remoto-mode 1)
+        (goto-char (point-min))
+        (re-search-forward "s\\.txt")
+        (expect (call-interactively (command-remapping 'dired-do-delete)) :to-throw 'user-error))
+      (expect (gethash "0c3d" remoto-test--store) :to-be-truthy)))
+
+  (it "refuses the gist of another account"
+    (remoto-test-with-store
+      (puthash "/gist:"
+               (remoto--listing-create
+                :entries (car (remoto-gist--page remoto--gist (remoto--path-at remoto--gist 'root)
+                                                 "gists/starred" 1
+                                                 (list (gethash "0e6f" remoto-test--store)))))
+               remoto--listing-cache)
+      (with-current-buffer (dired-noselect "/gist:")
+        (remoto-mode 1)
+        (goto-char (point-min))
+        (re-search-forward "x\\.md")
+        (expect (condition-case err (call-interactively (command-remapping 'dired-do-delete))
+                  (user-error (cadr err)))
+                :to-match "only its owner"))
+      (expect (gethash "0e6f" remoto-test--store) :to-be-truthy)))
+
+  (it "goes with its only file, after the same question"
+    (remoto-test-with-store
+      (spy-on 'yes-or-no-p :and-return-value t)
+      (delete-file "/gist:me/0c3d:/s.txt")
+      (expect (car (spy-calls-args-for 'yes-or-no-p 0)) :to-match "Delete the secret gist")
+      (expect (gethash "0c3d" remoto-test--store) :to-be nil)))
+
+  (it "goes with delete-directory too, which asks the question itself"
+    (remoto-test-with-store
+      (remoto-test--answers 'yes-or-no-p nil t)
+      (expect (delete-directory "/gist:me/0a1b:/" t) :to-throw 'user-error)
+      (expect (gethash "0a1b" remoto-test--store) :to-be-truthy)
+      (delete-directory "/gist:me/0a1b:/" t)
+      (expect (gethash "0a1b" remoto-test--store) :to-be nil)))
+
+  (it "offers to kill its unmodified buffers, and keeps a modified one"
+    (remoto-test-with-store
+      (let ((saved (find-file-noselect "/gist:me/0a1b:/a.sh"))
+            (edited (find-file-noselect "/gist:me/0a1b:/b.sh"))
+            (dired (dired-noselect "/gist:me/0a1b:/")))
+        (with-current-buffer edited (insert "x"))
+        (spy-on 'yes-or-no-p :and-return-value t)
+        (spy-on 'y-or-n-p :and-return-value t)
+        (delete-directory "/gist:me/0a1b:/" t)
+        (expect (car (spy-calls-args-for 'y-or-n-p 0)) :to-match "Kill the 2 buffers of")
+        (expect (buffer-live-p saved) :to-be nil)
+        (expect (buffer-live-p dired) :to-be nil)
+        (expect (buffer-live-p edited) :to-be t))))
+
+  (it "leaves to the buffers it keeps a file that exists no more, which no question errs on"
+    (remoto-test-with-store
+      (spy-on 'yes-or-no-p :and-return-value t)
+      (let ((file "/gist:me/0a1b:/a.sh")
+            (answers nil))
+        (find-file-noselect file)
+        ;; A timer asks about the file while the question about its buffer waits.
+        (spy-on 'y-or-n-p :and-call-fake
+                (lambda (&rest _)
+                  (push (condition-case err
+                            (mapcar (lambda (predicate) (funcall predicate file))
+                                    '(file-exists-p file-readable-p file-regular-p
+                                      file-directory-p file-attributes file-writable-p))
+                          (error (list 'signals (error-message-string err))))
+                        answers)
+                  nil))
+        (delete-directory "/gist:me/0a1b:/" t)
+        (expect answers :to-equal '((nil nil nil nil nil nil)))
+        (let ((gets (remoto-test--gets "0a1b")))
+          (expect (file-exists-p file) :to-be nil)
+          (expect (remoto-test--gets "0a1b") :to-equal gets)))))
+
+  (it "refuses a save of a buffer it kept, saying the gist is deleted"
+    (remoto-test-with-store
+      (spy-on 'yes-or-no-p :and-return-value t)
+      (spy-on 'y-or-n-p :and-return-value nil)
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+        (delete-directory "/gist:me/0a1b:/" t)
+        (goto-char (point-max))
+        (insert "x\n")
+        (expect (condition-case err (progn (write-region nil nil buffer-file-name) 'written)
+                  (user-error (cadr err)))
+                :to-equal "Remoto: the gist 0a1b is deleted")
+        (expect (mapcar #'cdr (spy-calls-all-args 'remoto--api-write))
+                :to-equal '(("DELETE" "gists/0a1b"))))))
+
+  (it "says so at a save of a buffer it kept, where Emacs would call its gist write-protected"
+    (remoto-test-with-store
+      (spy-on 'yes-or-no-p :and-return-value t)
+      (spy-on 'y-or-n-p :and-return-value nil)
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+        (delete-directory "/gist:me/0a1b:/" t)
+        (goto-char (point-max))
+        (insert "x\n")
+        (expect (condition-case err (progn (save-buffer) 'saved) (error (error-message-string err)))
+                :to-equal "Remoto: the gist 0a1b is deleted")
+        (expect (buffer-modified-p) :to-be t)
+        (expect (mapcar #'cdr (spy-calls-all-args 'remoto--api-write))
+                :to-equal '(("DELETE" "gists/0a1b"))))))
+
+  (it "kills the buffer the deletion runs in once the command is over"
+    (remoto-test-with-store
+      (spy-on 'yes-or-no-p :and-return-value t)
+      (spy-on 'y-or-n-p :and-return-value t)
+      (spy-on 'run-at-time)
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+        (delete-directory "/gist:me/0a1b:/" t)
+        (expect (buffer-live-p (current-buffer)) :to-be t)
+        (expect (spy-calls-all-args 'run-at-time)
+                :to-contain (list 0 nil #'kill-buffer (current-buffer))))))
+
+  (it "goes with d and x, as with D"
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b" "0c3d")
+      (spy-on 'yes-or-no-p :and-return-value t)
+      (with-current-buffer (dired-noselect "/gist:me/")
+        (remoto-mode 1)
+        (goto-char (point-min))
+        (re-search-forward "s\\.txt")
+        (dired-flag-file-deletion 1)
+        (call-interactively (command-remapping 'dired-do-flagged-delete))
+        (expect (spy-calls-count 'yes-or-no-p) :to-equal 1)
+        (expect (gethash "0c3d" remoto-test--store) :to-be nil)
+        (expect (gethash "0a1b" remoto-test--store) :to-be-truthy))))
+
+  (it "leaves its Dired, still open, out of the reverts after it, and not the listings"
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b" "0c3d")
+      (spy-on 'yes-or-no-p :and-return-value t)
+      (spy-on 'y-or-n-p :and-return-value nil)
+      (let ((gist (dired-noselect "/gist:me/0a1b:/"))
+            (listing (dired-noselect "/gist:me/"))
+            (reverted nil))
+        (delete-directory "/gist:me/0a1b:/" t)
+        (spy-on 'revert-buffer :and-call-fake (lambda (&rest _) (push (current-buffer) reverted)))
+        (remoto-gist--revert-direds remoto--gist)
+        (expect (memq listing reverted) :to-be-truthy)
+        (expect (memq gist reverted) :to-be nil))))
+
+  (it "leaves a line or the only file of a GitHub repository to Dired"
+    (remoto-test-with-listings
+      (expect (remoto--deletion-repo "/github:me/zeta") :to-be nil)
+      (expect (remoto--deletion-repo "/github:me/zeta@main:/README.md") :to-be nil)))
+
+  (it "lets D refuse a line of a GitHub repository before any question, as read-only"
+    (remoto-test-with-listings
+      (spy-on 'yes-or-no-p)
+      (spy-on 'dired-mark-pop-up)
+      (spy-on 'delete-file)
+      (with-current-buffer (dired-noselect "/github:me/")
+        (remoto-mode 1)
+        (expect (dired-goto-file "/github:me/zeta") :to-be-truthy)
+        (expect (condition-case err (call-interactively (command-remapping 'dired-do-delete))
+                  (user-error (cadr err)))
+                :to-equal "Remoto: repository is read-only"))
+      (expect 'yes-or-no-p :not :to-have-been-called)
+      (expect 'dired-mark-pop-up :not :to-have-been-called)
+      (expect 'delete-file :not :to-have-been-called))))
+
+(describe "remoto-gist-edit-description"
+  (it "sends the description alone, in one PATCH, and the listings show it"
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b")
+      (remoto-gist-edit-description "me" "0a1b" "Helpers")
+      (expect (mapcar #'cdr (spy-calls-all-args 'remoto--api-write))
+              :to-equal '(("PATCH" "gists/0a1b" ((description . "Helpers")))))
+      (expect (alist-get 'note (cdar (remoto--listing-entries (gethash "/gist:me/" remoto--listing-cache))))
+              :to-equal "Helpers")))
+
+  (it "reads the gist of the Dired line, its description filled in"
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b")
+      (spy-on 'read-string :and-return-value "New")
+      (with-current-buffer (dired-noselect "/gist:me/")
+        (goto-char (point-min))
+        (re-search-forward "0a1b")
+        (expect (remoto-gist--description-args) :to-equal '("me" "0a1b" "New"))
+        (expect (nth 1 (spy-calls-args-for 'read-string 0)) :to-equal "Scratch"))
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+        (expect (remoto-gist--description-args) :to-equal '("me" "0a1b" "New")))))
+
+  (it "refuses the gist of another account"
+    (remoto-test-with-store
+      (expect (remoto-gist-edit-description "nikku" "0e6f" "Mine now") :to-throw 'user-error)
+      (expect 'remoto--api-write :not :to-have-been-called))))
+
+(describe "a listing of one's own gists"
+  (it "says what makes a gist, at + and at a rename of a gist's line"
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b")
+      (expect (condition-case err (make-directory "/gist:me/stuff") (user-error (cadr err)))
+              :to-match "a gist starts with a file; C-x C-f /gist:me/NAME makes one")
+      (expect (condition-case err (make-empty-file "/gist:me/e.txt") (user-error (cadr err)))
+              :to-match "a gist starts with a file")
+      (expect (condition-case err (make-directory "/gist:nikku/stuff") (user-error (cadr err)))
+              :to-equal "Remoto: repository is read-only")
+      (expect (condition-case err (rename-file "/gist:me/0a1b" "/gist:me/other")
+                (user-error (cadr err)))
+              :to-match "remoto-gist-edit-description")
+      (expect 'remoto--api-write :not :to-have-been-called))))
+
+(describe "the scopes of a token"
+  (before-each (remoto-test--requests-begin))
+  (after-each (remoto-test--requests-end))
+
+  (it "are those the answers to it list, or unknown when they list none"
+    (let ((remoto--logins (remoto-test--logins :token "ghp_ok"))
+          (remoto--token-scopes (make-hash-table :test 'equal))
+          (answers (list nil '(("X-OAuth-Scopes" . "read:org, repo")))))
+      (spy-on 'ghub-get :and-call-fake
+              (lambda (&rest args)
+                (funcall (plist-get (cddr args) :callback) '((login . "me")) (pop answers))
+                nil))
+      (remoto--api remoto--github "user")
+      (expect (remoto--scopes remoto--gist) :to-be t)
+      (remoto--api remoto--github "user")
+      (expect (remoto--scopes remoto--gist) :to-equal '("read:org" "repo"))
+      (let ((remoto--logins (remoto-test--logins :token "ghp_other")))
+        (expect (remoto--scopes remoto--gist) :to-be t)))))
+
+(describe "a token without the gist scope"
+  (it "keeps one's own gists read-only and says why once, naming remoto-login"
+    (remoto-test-with-store
+      (let ((remoto--token-scopes (make-hash-table :test 'equal))
+            (remoto--told-read-only nil))
+        (puthash (secure-hash 'sha1 "ghp_me") '("read:org" "repo") remoto--token-scopes)
+        (spy-on 'message)
+        (expect (buffer-local-value 'buffer-read-only (find-file-noselect "/gist:me/0a1b:/a.sh"))
+                :to-be t)
+        (find-file-noselect "/gist:me/0a1b:/b.sh")
+        (expect (seq-count (lambda (args) (string-match-p "no gist scope.*remoto-login"
+                                                          (format "%s" (cdr args))))
+                           (spy-calls-all-args 'message))
+                :to-equal 1)
+        (expect (file-writable-p "/gist:me/0a1b:/") :to-be nil))))
+
+  (it "refuses a forced save, a deletion, a new gist and a description with that reason"
+    (remoto-test-with-store
+      (let ((remoto--token-scopes (make-hash-table :test 'equal))
+            (remoto--told-read-only nil))
+        (puthash (secure-hash 'sha1 "ghp_me") '("repo") remoto--token-scopes)
+        (remoto-test--list-store "0a1b" "0c3d")
+        ;; Emacs asks before it saves a file that is not writable.
+        (spy-on 'yes-or-no-p :and-return-value t)
+        (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+          (let ((inhibit-read-only t)) (insert "x"))
+          (dolist (call (list #'save-buffer
+                              (lambda () (delete-file "/gist:me/0a1b:/a.sh"))
+                              (lambda () (delete-directory "/gist:me/0a1b:/" t))
+                              (lambda () (remoto-gist-create '(("n.txt" . "n\n")) "" nil))
+                              (lambda () (remoto-gist-edit-description "me" "0a1b" "x"))))
+            (expect (condition-case err (progn (funcall call) "done") (user-error (cadr err)))
+                    :to-match "no gist scope")))
+        (with-current-buffer (dired-noselect "/gist:me/")
+          (remoto-mode 1)
+          (goto-char (point-min))
+          (re-search-forward "s\\.txt")
+          (expect (condition-case err (call-interactively (command-remapping 'dired-do-delete))
+                    (user-error (cadr err)))
+                  :to-match "no gist scope"))
+        (expect 'remoto--api-write :not :to-have-been-called))))
+
+  (it "says why at a save of a new name in one's own gist"
+    (remoto-test-with-store
+      (let ((remoto--token-scopes (make-hash-table :test 'equal))
+            (remoto--told-read-only nil))
+        (puthash (secure-hash 'sha1 "ghp_me") '("repo") remoto--token-scopes)
+        (spy-on 'yes-or-no-p :and-return-value t)
+        (with-current-buffer (find-file-noselect "/gist:me/0a1b:/new.txt")
+          (let ((inhibit-read-only t)) (insert "x\n"))
+          (expect (condition-case err (progn (save-buffer) "saved") (error (error-message-string err)))
+                  :to-match "no gist scope"))
+        (expect 'remoto--api-write :not :to-have-been-called))))
+
+  (it "refuses a new gist at a name, and the prompts of the commands, before they ask"
+    (remoto-test-with-store
+      (let ((remoto--token-scopes (make-hash-table :test 'equal))
+            (remoto--told-read-only nil))
+        (puthash (secure-hash 'sha1 "ghp_me") '("repo") remoto--token-scopes)
+        (remoto-test--list-store "0a1b")
+        (spy-on 'read-string)
+        (expect (condition-case err (find-file-noselect "/gist:me/idea.md") (user-error (cadr err)))
+                :to-match "no gist scope")
+        (with-temp-buffer
+          (insert "text\n")
+          (expect (condition-case err (call-interactively #'remoto-gist-create)
+                    (user-error (cadr err)))
+                  :to-match "no gist scope"))
+        (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+          (expect (condition-case err (call-interactively #'remoto-gist-edit-description)
+                    (user-error (cadr err)))
+                  :to-match "no gist scope"))
+        (expect 'read-string :not :to-have-been-called)))))
+
+(describe "the URL commands on a line of a listing"
+  (it "copy the gist of a line, or the file of a gist of one file"
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b" "0c3d")
+      (with-current-buffer (dired-noselect "/gist:me/")
+        (goto-char (point-min))
+        (re-search-forward "0a1b")
+        (remoto-copy-url)
+        (expect (car kill-ring) :to-equal "https://gist.github.com/me/0a1b")
+        (goto-char (point-min))
+        (re-search-forward "s\\.txt")
+        (remoto-copy-url)
+        (expect (car kill-ring) :to-equal "https://gist.github.com/me/0c3d#file-s-txt"))))
+
+  (it "browse the gist of a line of the root listing"
+    (remoto-test-with-gist-answers
+      (spy-on 'browse-url)
+      (with-current-buffer (dired-noselect "/gist:")
+        (goto-char (point-min))
+        (re-search-forward "capture\\.md")
+        (remoto-browse-url)
+        (expect 'browse-url :to-have-been-called-with
+                "https://gist.github.com/nikku/0e6f#file-capture-md"))))
+
+  (it "copy the repository of a line at its default branch"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (dired-mode)
+        (setq-local dired-directory "/github:testowner/")
+        (spy-on 'dired-get-filename :and-return-value "/github:testowner/testrepo")
+        (remoto-copy-url)
+        (expect (car kill-ring) :to-equal "https://github.com/testowner/testrepo/tree/main/"))))
+
+  (it "copy the account of a listing from its . line"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (dired-mode)
+        (setq-local dired-directory "/github:testowner/")
+        (spy-on 'dired-get-filename :and-return-value "/github:testowner/.")
+        (remoto-copy-url)
+        (expect (car kill-ring) :to-equal "https://github.com/testowner"))))
+
+  (it "copy the account of a line, or of the listing, and refuse what an account lacks"
+    (remoto-test-with-cache
+      (with-temp-buffer
+        (dired-mode)
+        (setq-local dired-directory "/github:")
+        (spy-on 'dired-get-filename :and-return-value "/github:testowner")
+        (remoto-copy-url)
+        (expect (car kill-ring) :to-equal "https://github.com/testowner")
+        (expect (condition-case err (remoto-copy-permalink) (user-error (cadr err)))
+                :to-equal "Remoto: an account has no permalink URL")
+        (expect (condition-case err (remoto-copy-history-url) (user-error (cadr err)))
+                :to-equal "Remoto: an account has no history URL")
+        (expect (condition-case err (remoto-copy-blame-url) (user-error (cadr err)))
+                :to-equal "Remoto: an account has no blame URL")
+        (setq-local dired-directory "/gist:me/")
+        (spy-on 'dired-get-filename :and-return-value nil)
+        (remoto-copy-url)
+        (expect (car kill-ring) :to-equal "https://gist.github.com/me")))))
 
 (describe "the token page that remoto-login opens"
   (it "ticks the gist scope, which secret gists need, for GitHub and its gists alike"

@@ -195,6 +195,292 @@
       (expect (car (last (assoc "ex /cb:forgejo/docs" cases))) :to-equal (kbd "RET"))
       (expect (car (last (assoc "ff /cb:forgejo/docs" cases))) :to-equal 'submit))))
 
+(describe "remoto-e2e--gist-cases"
+  (it "make a gist at the profile's file prompt, or with ex and :w under Evil, then D deletes it"
+    (let ((vanilla (remoto-e2e--gist-cases "vanilla" "someone" "n.txt"))
+          (evil (remoto-e2e--gist-cases "evil" "someone" "n.txt")))
+      (expect (mapcar #'car vanilla) :to-equal '("gist new n.txt" "gist D n.txt"))
+      (expect (seq-take (cddr (car vanilla)) 3)
+              :to-equal (list (kbd "C-x C-f") "/gist:someone/n.txt" 'submit))
+      (expect (seq-take (cddr (car evil)) 3)
+              :to-equal (list (kbd ": e SPC") "/gist:someone/n.txt" (kbd "RET")))
+      (expect (member (kbd ": w RET") (car evil)) :to-be-truthy)
+      ;; ESC and a key right after it reach a terminal Emacs as one meta key.
+      (expect (nth (1- (seq-position (car evil) (kbd ": w RET"))) (car evil)) :to-be 'pause)
+      (expect (cddr (cadr vanilla))
+              :to-equal (list (kbd "C-x d") "/gist:someone/" 'submit 'goto "n.txt" (kbd "RET")
+                              "D" 'pause "yes" (kbd "RET") 'pause))))
+  (it "leave out D under ido, whose C-x d opens no listing of gists"
+    (expect (mapcar #'car (remoto-e2e--gist-cases "ido" "someone" "n.txt"))
+            :to-equal '("gist new n.txt"))))
+
+(describe "remoto-keys--checks of the gist cases"
+  (it "fail a save that made no gist, one into a gist that was there, and a line that D left"
+    (let ((remoto-keys--gists-before '(("0c3d" "2026-01-01T00:00:00Z" ("o.txt")))))
+      (expect (remoto-keys--checks "gist new k.txt" '(:file "/gist:someone/0a1b2c:/k.txt") nil nil)
+              :to-be nil)
+      (expect (remoto-keys--checks "gist new k.txt" '(:file "/gist:someone/0c3d:/k.txt") nil nil)
+              :to-equal '("the save wrote into gist 0c3d, which was there before")))
+    (expect (remoto-keys--checks "gist new k.txt" '(:file "/gist:someone/new:/k.txt") nil nil)
+            :to-equal '("the save made no gist: the buffer visits /gist:someone/new:/k.txt"))
+    (expect (remoto-keys--checks "gist D k.txt" '(:dired "/gist:someone/" :names ("0a1b/k.txt"))
+                                 nil nil)
+            :to-equal '("the line of k.txt is still there"))
+    (expect (remoto-keys--checks "gist D k.txt" '(:dired "/gist:someone/" :names ("0c3d/o.txt"))
+                                 nil nil)
+            :to-be nil)
+    (expect (remoto-keys--checks "gist D k.txt" '(:buffer "*scratch*") nil nil)
+            :to-equal '("D ran in no listing of gists")))
+  (it "fail any case whose Emacs refused a gist write"
+    (expect (remoto-keys--checks
+             "dired D on a line" '(:dired "/gist:someone/"
+                                   :refused ("remoto-keys: gist 0c3d was there before the run, refused DELETE"))
+             nil nil)
+            :to-equal '("a gist write that no case makes: remoto-keys: gist 0c3d was there before the run, refused DELETE"))))
+
+(describe "remoto-e2e--gist-refusal"
+  (it "refuses a write to a gist that was there before the run, by any address"
+    (dolist (method '("PATCH" "DELETE" "PUT" "POST"))
+      (dolist (resource '("/gists/0c3d" "gists/0c3d" "https://api.github.com/gists/0c3d"
+                          "/gists/0c3d/star" "/gists/0c3d?x=1"))
+        (expect (remoto-e2e--gist-refusal method resource '("0a1b" "0c3d"))
+                :to-equal (format "remoto-keys: gist 0c3d was there before the run, refused %s"
+                                  method)))))
+  (it "lets a run that makes gists make one and write to it, and read any"
+    (expect (remoto-e2e--gist-refusal "POST" "/gists" '("0c3d")) :to-be nil)
+    (expect (remoto-e2e--gist-refusal "PATCH" "/gists/0e5f" '("0c3d")) :to-be nil)
+    (expect (remoto-e2e--gist-refusal "DELETE" "/gists/0c3d0" '("0c3d")) :to-be nil)
+    (expect (remoto-e2e--gist-refusal "GET" "/gists/0c3d" '("0c3d")) :to-be nil)
+    (expect (remoto-e2e--gist-refusal "GET" "/gists/0c3d" 'all) :to-be nil))
+  (it "refuses every gist write of a run that makes no gist, and nothing else"
+    (expect (remoto-e2e--gist-refusal "POST" "/gists" 'all)
+            :to-equal "remoto-keys: this run writes no gist, refused POST /gists")
+    (expect (remoto-e2e--gist-refusal "DELETE" "/gists/0e5f" 'all)
+            :to-equal "remoto-keys: this run writes no gist, refused DELETE /gists/0e5f")
+    (expect (remoto-e2e--gist-refusal "POST" "/graphql" 'all) :to-be nil)
+    (expect (remoto-e2e--gist-refusal "PATCH" "/repos/someone/gistsx" 'all) :to-be nil)))
+
+(describe "the gists of a keys run"
+  (it "come with a token that may write gists, one each profile, the account's gists listed first"
+    (let ((remoto-keys--token "not-a-token")
+          (remoto-keys--github-login "someone")
+          (remoto-keys--gist-names nil)
+          (remoto-keys--gists-before 'unknown))
+      (spy-on 'remoto-keys--curl-p :and-return-value t)
+      (spy-on 'remoto-keys--json :and-return-value (vector '((id . "0c3d") (updated_at . "T1"))))
+      (spy-on 'princ)
+      (pcase-dolist (`(,headers . ,cases)
+                     '(("x-oauth-scopes: read:org, repo\r\n" . 0)
+                       ("x-oauth-scopes: gist, read:org, repo\r\n" . 2)
+                       ("x-github-request-id: 1\r\n" . 2)))
+        (let ((remoto-keys--gist-writes 'unknown))
+          (spy-on 'remoto-keys--curl :and-return-value (cons 0 (concat "HTTP/2 200\r\n" headers)))
+          (expect (length (remoto-keys--gist-cases "vanilla")) :to-equal cases)))
+      (expect (length remoto-keys--gist-names) :to-equal 2)
+      (expect remoto-keys--gists-before :to-equal '(("0c3d" "T1" nil)))))
+
+  (it "tell each profile the gists no case writes, and a run that makes none no list"
+    (let* ((remoto-keys--token "not-a-token")
+           (remoto-keys--dir (file-name-as-directory (make-temp-file "remoto-keys" t)))
+           (remoto-keys--gists-before '(("0a1b" "T1" ("a.txt")) ("0c3d" "T2" ("c.txt")))))
+      (unwind-protect
+          (progn
+            (let* ((remoto-keys--gist-writes t)
+                   (file (getenv-internal "REMOTO_KEYS_KEEP_GISTS"
+                                          (remoto-keys--env "vanilla" "vanilla" "/elpa/"))))
+              (expect (with-temp-buffer (insert-file-contents file) (buffer-string))
+                      :to-equal "0a1b\n0c3d"))
+            (let ((remoto-keys--gist-writes nil))
+              (expect (getenv-internal "REMOTO_KEYS_KEEP_GISTS"
+                                       (remoto-keys--env "vanilla" "vanilla" "/elpa/"))
+                      :to-be nil))
+            (let ((remoto-keys--gist-writes t)
+                  (remoto-keys--gists-before 'failed))
+              (expect (getenv-internal "REMOTO_KEYS_KEEP_GISTS"
+                                       (remoto-keys--env "vanilla" "vanilla" "/elpa/"))
+                      :to-be nil)))
+        (delete-directory remoto-keys--dir t))))
+
+  (it "stay out when the account's gists cannot be listed before them"
+    (let ((remoto-keys--token "not-a-token")
+          (remoto-keys--github-login "someone")
+          (remoto-keys--gist-names nil)
+          (remoto-keys--gists-before 'unknown)
+          (remoto-keys--gist-writes 'unknown))
+      (spy-on 'remoto-keys--curl-p :and-return-value t)
+      (spy-on 'remoto-keys--curl :and-return-value '(0 . "HTTP/2 200\r\nx-oauth-scopes: gist\r\n"))
+      (spy-on 'remoto-keys--json :and-return-value nil)
+      (spy-on 'princ)
+      (expect (remoto-keys--gist-cases "vanilla") :to-be nil)
+      (expect remoto-keys--gist-names :to-be nil)
+      (expect (spy-calls-args-for 'princ 0)
+              :to-equal '("No gist cases: the run could not list the account's gists before them\n"))))
+
+  (it "list every page of the account's gists"
+    (let ((remoto-keys--token "not-a-token"))
+      (spy-on 'remoto-keys--json :and-call-fake
+              (lambda (address _token)
+                (if (string-suffix-p "page=1" address)
+                    (apply #'vector (mapcar (lambda (n) `((id . ,(format "%04x" n))))
+                                            (number-sequence 1 100)))
+                  (vector '((id . "ffff"))))))
+      (expect (length (remoto-keys--account-gists)) :to-equal 101)
+      (expect (spy-calls-count 'remoto-keys--json) :to-equal 2)))
+
+  (it "that a case left go at the end of the run, and no other gist"
+    (let ((remoto-keys--token "not-a-token")
+          (remoto-keys--github-login "someone")
+          (remoto-keys--gist-names '("remoto-keys-vanilla-1.txt"))
+          (remoto-keys--gists-before '(("0c3d" "T1" ("testing.org"))))
+          (calls nil))
+      (spy-on 'remoto-keys--json :and-return-value
+              (vector '((id . "0a1b") (updated_at . "T3")
+                        (files (remoto-keys-vanilla-1.txt (size . 1))))
+                      '((id . "0c3d") (updated_at . "T1") (files (other.txt (size . 1))))))
+      (spy-on 'remoto-keys--curl :and-call-fake (lambda (address &rest args)
+                                                  (push (cons address args) calls)
+                                                  '(0 . "204")))
+      (spy-on 'princ)
+      (expect (remoto-keys--delete-gists) :to-equal 0)
+      (expect calls :to-equal '(("https://api.github.com/gists/0a1b" "not-a-token" "-X" "DELETE"
+                                 "-o" "/dev/null" "-w" "%{http_code}")))))
+
+  (it "never delete a gist that was there before the run, and take the run's file out of it"
+    (let ((remoto-keys--token "not-a-token")
+          (remoto-keys--github-login "someone")
+          (remoto-keys--gist-names '("remoto-keys-ido-1.txt"))
+          (remoto-keys--gists-before '(("0c3d" "T1" ("testing.org"))))
+          (calls nil))
+      (spy-on 'remoto-keys--json :and-return-value
+              (vector '((id . "0c3d") (updated_at . "T2")
+                        (files (testing.org (size . 1)) (remoto-keys-ido-1.txt (size . 1))))))
+      (spy-on 'remoto-keys--curl :and-call-fake (lambda (address &rest args)
+                                                  (push (cons address args) calls)
+                                                  '(0 . "")))
+      (spy-on 'princ)
+      (expect (remoto-keys--delete-gists) :to-equal 2)
+      (expect calls :to-equal '(("https://api.github.com/gists/0c3d" "not-a-token" "-X" "PATCH"
+                                 "--data-binary" "{\"files\":{\"remoto-keys-ido-1.txt\":null}}")))
+      (expect (car (spy-calls-args-for 'princ 0))
+              :to-equal "FAIL account: gist 0c3d, there before the run, changed during it, at T2\n")
+      (expect (car (spy-calls-args-for 'princ 1))
+              :to-match "\\`FAIL cleanup: a case wrote remoto-keys-ido-1\\.txt into gist 0c3d")))
+
+  (it "leave alone a gist that was there before and did not change, whatever its files"
+    (let ((remoto-keys--token "not-a-token")
+          (remoto-keys--gist-names '("remoto-keys-ido-1.txt"))
+          (remoto-keys--gists-before '(("0c3d" "T1" ("remoto-keys-ido-1.txt")))))
+      (spy-on 'remoto-keys--json :and-return-value
+              (vector '((id . "0c3d") (updated_at . "T1")
+                        (files (remoto-keys-ido-1.txt (size . 1))))))
+      (spy-on 'remoto-keys--curl)
+      (spy-on 'princ)
+      (expect (remoto-keys--delete-gists) :to-equal 0)
+      (expect 'remoto-keys--curl :not :to-have-been-called)))
+
+  (it "fail when a gist that was there before the run is gone at its end"
+    (let ((remoto-keys--token "not-a-token")
+          (remoto-keys--gist-names nil)
+          (remoto-keys--gists-before '(("0c3d" "T1" ("notes.md")) ("0e5f" "T1" ("todo.org")))))
+      (spy-on 'remoto-keys--json :and-return-value
+              (vector '((id . "0c3d") (updated_at . "T1") (files (notes.md (size . 1))))))
+      (spy-on 'remoto-keys--curl)
+      (spy-on 'princ)
+      (expect (remoto-keys--delete-gists) :to-equal 1)
+      (expect (spy-calls-args-for 'princ 0)
+              :to-equal '("FAIL account: gist 0e5f, there before the run, is gone\n"))
+      (expect 'remoto-keys--curl :not :to-have-been-called)))
+
+  (it "count no gist of another keys run that went during this one"
+    (let ((remoto-keys--token "not-a-token")
+          (remoto-keys--gist-names nil)
+          (remoto-keys--gists-before '(("0c3d" "T1" ("notes.md"))
+                                       ("0e5f" "T1" ("remoto-keys-vertico-120000.txt")))))
+      (spy-on 'remoto-keys--json :and-return-value
+              (vector '((id . "0c3d") (updated_at . "T1") (files (notes.md (size . 1))))))
+      (spy-on 'princ)
+      (expect (remoto-keys--delete-gists) :to-equal 0)
+      (expect 'princ :not :to-have-been-called)))
+
+  (it "ask nothing of GitHub at the end of a run that listed no gists"
+    (let ((remoto-keys--gist-names nil)
+          (remoto-keys--gists-before 'unknown))
+      (spy-on 'remoto-keys--json)
+      (expect (remoto-keys--delete-gists) :to-equal 0)
+      (expect 'remoto-keys--json :not :to-have-been-called)))
+
+  (it "keep a gist the run did not list before when it holds another's file too"
+    (let ((remoto-keys--token "not-a-token")
+          (remoto-keys--github-login "someone")
+          (remoto-keys--gist-names '("remoto-keys-vanilla-1.txt"))
+          (remoto-keys--gists-before nil)
+          (calls nil))
+      (spy-on 'remoto-keys--json :and-return-value
+              (vector '((id . "0e5f") (files (notes.md (size . 1))
+                                             (remoto-keys-vanilla-1.txt (size . 1))))))
+      (spy-on 'remoto-keys--curl :and-call-fake (lambda (address &rest args)
+                                                  (push (cons address args) calls)
+                                                  '(0 . "")))
+      (spy-on 'princ)
+      (expect (remoto-keys--delete-gists) :to-equal 1)
+      (expect (mapcar #'caddr calls) :to-equal '("-X"))
+      (expect (nth 3 (car calls)) :to-equal "PATCH")))
+
+  (it "delete nothing when the account's gists cannot be listed at the end"
+    (let ((remoto-keys--token "not-a-token")
+          (remoto-keys--gist-names '("remoto-keys-vanilla-1.txt"))
+          (remoto-keys--gists-before nil))
+      (spy-on 'remoto-keys--json :and-return-value nil)
+      (spy-on 'remoto-keys--curl)
+      (spy-on 'princ)
+      (expect (remoto-keys--delete-gists) :to-equal 1)
+      (expect 'remoto-keys--curl :not :to-have-been-called)))
+
+  (it "say when GitHub refuses the deletion of a gist the run made"
+    (let ((remoto-keys--token "not-a-token")
+          (remoto-keys--gist-names '("remoto-keys-vanilla-1.txt"))
+          (remoto-keys--gists-before nil))
+      (spy-on 'remoto-keys--json :and-return-value
+              (vector '((id . "0a1b") (files (remoto-keys-vanilla-1.txt (size . 1))))))
+      (spy-on 'remoto-keys--curl :and-return-value '(0 . "404"))
+      (spy-on 'princ)
+      (expect (remoto-keys--delete-gists) :to-equal 1))))
+
+(describe "remoto-keys--live-reset"
+  (it "kills the buffers a case opens, and none that another program made meanwhile"
+    (let ((other (generate-new-buffer "another program's buffer"))
+          (local (generate-new-buffer "remoto-keys-case.txt"))
+          (embark (generate-new-buffer "*Embark Collect: x*")))
+      (setq remoto-keys--live-saved
+            (list :buffers (seq-remove (lambda (b) (memq b (list other local embark))) (buffer-list))
+                  :windows (current-window-configuration)))
+      (with-current-buffer local
+        (setq buffer-file-name (expand-file-name "remoto-keys-case.txt" temporary-file-directory)))
+      (unwind-protect
+          (progn
+            (eval remoto-keys--live-reset t)
+            (expect (buffer-live-p other) :to-be t)
+            (expect (buffer-live-p local) :to-be nil)
+            (expect (buffer-live-p embark) :to-be nil))
+        (makunbound 'remoto-keys--live-saved)
+        (makunbound 'remoto-keys--live-calls)
+        (when (buffer-live-p other) (kill-buffer other))
+        (when (get-buffer "*remoto-keys*") (kill-buffer "*remoto-keys*"))))))
+
+(describe "remoto-e2e-goto"
+  (it "goes to the line of a name, or of a gist's file behind its hidden id"
+    (with-temp-buffer
+      (insert "  /gist:someone/:\n")
+      (dolist (name '("0a1b/n.txt" "m.txt"))
+        (insert "  -rw-r--r--  1 github github 0 Jan  1  2000 "
+                (propertize name 'dired-filename t) "\n"))
+      (dired-mode)
+      (remoto-e2e-goto "n.txt")
+      (expect (remoto-e2e--line-name) :to-equal "0a1b/n.txt")
+      (remoto-e2e-goto "m.txt")
+      (expect (remoto-e2e--line-name) :to-equal "m.txt")
+      (expect (remoto-e2e-goto "zz.txt") :to-throw 'user-error))))
+
 (describe "remoto-e2e--buffer-problems"
   (it "finds a Dired line that is no entry and a control character"
     (with-temp-buffer

@@ -257,6 +257,142 @@ no account for its token, as `remoto-keys--account' does."
     (princ (format "  [search budget %d, waiting]\n" (car left)))
     (sleep-for (max 1 (min 60 (- (cdr left) (float-time)))))))
 
+;;; Gists
+
+(defvar remoto-keys--gist-writes 'unknown
+  "Whether the run's token may write gists: t, nil, or `unknown' until asked.")
+
+(defvar remoto-keys--gist-names nil
+  "The file names of the gists the run makes, one per profile.")
+
+(defvar remoto-keys--gists-before 'unknown
+  "The account's gists before the run, (ID UPDATED-AT NAMES) each.
+`unknown' until listed, `failed' when they could not be.  No profile
+writes to these gists, and the run deletes none of them.")
+
+(defun remoto-keys--gist-there-before (id)
+  "Return the entry of ID in `remoto-keys--gists-before', or nil."
+  (and (listp remoto-keys--gists-before) (assoc id remoto-keys--gists-before)))
+
+(defun remoto-keys--file-names (gist)
+  "Return the names of the files of GIST, an item of the account's list."
+  (mapcar (lambda (file) (symbol-name (car file))) (alist-get 'files gist)))
+
+(defun remoto-keys--keys-gist-p (names)
+  "Non-nil when NAMES, the files of a gist, are all of keys runs.
+Runs side by side, as make -j runs them, each make such gists."
+  (and names (seq-every-p (lambda (name) (string-match-p "\\`remoto-keys-.*\\.txt\\'" name))
+                          names)))
+
+(defun remoto-keys--account-gists (&optional page)
+  "Return the gists of the token's account from PAGE on, or `failed'.
+GitHub lists a hundred a page; the list ends at a shorter page."
+  (let* ((page (or page 1))
+         (items (remoto-keys--json (format "https://api.github.com/gists?per_page=100&page=%d"
+                                           page)
+                                   remoto-keys--token)))
+    (cond ((not (vectorp items)) 'failed)
+          ((< (length items) 100) (append items nil))
+          (t (let ((rest (remoto-keys--account-gists (1+ page))))
+               (if (eq rest 'failed) 'failed (append items rest)))))))
+
+(defun remoto-keys--gist-writes-p ()
+  "Non-nil when the run's token may write gists, asked once.
+A token whose scopes GitHub lists needs gist among them, and the run lists
+the account's gists first, which it then never deletes."
+  (when (eq remoto-keys--gist-writes 'unknown)
+    (setq remoto-keys--gist-writes
+          (and remoto-keys--token remoto-keys--github-login (remoto-keys--curl-p)
+               (pcase-let ((`(,exit . ,output) (remoto-keys--curl "https://api.github.com/user"
+                                                                 remoto-keys--token "-I")))
+                 (and (eql exit 0)
+                      (let ((case-fold-search t))
+                        (or (not (string-match "^x-oauth-scopes:\\(.*\\)$" output))
+                            (string-match-p "\\bgist\\b" (match-string 1 output))))))))
+    (when remoto-keys--gist-writes
+      (let ((gists (remoto-keys--account-gists)))
+        (setq remoto-keys--gists-before
+              (if (eq gists 'failed)
+                  'failed
+                (mapcar (lambda (gist)
+                          (list (alist-get 'id gist) (alist-get 'updated_at gist)
+                                (remoto-keys--file-names gist)))
+                        gists))
+              remoto-keys--gist-writes (not (eq gists 'failed)))))
+    (princ (cond (remoto-keys--gist-writes
+                  "Gist cases: each profile makes a secret gist and deletes it\n")
+                 ((eq remoto-keys--gists-before 'failed)
+                  "No gist cases: the run could not list the account's gists before them\n")
+                 (t "No gist cases: they need a GitHub token that may write gists\n"))))
+  remoto-keys--gist-writes)
+
+(defun remoto-keys--gist-cases (profile)
+  "Return the gist cases of PROFILE, or nil when the token may write no gist."
+  (when (remoto-keys--gist-writes-p)
+    (let ((name (format "remoto-keys-%s-%s.txt" profile (format-time-string "%H%M%S"))))
+      (push name remoto-keys--gist-names)
+      (remoto-e2e--gist-cases profile remoto-keys--github-login name))))
+
+(defun remoto-keys--clean-gist (gist)
+  "Take the run's files out of GIST, an item of the account's list.
+A gist the run made, not there before it and holding the run's files
+only, goes; any other keeps its own files.  Return non-nil when a case
+wrote into a gist it did not make, which is a failure."
+  (let* ((id (alist-get 'id gist))
+         (before (remoto-keys--gist-there-before id))
+         (names (remoto-keys--file-names gist))
+         (ours (seq-filter (lambda (name) (member name remoto-keys--gist-names)) names))
+         (address (concat "https://api.github.com/gists/" id)))
+    (cond ((null ours) nil)
+          ;; Unchanged since the run began, so no case wrote the file it names.
+          ((and before (equal (nth 1 before) (alist-get 'updated_at gist))) nil)
+          ((and (listp remoto-keys--gists-before) (not before) (equal ours names))
+           (pcase (remoto-keys--curl address remoto-keys--token "-X" "DELETE"
+                                     "-o" "/dev/null" "-w" "%{http_code}")
+             (`(0 . "204") (princ (format "CLEANUP gist %s, which a case left, deleted\n" id))
+              nil)
+             (`(,_ . ,status)
+              (princ (format "FAIL cleanup: GitHub answered %s to the deletion of gist %s\n"
+                             status id))
+              t)))
+          (t
+           (remoto-keys--curl address remoto-keys--token "-X" "PATCH" "--data-binary"
+                              (json-serialize
+                               `((files . ,(mapcar (lambda (name) (cons (intern name) :null))
+                                                   ours)))))
+           (princ (format "FAIL cleanup: a case wrote %s into gist %s, which the run did not make; %s\n"
+                          (string-join ours ", ") id "that file is gone again, the gist kept"))
+           t))))
+
+(defun remoto-keys--compare-gists (gists)
+  "Return how many gists there before the run GISTS lack or hold changed.
+GISTS is the account's list at the end of the run.  Each such gist gets
+a FAIL line; a gist of another keys run, which ends its own, gets none."
+  (seq-count (pcase-lambda (`(,id ,updated ,names))
+               (let* ((now (seq-find (lambda (gist) (equal (alist-get 'id gist) id)) gists))
+                      (failure (cond ((null now) "is gone")
+                                     ((not (equal (alist-get 'updated_at now) updated))
+                                      (concat "changed during it, at "
+                                              (alist-get 'updated_at now))))))
+                 (when (and failure (not (remoto-keys--keys-gist-p names)))
+                   (princ (format "FAIL account: gist %s, there before the run, %s\n" id failure))
+                   t)))
+             remoto-keys--gists-before))
+
+(defun remoto-keys--delete-gists ()
+  "Delete the gists the run made; return how many failures the account shows.
+The account's gists at the end are compared with those before the run.  A
+case that failed leaves its gist behind; none outlives the run, and no
+gist that was there before the run goes."
+  (if (not (listp remoto-keys--gists-before))
+      0
+    (let ((gists (remoto-keys--account-gists)))
+      (if (eq gists 'failed)
+          (progn (princ "FAIL cleanup: the account's gists could not be listed, so none is deleted\n")
+                 1)
+        (+ (remoto-keys--compare-gists gists)
+           (seq-count #'remoto-keys--clean-gist gists))))))
+
 ;;; Packages
 
 (defun remoto-keys--header (file field)
@@ -401,6 +537,11 @@ the profile gets, since ghub uses no token without one."
                            (prin1-to-string (plist-get setup :init))
                          (getenv "REMOTO_KEYS_INIT"))))
        (list (concat "REMOTO_KEYS_INIT=" form)))
+     ;; Without the file, the profile writes no gist at all.
+     (when (and (eq remoto-keys--gist-writes t) (listp remoto-keys--gists-before))
+       (list (concat "REMOTO_KEYS_KEEP_GISTS="
+                     (remoto-keys--fixture name "kept-gists"
+                                           (mapconcat #'car remoto-keys--gists-before "\n")))))
      (when github
        (let ((file (expand-file-name (concat "token-" name) remoto-keys--dir)))
          (with-file-modes #o600
@@ -727,10 +868,30 @@ clean Dired and Embark lines, no raw HTTP text, few requests, live URLs."
             failures))
     (pcase-dolist (`(,url . ,status) (plist-get state :dead))
       (push (format "%s answers %s" url (or status "nothing")) failures))
+    (dolist (refusal (plist-get state :refused))
+      (push (concat "a gist write that no case makes: " refusal) failures))
     (when (and (string-match-p "\\bembark y on\\b" label) (not (plist-get state :kill)))
       (push "Embark's y copied nothing" failures))
     (when (and (string-match-p "\\bembark b on\\b" label) (not (plist-get state :browsed)))
       (push "Embark's b browsed nothing" failures))
+    (pcase label
+      ((rx bos "gist new " (let name (+ nonl)))
+       (let ((file (or (plist-get state :file) "")))
+         (cond ((not (string-match (concat "\\`/gist:[^/]+/\\([0-9a-f]+\\):/"
+                                           (regexp-quote name) "\\'")
+                                   file))
+                (push (format "the save made no gist: the buffer visits %s"
+                              (plist-get state :file))
+                      failures))
+               ((remoto-keys--gist-there-before (match-string 1 file))
+                (push (format "the save wrote into gist %s, which was there before"
+                              (match-string 1 file))
+                      failures)))))
+      ((rx bos "gist D " (let name (+ nonl)))
+       (cond ((not (string-match-p "\\`/gist:[^/]+/\\'" (or (plist-get state :dired) "")))
+              (push "D ran in no listing of gists" failures))
+             ((seq-some (lambda (line) (string-suffix-p (concat "/" name) line)) names)
+              (push (format "the line of %s is still there" name) failures)))))
     (when (< remoto-keys--max-requests requests)
       (push (format "%d requests, more than %d" requests remoto-keys--max-requests) failures))
     (when (< remoto-keys--max-requests annotations)
@@ -751,7 +912,8 @@ EXPECTED is the replay's state of the case, or nil."
 (defun remoto-keys--profile (profile elpa-branch elpa-main)
   "Run the cases of PROFILE under the remoto in ELPA-BRANCH.
 With ELPA-MAIN, run each GitHub case also under origin/main's remoto
-there; Codeberg cases run on the branch only, main has no Codeberg.
+there; Codeberg and gist cases run on the branch only, main has no
+Codeberg and writes no gist.
 Return a plist of the cases run, the checks failed, the DIFFs with main.
 An Emacs that cannot start stops the profile with a failure that says
 why; the results so far are written all the same."
@@ -769,7 +931,9 @@ why; the results so far are written all the same."
               (dolist (case (append (mapcar (lambda (c) (cons 'github c))
                                             (remoto-e2e--cases profile))
                                     (mapcar (lambda (c) (cons 'codeberg c))
-                                            (remoto-e2e--codeberg-cases profile))))
+                                            (remoto-e2e--codeberg-cases profile))
+                                    (mapcar (lambda (c) (cons 'gist c))
+                                            (remoto-keys--gist-cases profile))))
                 (let ((forge (car case)) (case (cdr case)))
                   (if (nth 1 case)
                       (princ (format "%-16s %-58s skip: needs the replay's fake answers\n"
@@ -834,16 +998,20 @@ A batch Emacs exits 255 on an error nothing catches, before any results."
          (cases 0) (failed 0) (differ 0))
     (remoto-keys--install-checkout elpa-branch)
     (remoto-keys--learn-logins)
+    ;; Before any profile starts: each learns which gists no case writes.
+    (remoto-keys--gist-writes-p)
     (when elpa-main
       (princ (format "origin/main %s: remoto %s\n"
                      (string-trim (remoto-keys--sh "git" "-C" remoto-keys--root
                                                    "log" "-1" "--format=%h %s" "origin/main"))
                      (remoto-keys--install (remoto-keys--main-source) elpa-main))))
-    (dolist (profile remoto-keys--profiles)
-      (let ((counts (remoto-keys--profile profile elpa-branch elpa-main)))
-        (cl-incf cases (plist-get counts :cases))
-        (cl-incf failed (plist-get counts :failed))
-        (cl-incf differ (plist-get counts :differ))))
+    (unwind-protect
+        (dolist (profile remoto-keys--profiles)
+          (let ((counts (remoto-keys--profile profile elpa-branch elpa-main)))
+            (cl-incf cases (plist-get counts :cases))
+            (cl-incf failed (plist-get counts :failed))
+            (cl-incf differ (plist-get counts :differ))))
+      (cl-incf failed (remoto-keys--delete-gists)))
     (princ (format "remoto-keys %s: %d cases, %d failed%s, %.0f s, results in %s\n"
                    (string-join remoto-keys--profiles " ") cases failed
                    (if elpa-main (format ", %d differ from origin/main" differ) "")
@@ -1774,11 +1942,24 @@ A scenario that spends GitHub's requests without a token runs only by name."
   "Save what the cases touch, log remoto's requests, and say how to submit a prompt.")
 
 (defconst remoto-keys--live-reset
-  '(let ((saved remoto-keys--live-saved))
+  '(let ((saved remoto-keys--live-saved)
+         (tmp (file-truename temporary-file-directory)))
      (dolist (buffer (buffer-list))
        (unless (or (memq buffer (plist-get saved :buffers))
                    (string-prefix-p " " (buffer-name buffer))
-                   (equal (buffer-name buffer) "*remoto-keys*"))
+                   (equal (buffer-name buffer) "*remoto-keys*")
+                   ;; Other programs make buffers in this Emacs too: only what a case opens goes.
+                   (with-current-buffer buffer
+                     (let ((place (or buffer-file-name
+                                      (and (derived-mode-p 'dired-mode)
+                                           (format "%s" default-directory)))))
+                       (not (or (string-match-p
+                                 "\\`\\*\\(?:Embark\\|remoto\\|Remoto\\|Completions\\)"
+                                 (buffer-name))
+                                (and place (boundp 'remoto--handler-regexp)
+                                     (string-match-p remoto--handler-regexp place))
+                                (and place (not (file-remote-p place))
+                                     (string-prefix-p tmp (file-truename place))))))))
          (with-current-buffer buffer (set-buffer-modified-p nil))
          (let ((kill-buffer-query-functions nil))
            (kill-buffer buffer))))

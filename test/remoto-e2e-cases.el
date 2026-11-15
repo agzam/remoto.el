@@ -198,13 +198,20 @@ character or a raw byte, and Embark's annotations line up."
                         (seq-take (remoto-e2e--stray-lines) 2))
               (remoto-e2e--embark-problems)))))
 
-(defun remoto-e2e-goto (name)
-  "Move to the Dired line of NAME, as a person would look for it."
-  (interactive "sLine: ")
+(defun remoto-e2e--goto-line (pred)
+  "Move to the first Dired line whose name PRED accepts; return nil without one."
   (goto-char (point-min))
-  (while (and (not (eobp)) (not (equal name (remoto-e2e--line-name))))
+  (while (and (not (eobp)) (not (funcall pred (remoto-e2e--line-name))))
     (forward-line 1))
-  (when (eobp)
+  (not (eobp)))
+
+(defun remoto-e2e-goto (name)
+  "Move to the Dired line of NAME, as a person would look for it.
+The line of a gist of one file holds ID/NAME, its id out of sight."
+  (interactive "sLine: ")
+  (unless (or (remoto-e2e--goto-line (lambda (line) (equal name line)))
+              (remoto-e2e--goto-line (lambda (line)
+                                       (and line (string-suffix-p (concat "/" name) line)))))
     (user-error "No line %s" name)))
 
 (defun remoto-e2e--read-states (file)
@@ -311,6 +318,39 @@ An ex command line ends with RET whatever completes the file prompts."
                  (remoto-e2e--embark-buffer-cases
                   '("/cb:technomancy/" "/cb:forgejo/forgejo#" "/cb:forgejo/docs@next:/docs/")))))))
 
+(defun remoto-e2e--gist-cases (profile login name)
+  "Return the cases of PROFILE that make a secret gist of LOGIN by its file NAME.
+The first opens the name, types a line and saves; the second deletes the
+gist with D on its line.  Live only: they write to GitHub."
+  (let ((file (format "/gist:%s/%s" login name))
+        (ret (kbd "RET")))
+    (remoto-e2e--selected
+     `((,(concat "gist new " name) nil
+        ;; ESC and a key typed right after it reach a terminal Emacs as one meta key.
+        ,@(if (member profile '("evil" "evil-vertico" "full"))
+              `(,(kbd ": e SPC") ,file ,ret pause "i" "made by remoto-keys" ,(kbd "ESC")
+                pause ,(kbd ": w RET"))
+            `(,(kbd "C-x C-f") ,file submit "made by remoto-keys" ,(kbd "C-x C-s")))
+        pause "remoto-keys" ,ret pause "s" pause)
+       ;; ido's C-x d opens no listing of gists; the run deletes that gist at its end.
+       ,@(unless (equal profile "ido")
+           `((,(concat "gist D " name) nil
+              ,@(remoto-e2e--in (format "/gist:%s/" login) 'goto name ret "D" 'pause "yes" ret
+                                'pause))))))))
+
+(defun remoto-e2e--gist-refusal (method resource kept)
+  "Return why a case may not send METHOD to RESOURCE, or nil when it may.
+KEPT lists the ids of the gists the account had before the run, which no
+case writes; it is `all' for a run that makes no gist, and writes none."
+  (when (and (not (equal method "GET"))
+             (string-match "\\(?:\\`\\|/\\)gists\\(?:/\\([^/?#]+\\)\\)?\\(?:[/?#]\\|\\'\\)"
+                           resource))
+    (let ((id (match-string 1 resource)))
+      (cond ((eq kept 'all)
+             (format "remoto-keys: this run writes no gist, refused %s %s" method resource))
+            ((member id kept)
+             (format "remoto-keys: gist %s was there before the run, refused %s" id method))))))
+
 (defun remoto-e2e--tab-cases ()
   "Return the cases that complete a name with TAB."
   (mapcar (lambda (name)
@@ -356,8 +396,9 @@ takes that token's own account, which its root listing surely holds.")
        ,@(remoto-e2e--in "/gh:agzam/" 'goto "remoto.el" ret "i"))
       ("dired + in an owner listing" nil
        ,@(remoto-e2e--in "/gh:agzam/" "+" "foo" ret))
+      ;; D refuses before any question: a repository of GitHub's is read-only.
       ("dired D on a repository line" nil
-       ,@(remoto-e2e--in "/gh:agzam/" 'goto "remoto.el" ret "D" "yes" ret))
+       ,@(remoto-e2e--in "/gh:agzam/" 'goto "remoto.el" ret "D"))
       ("dired R on a repository line" nil
        ,@(remoto-e2e--in "/gh:agzam/" 'goto "remoto.el" ret "R" "renamed" ret))
       ("dired remoto-refresh in an owner listing" nil

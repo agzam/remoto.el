@@ -9,6 +9,10 @@
 ;;
 ;;; Code:
 
+;; A native compilation that a profile starts outlives the profile the run
+;; kills, and spins on with no parent.
+(setq native-comp-jit-compilation nil
+      native-comp-deferred-compilation nil)
 (setq package-user-dir (getenv "REMOTO_KEYS_ELPA"))
 (require 'package)
 (package-activate-all)
@@ -88,6 +92,30 @@ ENDPOINT); GitHub's go unprefixed, so the two compare."
 (with-eval-after-load 'url
   (advice-add 'url-retrieve-internal :before #'remoto-keys--auth-record))
 
+;;; Gists that are not the run's
+
+(defconst remoto-keys--kept-gists
+  (if-let* ((file (getenv "REMOTO_KEYS_KEEP_GISTS")))
+      (with-temp-buffer
+        (insert-file-contents file)
+        (split-string (buffer-string) "\n" t))
+    'all)
+  "The ids of the gists the account had before the run, which no case writes.
+`all' when the run makes no gist, and so writes none.")
+
+(defvar remoto-keys--refused nil
+  "The gist writes refused since the case began, newest first.")
+
+(defun remoto-keys--guard-gists (method resource &rest _)
+  "Signal a `user-error' when METHOD on RESOURCE writes a gist not the run's."
+  (when-let* ((refusal (remoto-e2e--gist-refusal method resource remoto-keys--kept-gists)))
+    (push refusal remoto-keys--refused)
+    (user-error "%s" refusal)))
+
+;; remoto sends each write through ghub-request.
+(with-eval-after-load 'ghub
+  (advice-add 'ghub-request :before #'remoto-keys--guard-gists))
+
 ;;; What the runner calls
 
 (defun remoto-keys-busy-p ()
@@ -136,7 +164,8 @@ ENDPOINT); GitHub's go unprefixed, so the two compare."
 (defun remoto-keys-mark ()
   "Begin a case where the last one ended: no requests and no messages yet."
   (setq remoto-keys--calls nil
-        remoto-keys--browsed nil)
+        remoto-keys--browsed nil
+        remoto-keys--refused nil)
   (message "")
   (setq remoto-keys--mark (with-current-buffer (messages-buffer) (point-max)))
   'mark)
@@ -191,6 +220,7 @@ ENDPOINT); GitHub's go unprefixed, so the two compare."
                                         (remoto-keys--messages))
                        :kill (car kill-ring)
                        :browsed (reverse remoto-keys--browsed)
+                       :refused (reverse remoto-keys--refused)
                        :requests (reverse remoto-keys--calls))
                  by #'cddr
                  when value append (list key value))))))

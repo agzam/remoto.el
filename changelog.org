@@ -3,6 +3,32 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [Unreleased]
+
+** Added
+- the files of your own gists save to GitHub: ~C-x C-s~ sends the file, and the echo area says "(public gist)" after a save to a public one
+- a save asks before it goes over a change made on GitHub since you opened the file: overwrite, diff or quit
+- adds ~remoto-diff-buffer-with-file~ - the buffer against the text the forge holds now; in remoto buffers a key bound to ~diff-buffer-with-file~ runs it
+- in your own gist a new name at ~C-x C-f~ opens a new file, ~C-x C-w~ writes a buffer in, and Dired's ~C~, ~R~ and ~D~, wdired, ~copy-file~, ~rename-file~ and ~delete-file~ add, rename and delete its files; a move to another gist or a local directory is a copy and a deletion
+- ~C-x C-f /gist:YOU/NAME~ opens your gist that holds the file NAME, else a new gist that its first save makes, after asking a description and secret or public; ~C-x C-w /gist:YOU/new:/NAME~ saves a buffer as a new gist
+- adds ~remoto-gist-create~ - a gist of the region, the buffer or the marked files of a Dired, its URL in the kill ring
+- ~D~ on a gist's line deletes the gist after one question that names it, and so does deleting its last file; a deletion is final, as a forge keeps no trash, and a buffer of the gist that stays says at its next save that the gist is deleted
+- adds ~remoto-gist-edit-description~
+- a token without the ~gist~ scope keeps your gists read-only, and remoto says so once, naming ~remoto-login~
+- the copy and browse commands work on a line of a listing: the repository or gist of the line, or its account
+
+** Changed
+- ~file-modes~ on a remoto file answers the modes its Dired line shows, such as 644 or 755, instead of nil
+- ~revert-buffer~ in a file of your own gist reads it from GitHub anew, and so does a visit once remoto's copy is 10 seconds old
+- completion at ~/gist:~ offers the owners of the listed gists first, then the gists
+- for source authors: ~remoto-gist-create~ is the command now; the constructor of the gist forge is ~remoto-gist--create~
+
+** Fixed
+- under ido, a name typed after ~/gist:OWNER/~ no longer lands inside the first gist of OWNER
+- ~D~ on a repository's line in a listing refuses at once with "Remoto: repository is read-only", where it asked Dired's question and then failed with "Removing old name: is a directory"
+- an upgrade of remoto in a running Emacs takes the new version's key remaps and hooks at once, with no restart
+- an error from Codeberg or another Forgejo server during the background pre-fetch of an account's repositories no longer shows "Error running timer"
+
 * [2.8.0] - 2026-11-14
 
 ** Added

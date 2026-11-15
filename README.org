@@ -15,7 +15,11 @@ Wouldn't it be nice to be able to ~C-x C-f~ and just browse any remote repo?
 
 It registers a virtual filesystem via ~file-name-handler-alist~ that translates standard file operations into calls to remote API. ~find-file~, ~dired~, tab-completion, ~dired-subtree~ - etc. seamlessly work against a remote repository.
 
-First time it was [[https://youtu.be/YV1kyVE6SvU][demoed]] at [[https://www.meetup.com/emacsatx/][Emacs ATX Meetup]] of July 2026.
+** Videos
+
+- Emacs Conf 2026 [[https://www.youtube.com/watch?v=BDn8ak-8yIs][demo]]
+
+- First time [[https://youtu.be/YV1kyVE6SvU][announcement]] of the package at [[https://www.meetup.com/emacsatx/][Emacs Central Meetup]] of July 2026.
 
 * Why
 
@@ -118,12 +122,12 @@ Auth works as on Codeberg: ~M-x remoto-login~ names each server by its host, and
 
 *** Auth
 
-Public gists need no setup. ~/gist:~ itself, which lists your gists and the ones you starred, needs your GitHub token: the same ~machine github.com~ row, or ~M-x remoto-login~. Your secret gists also need the ~gist~ scope on that token.
+Public gists need no setup. ~/gist:~ itself, which lists your gists and the ones you starred, needs your GitHub token: the same ~machine github.com~ row, or ~M-x remoto-login~. Your secret gists, and saving to any of your gists, also need the ~gist~ scope on that token. Without it your gists open read-only, and remoto says why once.
 
 *** Usage Examples
 
 #+begin_example
-C-x C-f /gist: TAB                      -> your gists, then the ones you starred
+C-x C-f /gist: TAB                      -> the owners, then your gists and the ones you starred
 C-x C-f /gist:agzam/ TAB                -> the gists of an account, by description
 C-x C-f /gist:agzam/197a63b37ce827bb95761069ffc85b3c RET -> a gist of one file opens at its file
 C-x d   /gist:agzam/1b484c2fcb109d19e2964da7282442b7 RET -> the files of a gist
@@ -132,9 +136,26 @@ C-x C-f https://gist.github.com/agzam/197a63b37ce827bb95761069ffc85b3c RET
 
 A gist's files are at ~/gist:OWNER/ID:/FILE~. Dired and completion keep the id out of sight: a gist shows its description and its file names, and a candidate says whether the gist is secret or public - an octicon when [[https://github.com/rainstormstudio/nerd-icons.el][nerd-icons]] is loaded.
 
-~M-x remoto-browse~ takes a gist's page URL, raw URL and clone URLs. The copy and browse commands give a gist's page, raw, revisions and clone URLs, and a permalink at its latest revision.
+~M-x remoto-browse~ takes a gist's page URL, raw URL and clone URLs. The copy and browse commands give a gist's page, raw, revisions and clone URLs, and a permalink at its latest revision, from a file of the gist, its Dired or its line in a listing.
 
 A gist opens at its latest revision; revisions, comments and search stay on the website.
+
+*** Editing your gists
+
+The files of your own gists open writable; ~C-x C-s~ (or ~:w~) saves the file to GitHub. 
+
+If the file changed on GitHub since you opened it, remoto asks before the save goes over it: overwrite, see the diff, or quit. ~diff-buffer-with-file~ shows it against what on GitHub. ~revert-buffer~ reads the file from GitHub anew.
+
+Pretty much everything you can do locally - crete new, renaming, deletions work seamlessly, with making changes to gists on remote.
+
+~C-x C-f~ with a new name adds a file; ~C-x C-w~ writes a buffer into a gist. Dired's ~C~ copies files in, ~R~ and ~C-x x r~ rename, ~D~ deletes, which adds a gist revision. 
+
+A gist keeps UTF-8 text only: a binary file stays read-only, and a buffer in another coding system asks for ~C-x RET f utf-8~ first. A gist is flat and holds no blank file, since GitHub would delete it: a name with a slash, a directory and an empty file are refused.
+
+*** Some useful commands
+
+- ~remoto-gist-create~ makes a gist of the region, the buffer, or the files marked in Dired, and copies its URL.
+- ~remoto-gist-edit-description~ edits the description of the gist at point.
 
 #+HTML: </details>
 
@@ -227,7 +248,7 @@ We can only imagine a world where git's transport layer gives you a browsable fi
 
 ** Limitations
 
-- Read-only. No commits, no pushes, no file modifications. You still can copy them out.
+- Repositories are read-only: no commits, no pushes, no file modifications. You still can copy files out. Your own gists are the exception (see Gists).
 - No git operations (log, blame, diff).
 - No programs run against a repository: grep, ripgrep, compile and ~project-find-regexp~ need a clone. In-buffer search (isearch, occur) works on opened files.
 - Timestamps in a repository's Dired are synthetic (the tree API has no timestamps); a listing of repositories shows their last push.
