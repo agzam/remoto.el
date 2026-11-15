@@ -704,7 +704,8 @@
  "/github:agzam/" :names
  ("." ".." ".doom.d" ".emacs.d" ".spacehammer" ".spacemacs.d"
   ".stumpwm.d" "Adv360-Pro-ZMK" "FTPSearchAndReplace" "Fennel")
- :count 145 :point "remoto.el" :messages
+ :count 145 :point "remoto.el" :error
+ "Remoto: repository is read-only" :messages
  ("Remoto: listing the first 100 repositories of agzam, fetching the rest"
   "Remoto: listed all 143 repositories of agzam")
  :requests

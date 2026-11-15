@@ -99,6 +99,11 @@ shows what GitHub holds."
   "The id of a gist still to make, at /gist:ME/new:/FILE; its first save makes it.
 No gist has that id: GitHub's ids are hex or digits.")
 
+(defvar remoto-gist--gone (make-hash-table :test 'equal)
+  "The ids of the gists remoto deleted, which GitHub never uses again.
+Their buffers may live on, and timers ask about their files: such a file
+exists no more, as a deleted local file, and none of its questions errs.")
+
 (defun remoto-gist--get (forge owner id &optional max-age)
   "Return the gist ID on FORGE, as gists/ID answers it, cached.
 OWNER nil takes the gist's own; another owner than the gist's finds
@@ -106,6 +111,7 @@ none, as on the gist site.  An answer older than MAX-AGE seconds is
 asked for again.  The gist still to make has no files."
   (let ((gist (cond ((equal id remoto-gist--new)
                      `((id . ,id) (owner (login . ,owner)) (files)))
+                    ((gethash id remoto-gist--gone) nil)
                     ((and (not (remoto-gist--stale-p id max-age))
                           (gethash id remoto-gist--gists)))
                     ((when-let* ((answer (remoto--api forge (concat "gists/"
@@ -183,11 +189,13 @@ The request ends as every request does when its host sends nothing."
 
 (cl-defmethod remoto-forge-tree ((forge remoto-gist) owner id _ref)
   "The files of the gist ID of OWNER on FORGE, one flat tree.
-The language of a file is its note."
+The language of a file is its note.  A gist remoto deleted has none."
   (let ((table (make-hash-table :test 'equal)))
     (puthash "" remoto--dir-entry table)
     (puthash "/" remoto--dir-entry table)
-    (dolist (file (remoto-gist--files (remoto-gist--known forge owner id)) table)
+    (dolist (file (unless (gethash id remoto-gist--gone)
+                    (remoto-gist--files (remoto-gist--known forge owner id)))
+                  table)
       (puthash (car file)
                `((type . "blob") (size . ,(or (alist-get 'size (cdr file)) 0))
                  (sha . "") (mode . "100644")
@@ -356,11 +364,13 @@ gist deletes %s" path))
 They are of its account, and it has the gist scope."
   (and (remoto-gist--mine-p forge owner) (remoto-gist--scoped-p forge)))
 
-(cl-defmethod remoto--forge-read-only-why ((forge remoto-gist) owner _id)
-  "The gists of OWNER, the token's account on FORGE, need the gist scope."
-  (when (and (remoto-gist--mine-p forge owner) (not (remoto-gist--scoped-p forge)))
-    (concat "Remoto: the GitHub token has no gist scope, so your gists stay read-only"
-            (remoto--login-tail))))
+(cl-defmethod remoto--forge-read-only-why ((forge remoto-gist) owner id)
+  "The gists of OWNER, the token's account on FORGE, need the gist scope.
+The gist ID that remoto deleted takes no write at all."
+  (cond ((gethash id remoto-gist--gone) (format "Remoto: the gist %s is deleted" id))
+        ((and (remoto-gist--mine-p forge owner) (not (remoto-gist--scoped-p forge)))
+         (concat "Remoto: the GitHub token has no gist scope, so your gists stay read-only"
+                 (remoto--login-tail)))))
 
 (defun remoto-gist--check-writer (forge owner)
   "Refuse unless the token of FORGE may write the gists of OWNER."
@@ -371,7 +381,7 @@ They are of its account, and it has the gist scope."
 (cl-defmethod remoto--forge-writable-p ((forge remoto-gist) owner id _ref path)
   "A gist of the token's account on FORGE is writable, its binary files aside.
 OWNER and ID name the gist, PATH the file; the token needs the gist scope."
-  (and id (remoto-gist--writer-p forge owner)
+  (and id (not (gethash id remoto-gist--gone)) (remoto-gist--writer-p forge owner)
        (not (remoto-gist--binary-p id path))))
 
 (cl-defmethod remoto--forge-check-write ((_forge remoto-gist) _owner id _ref path bytes)
@@ -502,6 +512,7 @@ OWNER and ID name the gist."
 Its lines leave the cached listings and its Dired buffers revert no more."
   (remoto-gist--check-writer forge owner)
   (remoto--api-write forge "DELETE" (concat "gists/" (url-hexify-string id)))
+  (puthash id t remoto-gist--gone)
   (remoto-gist--relist forge id nil)
   (remhash (downcase (remoto--repo-id forge owner id)) remoto--entry-cache)
   (remoto-forge-forget forge owner id)

@@ -3641,16 +3641,26 @@ user delete it.  A forge that refuses signals its refusal."
 (defun remoto--dired-delete (command files arg)
   "Run the Dired deletion COMMAND with ARG on FILES, repositories among them.
 Those go after one question, which names each as its forge does; Dired's
-own would name ids.  Dired asks too when FILES hold more than those."
-  (if-let* ((repos (seq-keep #'remoto--deletion-repo files)))
-      (progn
-        (remoto--agree-to-delete repos)
-        (let ((remoto--deletion-agreed repos)
-              (dired-deletion-confirmer (if (length= files (length repos))
-                                            #'always
-                                          dired-deletion-confirmer)))
-          (funcall command arg)))
-    (funcall command arg)))
+own would name ids.  Dired asks too when FILES hold more than those.  A
+file the user may not delete refuses them all, before any question."
+  (when-let* ((kept (seq-find (lambda (file)
+                                (not (or (remoto--deletion-repo file)
+                                         (remoto--write-target file))))
+                              files)))
+    (remoto--refuse-write kept))
+  ;; A forge keeps no trash, so Dired says that FILES go for good.
+  (let ((delete-by-moving-to-trash
+         (and delete-by-moving-to-trash
+              (not (string-match-p remoto--handler-regexp default-directory)))))
+    (if-let* ((repos (seq-keep #'remoto--deletion-repo files)))
+        (progn
+          (remoto--agree-to-delete repos)
+          (let ((remoto--deletion-agreed repos)
+                (dired-deletion-confirmer (if (length= files (length repos))
+                                              #'always
+                                            dired-deletion-confirmer)))
+            (funcall command arg)))
+      (funcall command arg))))
 
 (defun remoto-dired-do-delete (&optional arg)
   "Delete the marked files, or the next ARG, as `dired-do-delete' does.

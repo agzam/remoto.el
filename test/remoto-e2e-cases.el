@@ -396,8 +396,9 @@ takes that token's own account, which its root listing surely holds.")
        ,@(remoto-e2e--in "/gh:agzam/" 'goto "remoto.el" ret "i"))
       ("dired + in an owner listing" nil
        ,@(remoto-e2e--in "/gh:agzam/" "+" "foo" ret))
+      ;; D refuses before any question: a repository of GitHub's is read-only.
       ("dired D on a repository line" nil
-       ,@(remoto-e2e--in "/gh:agzam/" 'goto "remoto.el" ret "D" "yes" ret))
+       ,@(remoto-e2e--in "/gh:agzam/" 'goto "remoto.el" ret "D"))
       ("dired R on a repository line" nil
        ,@(remoto-e2e--in "/gh:agzam/" 'goto "remoto.el" ret "R" "renamed" ret))
       ("dired remoto-refresh in an owner listing" nil

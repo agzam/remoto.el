@@ -14081,6 +14081,7 @@ buffers are killed after."
              (remoto-gist--gists (make-hash-table :test 'equal))
              (remoto-gist--listed (make-hash-table :test 'equal))
              (remoto-gist--fetched (make-hash-table :test 'equal))
+             (remoto-gist--gone (make-hash-table :test 'equal))
              (remoto--logins (remoto-test--logins :user "me" :token "ghp_me"))
              (,before (buffer-list)))
          (remoto-test--stored-gist "0a1b" "me" t "a.sh" "echo a\n" "b.sh" "echo b\n")
@@ -14678,6 +14679,23 @@ buffers are killed after."
                         (remoto--listing-entries (gethash "/gist:me/" remoto--listing-cache)))
                 :to-equal '("0a1b")))))
 
+  (it "goes for good, as Dired says, where Emacs moves deleted files to the trash"
+    (remoto-test-with-store
+      (remoto-test--list-store "0a1b" "0c3d")
+      (spy-on 'yes-or-no-p :and-return-value t)
+      (spy-on 'make-progress-reporter :and-call-through)
+      (let ((delete-by-moving-to-trash t))
+        (with-current-buffer (dired-noselect "/gist:me/")
+          (remoto-mode 1)
+          (goto-char (point-min))
+          (re-search-forward "s\\.txt")
+          (call-interactively (command-remapping 'dired-do-delete))))
+      (expect (gethash "0c3d" remoto-test--store) :to-be nil)
+      (expect (mapcar #'car (spy-calls-all-args 'make-progress-reporter))
+              :to-contain "Deleting...")
+      (expect (mapcar #'car (spy-calls-all-args 'make-progress-reporter))
+              :not :to-contain "Trashing...")))
+
   (it "goes, several of them, after one question that lists them all"
     (remoto-test-with-store
       (remoto-test--list-store "0a1b" "0c3d")
@@ -14748,6 +14766,42 @@ buffers are killed after."
         (expect (buffer-live-p dired) :to-be nil)
         (expect (buffer-live-p edited) :to-be t))))
 
+  (it "leaves to the buffers it keeps a file that exists no more, which no question errs on"
+    (remoto-test-with-store
+      (spy-on 'yes-or-no-p :and-return-value t)
+      (let ((file "/gist:me/0a1b:/a.sh")
+            (answers nil))
+        (find-file-noselect file)
+        ;; A timer asks about the file while the question about its buffer waits.
+        (spy-on 'y-or-n-p :and-call-fake
+                (lambda (&rest _)
+                  (push (condition-case err
+                            (mapcar (lambda (predicate) (funcall predicate file))
+                                    '(file-exists-p file-readable-p file-regular-p
+                                      file-directory-p file-attributes file-writable-p))
+                          (error (list 'signals (error-message-string err))))
+                        answers)
+                  nil))
+        (delete-directory "/gist:me/0a1b:/" t)
+        (expect answers :to-equal '((nil nil nil nil nil nil)))
+        (let ((gets (remoto-test--gets "0a1b")))
+          (expect (file-exists-p file) :to-be nil)
+          (expect (remoto-test--gets "0a1b") :to-equal gets)))))
+
+  (it "refuses a save of a buffer it kept, saying the gist is deleted"
+    (remoto-test-with-store
+      (spy-on 'yes-or-no-p :and-return-value t)
+      (spy-on 'y-or-n-p :and-return-value nil)
+      (with-current-buffer (find-file-noselect "/gist:me/0a1b:/a.sh")
+        (delete-directory "/gist:me/0a1b:/" t)
+        (goto-char (point-max))
+        (insert "x\n")
+        (expect (condition-case err (progn (write-region nil nil buffer-file-name) 'written)
+                  (user-error (cadr err)))
+                :to-equal "Remoto: the gist 0a1b is deleted")
+        (expect (mapcar #'cdr (spy-calls-all-args 'remoto--api-write))
+                :to-equal '(("DELETE" "gists/0a1b"))))))
+
   (it "kills the buffer the deletion runs in once the command is over"
     (remoto-test-with-store
       (spy-on 'yes-or-no-p :and-return-value t)
@@ -14790,7 +14844,22 @@ buffers are killed after."
   (it "leaves a line or the only file of a GitHub repository to Dired"
     (remoto-test-with-listings
       (expect (remoto--deletion-repo "/github:me/zeta") :to-be nil)
-      (expect (remoto--deletion-repo "/github:me/zeta@main:/README.md") :to-be nil))))
+      (expect (remoto--deletion-repo "/github:me/zeta@main:/README.md") :to-be nil)))
+
+  (it "lets D refuse a line of a GitHub repository before any question, as read-only"
+    (remoto-test-with-listings
+      (spy-on 'yes-or-no-p)
+      (spy-on 'dired-mark-pop-up)
+      (spy-on 'delete-file)
+      (with-current-buffer (dired-noselect "/github:me/")
+        (remoto-mode 1)
+        (expect (dired-goto-file "/github:me/zeta") :to-be-truthy)
+        (expect (condition-case err (call-interactively (command-remapping 'dired-do-delete))
+                  (user-error (cadr err)))
+                :to-equal "Remoto: repository is read-only"))
+      (expect 'yes-or-no-p :not :to-have-been-called)
+      (expect 'dired-mark-pop-up :not :to-have-been-called)
+      (expect 'delete-file :not :to-have-been-called))))
 
 (describe "remoto-gist-edit-description"
   (it "sends the description alone, in one PATCH, and the listings show it"
