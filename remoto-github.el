@@ -445,17 +445,21 @@ so it never blocks typing."
            0.001 nil
            (lambda ()
              (setq remoto--prefetch-timer nil)
-             (remoto--api-async
-              forge
-              (remoto--repo-search-endpoint forge owner "" 30)
-              (lambda (data)
-                (let ((repos (mapcar
-                              (lambda (item)
-                                (propertize (alist-get 'name item)
-                                            'remoto-repo-desc
-                                            (or (alist-get 'description item) "")))
-                              (remoto--search-items forge data))))
-                  (remoto--search-cache-put cache-key repos)))))))))
+             ;; Forgejo's endpoint asks for the owner's id first.  A failure of
+             ;; that request drops the prefetch, which nothing waits for.
+             (condition-case nil
+                 (remoto--api-async
+                  forge
+                  (remoto--repo-search-endpoint forge owner "" 30)
+                  (lambda (data)
+                    (let ((repos (mapcar
+                                  (lambda (item)
+                                    (propertize (alist-get 'name item)
+                                                'remoto-repo-desc
+                                                (or (alist-get 'description item) "")))
+                                  (remoto--search-items forge data))))
+                      (remoto--search-cache-put cache-key repos))))
+               (user-error nil)))))))
 
 (defun remoto--recent-owner-repos (forge owner)
   "Return cached recent repos for OWNER on FORGE, scheduling async refresh.

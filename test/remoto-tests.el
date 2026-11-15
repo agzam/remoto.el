@@ -6835,6 +6835,21 @@ At the level of OWNER, or at the root without OWNER."
     (remoto--handle-file-name-all-completions "tor" "/github:")
     (expect 'remoto--prefetch-owner-repos :to-have-been-called-with remoto--github "torvalds"))
 
+  (it "drops a pre-fetch whose owner lookup fails, with no error in its timer"
+    ;; Forgejo asks users/OWNER for the id before the search; Codeberg answered 502.
+    (let ((remoto--prefetch-timer nil)
+          (remoto-forgejo--accounts (make-hash-table :test 'equal))
+          (timer-fn nil))
+      (spy-on 'run-with-idle-timer :and-call-fake
+              (lambda (_secs _repeat fn &rest _) (setq timer-fn fn) 'timer))
+      (spy-on 'remoto--api :and-call-fake
+              (lambda (&rest _) (user-error "Remoto: codeberg.org/api/v1 answered 502 Bad gateway for users/forgejo")))
+      (spy-on 'remoto--api-async)
+      (remoto--prefetch-owner-repos remoto--codeberg "forgejo")
+      (expect (funcall timer-fn) :to-be nil)
+      (expect 'remoto--api-async :not :to-have-been-called)
+      (expect remoto--prefetch-timer :to-be nil)))
+
   (it "returns nil for empty user query"
     (spy-on 'run-with-idle-timer)
     (let* ((remoto--logins (remoto-test--logins))
