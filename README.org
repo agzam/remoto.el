@@ -144,9 +144,9 @@ A gist opens at its latest revision; revisions, comments and search stay on the 
 
 The files of your own gists open writable; ~C-x C-s~ (or ~:w~) saves the file to GitHub. 
 
-If the file changed on GitHub since you opened it, remoto asks before the save goes over it: overwrite, see the diff, or quit. ~diff-buffer-with-file~ shows it against what on GitHub. ~revert-buffer~ reads the file from GitHub anew.
+If the file changed on GitHub since you opened it, remoto asks before the save goes over it: overwrite, see the diff, or quit. ~diff-buffer-with-file~ shows it against what's on GitHub. ~revert-buffer~ reads the file from GitHub anew.
 
-Pretty much everything you can do locally - crete new, renaming, deletions work seamlessly, with making changes to gists on remote.
+Pretty much everything you can do locally - create new, renaming, deletions work seamlessly, with making changes to gists on remote.
 
 ~C-x C-f~ with a new name adds a file; ~C-x C-w~ writes a buffer into a gist. Dired's ~C~ copies files in, ~R~ and ~C-x x r~ rename, ~D~ deletes, which adds a gist revision. 
 
