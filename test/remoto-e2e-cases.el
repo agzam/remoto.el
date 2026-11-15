@@ -326,9 +326,10 @@ gist with D on its line.  Live only: they write to GitHub."
         (ret (kbd "RET")))
     (remoto-e2e--selected
      `((,(concat "gist new " name) nil
+        ;; ESC and a key typed right after it reach a terminal Emacs as one meta key.
         ,@(if (member profile '("evil" "evil-vertico" "full"))
               `(,(kbd ": e SPC") ,file ,ret pause "i" "made by remoto-keys" ,(kbd "ESC")
-                ,(kbd ": w RET"))
+                pause ,(kbd ": w RET"))
             `(,(kbd "C-x C-f") ,file submit "made by remoto-keys" ,(kbd "C-x C-s")))
         pause "remoto-keys" ,ret pause "s" pause)
        ;; ido's C-x d opens no listing of gists; the run deletes that gist at its end.
@@ -336,6 +337,19 @@ gist with D on its line.  Live only: they write to GitHub."
            `((,(concat "gist D " name) nil
               ,@(remoto-e2e--in (format "/gist:%s/" login) 'goto name ret "D" 'pause "yes" ret
                                 'pause))))))))
+
+(defun remoto-e2e--gist-refusal (method resource kept)
+  "Return why a case may not send METHOD to RESOURCE, or nil when it may.
+KEPT lists the ids of the gists the account had before the run, which no
+case writes; it is `all' for a run that makes no gist, and writes none."
+  (when (and (not (equal method "GET"))
+             (string-match "\\(?:\\`\\|/\\)gists\\(?:/\\([^/?#]+\\)\\)?\\(?:[/?#]\\|\\'\\)"
+                           resource))
+    (let ((id (match-string 1 resource)))
+      (cond ((eq kept 'all)
+             (format "remoto-keys: this run writes no gist, refused %s %s" method resource))
+            ((member id kept)
+             (format "remoto-keys: gist %s was there before the run, refused %s" id method))))))
 
 (defun remoto-e2e--tab-cases ()
   "Return the cases that complete a name with TAB."
