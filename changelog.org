@@ -3,7 +3,7 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
-* [Unreleased]
+* [2.9.0] - 2026-11-15
 
 ** Added
 - the files of your own gists save to GitHub: ~C-x C-s~ sends the file, and the echo area says "(public gist)" after a save to a public one
