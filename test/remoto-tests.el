@@ -11492,6 +11492,8 @@ of `completion-all-completions'; Vertico inserts a candidate as
     (expect (advice-member-p #'remoto--every-file-a 'project-search) :to-be-truthy)
     (expect (advice-member-p #'remoto--every-file-a 'project-query-replace-regexp)
             :to-be-truthy)
+    (expect (advice-member-p #'remoto--runs-a 'magit-gha-badge-runs) :to-be-truthy)
+    (expect (fboundp 'magit-gha-badge-runs) :to-be nil)
     (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be-truthy)
     (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be-truthy)
     (expect (memq 'remoto--maybe-enable-mode after-set-visited-file-name-hook) :to-be-truthy)
@@ -11517,6 +11519,7 @@ of `completion-all-completions'; Vertico inserts a candidate as
           (expect (advice-member-p #'remoto--every-file-a 'project-search) :to-be nil)
           (expect (advice-member-p #'remoto--every-file-a 'project-query-replace-regexp)
                   :to-be nil)
+          (expect (advice-member-p #'remoto--runs-a 'magit-gha-badge-runs) :to-be nil)
           (expect (memq 'remoto--maybe-enable-mode find-file-hook) :to-be nil)
           (expect (memq 'remoto--maybe-enable-mode dired-mode-hook) :to-be nil)
           (expect (memq 'remoto--maybe-enable-mode after-set-visited-file-name-hook) :to-be nil)
@@ -11662,6 +11665,179 @@ of `completion-all-completions'; Vertico inserts a candidate as
                     :to-be 'ran))
         (setopt remoto-inhibited-functions '(remoto-test--tool))
         (fmakunbound 'remoto-test--later)))))
+
+;;; Workflow runs
+
+(defconst remoto-test--runs-file "/github:testowner/testrepo@main:/src/main.el"
+  "A file of the mock tree, for the buffers the specs of the runs visit.")
+
+(describe "remoto--runs-args"
+  (it "names the repository and the branch of a file"
+    (with-temp-buffer
+      (setq-local buffer-file-name remoto-test--runs-file)
+      (expect (remoto--runs-args) :to-equal '("testowner" "testrepo" (ref . "main")))))
+
+  (it "names a commit only by its full hash, and a branch with a slash by its name"
+    (with-temp-buffer
+      (let ((hash (make-string 40 ?a)))
+        (setq-local buffer-file-name (format "/github:o/r@%s:/x.el" hash))
+        (expect (remoto--runs-args) :to-equal `("o" "r" (sha . ,hash)))
+        (setq-local buffer-file-name (format "/github:o/r@%s:/x.el" (substring hash 1)))
+        (expect (remoto--runs-args) :to-equal `("o" "r" (ref . ,(substring hash 1)))))
+      (setq-local buffer-file-name "/github:o/r@feature/x:/x.el")
+      (expect (remoto--runs-args) :to-equal '("o" "r" (ref . "feature/x")))))
+
+  (it "names no ref for a name without one"
+    (with-temp-buffer
+      (setq-local buffer-file-name "/github:o/r:/x.el")
+      (expect (remoto--runs-args) :to-equal '("o" "r" nil))))
+
+  (it "names the repository of a Dired directory"
+    (with-temp-buffer
+      (dired-mode)
+      (setq-local dired-directory "/github:testowner/testrepo@main:/src/")
+      (spy-on 'dired-get-filename :and-return-value nil)
+      (expect (remoto--runs-args) :to-equal '("testowner" "testrepo" (ref . "main")))))
+
+  (it "names the repository of the line at point in a listing of repositories"
+    (with-temp-buffer
+      (dired-mode)
+      (setq-local dired-directory "/github:testowner/")
+      (spy-on 'dired-get-filename :and-return-value "/github:testowner/testrepo")
+      (expect (remoto--runs-args) :to-equal '("testowner" "testrepo" nil))))
+
+  (it "names the ref of the line at point in a listing of branches and tags"
+    (with-temp-buffer
+      (dired-mode)
+      (setq-local dired-directory '("/github:o/r@" "/github:o/r@v1.2"))
+      (spy-on 'dired-get-filename :and-return-value "/github:o/r@v1.2")
+      (expect (remoto--runs-args) :to-equal '("o" "r" (ref . "v1.2")))))
+
+  (it "names the directory when the line at point names no repository"
+    ;; The .. line of a root names the account.
+    (with-temp-buffer
+      (dired-mode)
+      (setq-local dired-directory "/github:testowner/testrepo@main:/")
+      (spy-on 'dired-get-filename :and-return-value "/github:testowner/testrepo@main:/..")
+      (expect (remoto--runs-args) :to-equal '("testowner" "testrepo" (ref . "main")))))
+
+  (it "names nothing in a listing with point on no repository"
+    (with-temp-buffer
+      (dired-mode)
+      (setq-local dired-directory "/github:testowner/")
+      (spy-on 'dired-get-filename :and-return-value "/github:testowner/..")
+      (expect (remoto--runs-args) :to-be nil)))
+
+  (it "names the head commit of a pull request, and no ref for an issue"
+    (remoto--require-topic)
+    (with-temp-buffer
+      (let ((head (make-string 40 ?b)))
+        (setq-local remoto-topic--repo-path "/github:o/r"
+                    remoto-topic--data `((number . 7) (head . ((ref . "fix") (sha . ,head)))))
+        (expect (remoto--runs-args) :to-equal `("o" "r" (sha . ,head))))
+      (setq-local remoto-topic--data '((number . 3) (title . "A bug")))
+      (expect (remoto--runs-args) :to-equal '("o" "r" nil))))
+
+  (it "names nothing off GitHub and outside remoto"
+    (dolist (name '("/codeberg:o/r@main:/x.el" "/gist:me/0a1b:/x.sh" "/home/me/x.el" nil))
+      (with-temp-buffer
+        (setq-local buffer-file-name name)
+        (expect (remoto--runs-args) :to-be nil))))
+
+  (it "names nothing in a buffer that only sits in a remoto directory"
+    ;; A buffer of runs opened from a remoto buffer keeps naming its own.
+    (with-temp-buffer
+      (setq default-directory "/github:o/r@main:/src/")
+      (expect (remoto--runs-args) :to-be nil))))
+
+(defvar remoto-test--runs-calls nil
+  "The argument lists that the stand-in for `magit-gha-badge-runs' got.")
+
+(defmacro remoto-test-with-runs-command (&rest body)
+  "Run BODY with a stand-in for `magit-gha-badge-runs' that records its calls.
+As a command it reads \"asked\" twice, where the package reads a repository."
+  (declare (indent 0))
+  `(unwind-protect
+       (progn
+         (setq remoto-test--runs-calls nil)
+         (defalias 'magit-gha-badge-runs
+           (lambda (&rest args)
+             (interactive (list "asked" "asked"))
+             (push args remoto-test--runs-calls)))
+         ,@body)
+     (fmakunbound 'magit-gha-badge-runs)
+     (global-remoto-mode 1)))
+
+(describe "magit-gha-badge-runs in a remoto buffer"
+  ;; The package is no dependency: the suite runs without it, the mode on.
+  (it "shows the runs of the repository of the buffer"
+    (remoto-test-with-runs-command
+      (with-temp-buffer
+        (setq-local buffer-file-name remoto-test--runs-file)
+        (call-interactively #'magit-gha-badge-runs))
+      (expect remoto-test--runs-calls
+              :to-equal '(("testowner" "testrepo" (ref . "main"))))))
+
+  (it "reads a repository as it does elsewhere, given a prefix argument"
+    (remoto-test-with-runs-command
+      (with-temp-buffer
+        (setq-local buffer-file-name remoto-test--runs-file)
+        (let ((current-prefix-arg '(4)))
+          (call-interactively #'magit-gha-badge-runs)))
+      (expect remoto-test--runs-calls :to-equal '(("asked" "asked")))))
+
+  (it "stays as it is outside remoto and off GitHub"
+    (remoto-test-with-runs-command
+      (dolist (name '("/home/me/x.el" "/codeberg:o/r@main:/x.el"))
+        (with-temp-buffer
+          (setq-local buffer-file-name name)
+          (call-interactively #'magit-gha-badge-runs)))
+      (expect remoto-test--runs-calls
+              :to-equal '(("asked" "asked") ("asked" "asked")))))
+
+  (it "takes the arguments of a call from Lisp as they are"
+    (remoto-test-with-runs-command
+      (with-temp-buffer
+        (setq-local buffer-file-name remoto-test--runs-file)
+        (magit-gha-badge-runs "o" "r" '(run . 7) 9))
+      (expect remoto-test--runs-calls :to-equal '(("o" "r" (run . 7) 9)))))
+
+  (it "stays as it is while the mode is off, a command defined before it turns on too"
+    (remoto-test-with-runs-command
+      (unwind-protect
+          (with-temp-buffer
+            (setq-local buffer-file-name remoto-test--runs-file)
+            (global-remoto-mode -1)
+            (call-interactively #'magit-gha-badge-runs)
+            (expect remoto-test--runs-calls :to-equal '(("asked" "asked")))
+            (global-remoto-mode 1)
+            (call-interactively #'magit-gha-badge-runs)
+            (expect (car remoto-test--runs-calls)
+                    :to-equal '("testowner" "testrepo" (ref . "main"))))
+        (global-remoto-mode 1))))
+
+  (it "waits for a command that is still an autoload, and loads it only when called"
+    (let ((file (make-temp-file "remoto-runs" nil ".el")))
+      (unwind-protect
+          (progn
+            (with-temp-file file
+              (insert ";;; -*- lexical-binding: t -*-\n")
+              (prin1 '(defun magit-gha-badge-runs (&rest args)
+                        (interactive (list "asked" "asked"))
+                        (push args remoto-test--runs-calls))
+                     (current-buffer)))
+            (setq remoto-test--runs-calls nil)
+            (autoload 'magit-gha-badge-runs file nil t)
+            (global-remoto-mode 1)
+            (expect (autoloadp (symbol-function 'magit-gha-badge-runs)) :to-be t)
+            (with-temp-buffer
+              (setq-local buffer-file-name remoto-test--runs-file)
+              (call-interactively #'magit-gha-badge-runs))
+            (expect remoto-test--runs-calls
+                    :to-equal '(("testowner" "testrepo" (ref . "main")))))
+        (fmakunbound 'magit-gha-badge-runs)
+        (global-remoto-mode 1)
+        (delete-file file)))))
 
 ;;; project.el
 

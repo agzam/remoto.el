@@ -5775,6 +5775,46 @@ argument, or several remotes and none tracked, asks for the remote."
          (remoto--find-file-in (remoto--forge-refs-directory pick)))
         (t (remoto--find-file-in (remoto--forge-directory pick)))))
 
+;;;; Workflow runs
+
+(defun remoto--runs-root (name)
+  "Return the `remoto-path' of the repository on GitHub that NAME is in.
+Nil for a nil NAME, and for one that names no repository there."
+  (when-let* ((name)
+              (parsed (remoto--parse (expand-file-name name)))
+              (root (or (remoto--repo-root parsed) parsed))
+              ((eq (remoto-path-forge root) remoto--github))
+              ((remoto-path-repo root)))
+    root))
+
+(defun remoto--runs-args ()
+  "Return (OWNER REPO TARGET) as `magit-gha-badge-runs' takes them, or nil.
+They name the repository on GitHub of this buffer: of its file, of the
+Dired entry at point or else the directory, of its issue.  TARGET names
+the ref of that name, or the head commit of a pull request."
+  (when-let* ((names (if (derived-mode-p 'dired-mode)
+                         (list (dired-get-filename nil t)
+                               (car (ensure-list dired-directory)))
+                       (list (bound-and-true-p remoto-topic--repo-path)
+                             buffer-file-name)))
+              (root (seq-some #'remoto--runs-root names)))
+    (list (remoto-path-owner root) (remoto-path-repo root)
+          (and-let* ((ref (or (thread-last (bound-and-true-p remoto-topic--data)
+                                           (alist-get 'head)
+                                           (alist-get 'sha))
+                              (remoto-path-ref root))))
+            (cons (if (string-match-p (rx bos (= 40 hex) eos) ref) 'sha 'ref)
+                  ref)))))
+
+(defun remoto--runs-a (function &rest args)
+  "Call FUNCTION, the command `magit-gha-badge-runs', with ARGS.
+As a command in a remoto buffer it shows the runs of that repository.  A
+prefix argument, or a buffer that names none on GitHub, leaves it as it is."
+  (interactive (lambda (spec)
+                 (or (and (not current-prefix-arg) (remoto--runs-args))
+                     (advice-eval-interactive-spec spec))))
+  (apply function args))
+
 ;;;; Global mode
 
 (defun remoto--drop-autoload-handler ()
@@ -5800,6 +5840,8 @@ Each step is idempotent, so a second call while on is a no-op."
               #'remoto--read-file-name-internal-a)
   (advice-add 'project-search :around #'remoto--every-file-a)
   (advice-add 'project-query-replace-regexp :around #'remoto--every-file-a)
+  ;; magit-gha-badge is no dependency: the advice waits for the command.
+  (advice-add 'magit-gha-badge-runs :around #'remoto--runs-a)
   (remoto--sync-inhibited remoto-inhibited-functions)
   (add-hook 'find-file-hook #'remoto--maybe-enable-mode)
   (add-hook 'dired-mode-hook #'remoto--maybe-enable-mode)
@@ -5824,6 +5866,7 @@ Each step is idempotent, so a second call while on is a no-op."
   (advice-remove 'read-file-name-internal #'remoto--read-file-name-internal-a)
   (advice-remove 'project-search #'remoto--every-file-a)
   (advice-remove 'project-query-replace-regexp #'remoto--every-file-a)
+  (advice-remove 'magit-gha-badge-runs #'remoto--runs-a)
   (remoto--sync-inhibited nil)
   (remove-hook 'find-file-hook #'remoto--maybe-enable-mode)
   (remove-hook 'dired-mode-hook #'remoto--maybe-enable-mode)

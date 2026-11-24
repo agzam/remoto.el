@@ -215,6 +215,10 @@ Optional [[https://github.com/oantolin/embark][Embark]] integration, which is no
 
 Each target type has its own keymap of actions. Run ~embark-act~ on a target to see its actions and keys. Cloning honors ~remoto-clone-url-type~ and opens the clone's Magit status buffer when it finishes. Embark's built-in ~url~ target gains ~R~ to open a forge URL at point.
 
+*** GitHub Actions
+
+For workflow runs there is [[https://github.com/agzam/magit-gha-badge.el][magit-gha-badge]], which shows the runs of a repository with their jobs, steps and logs in a buffer. It is not a dependency. When it is installed, ~M-x magit-gha-badge-runs~ in a remoto buffer opens the runs of that repository at the branch or commit of the buffer, without a prompt. In a pull request it opens the runs of the pull request; on a line of a listing of repositories, the runs of that repository. It asks GitHub with a token of its own, set up as its README says.
+
 ** How does it all work
 
 1. On first access to any file in a repo, the full directory tree is fetched via the Git Trees API (one HTTP call).

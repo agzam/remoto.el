@@ -3,6 +3,13 @@
 
 Changes to the project, following Keep a Changelog conventions.
 
+* [Unreleased]
+
+** Added
+- ~M-x magit-gha-badge-runs~, the command of the magit-gha-badge package, works in remoto buffers: it opens the workflow runs of the buffer's repository at its branch or commit, with no prompt
+- in a pull request it opens the runs of the pull request, and on a repository's line in a listing those of that repository
+- magit-gha-badge is not a dependency: without it remoto is as before
+
 * [2.9.1] - 2026-11-15
 
 ** Fixed
